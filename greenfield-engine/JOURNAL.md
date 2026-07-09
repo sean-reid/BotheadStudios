@@ -5,6 +5,28 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — Live real-Sun lighting, selectable focus frame, scene picker
+
+**What.** Wired the real Sun into the *live* space band (following the validated physics): the demo now
+simulates `[Sun, Earth, Moon]` with the Earth on its true ~29.78 km/s heliocentric orbit and the Moon
+co-moving. The shader's light direction is now computed per-body **from the Sun's actual position** (no
+more hardcoded direction), so the lit hemisphere and the Moon's phases are geometric. The Sun isn't
+drawn at this zoom (~23,000 display units off-frame) — it is the *light source*, the scale-adaptive
+choice (`docs/17`). Added a **focus control**: the viewport is a physical frame of reference
+(`cycle_focus` / `focus_label`), re-centring the whole view on Earth or the Moon. And a **scene picker**
+(`web/src/scene-nav.ts`) injected on both pages to switch between the terrain slice and the space band.
+
+**Why.** Robin's direction: a real Sun should light the system (not a fake light), the viewport is a
+physical frame of reference with a selectable focus, and the app should let you choose between scenes.
+All three are honest, emergent-from-real-state changes (`docs/17`).
+
+**Verified.** `cargo test` 29/29; clippy `-D warnings` clean; `cargo fmt` clean; wasm builds and
+`tsc --noEmit` passes (focus + scene-nav bindings). **Visuals pending Robin's on-device check** —
+headless WebGPU can't render here, so the appearance of the sun-lit bodies and the focus/scene UI is
+for iPad confirmation.
+
+---
+
 ## 2026-07-09 — Honest appearance: no painted tints, brightness from light, a real Sun
 
 **What.** A user play-test of the space band exposed fudging: the Earth was a hardcoded ocean-blue

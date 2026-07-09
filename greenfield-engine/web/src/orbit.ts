@@ -6,6 +6,7 @@
 // console-less device (iPad) can still be debugged.
 
 import init, { OrbitDemo } from "./wasm/engine.js";
+import "./scene-nav";
 
 // --- Log relay: mirror console + global errors to the dev server ---
 function report(level: string, msg: string): void {
@@ -88,6 +89,34 @@ async function main(): Promise<void> {
     if (stats) stats.hidden = false;
     report("info", "orbit demo created OK");
 
+    // --- Focus control: the viewport is a physical frame of reference (docs/17). Tap to re-centre
+    // the whole view on the Earth or the Moon. ---
+    const focusBtn = document.createElement("button");
+    const refreshFocusLabel = (): void => {
+      focusBtn.textContent = `Focus: ${demo.focus_label()} ⇄`;
+    };
+    Object.assign(focusBtn.style, {
+      position: "fixed",
+      left: "12px",
+      bottom: "12px",
+      zIndex: "10",
+      padding: "10px 14px",
+      font: "600 15px/1 system-ui, sans-serif",
+      color: "#fff",
+      background: "rgba(20,24,40,0.72)",
+      border: "1px solid rgba(255,255,255,0.25)",
+      borderRadius: "10px",
+      backdropFilter: "blur(6px)",
+      cursor: "pointer",
+      touchAction: "manipulation",
+    });
+    refreshFocusLabel();
+    focusBtn.addEventListener("click", () => {
+      demo.cycle_focus();
+      refreshFocusLabel();
+    });
+    document.body.appendChild(focusBtn);
+
     window.addEventListener("resize", () => {
       sizeCanvas(canvas);
       demo.resize(canvas.width, canvas.height);
@@ -162,8 +191,8 @@ async function main(): Promise<void> {
     const updateStats = () => {
       if (!stats) return;
       stats.innerHTML =
-        `<b>Earth + Moon</b> · real mass, size &amp; velocity<br>` +
-        `separation <b>${demo.moon_distance_km().toFixed(0)}</b> km (real ≈ 384,400)<br>` +
+        `<b>Sun · Earth · Moon</b> · real mass, size, velocity &amp; sunlight<br>` +
+        `frame <b>${demo.focus_label()}</b> · Earth–Moon <b>${demo.moon_distance_km().toFixed(0)}</b> km (real ≈ 384,400)<br>` +
         `<b>${fps}</b> fps · drag orbit · pinch / wheel zoom`;
     };
 

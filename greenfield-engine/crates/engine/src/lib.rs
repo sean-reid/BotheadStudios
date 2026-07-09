@@ -939,7 +939,10 @@ mod app {
     const MOON_RADIUS_M: f64 = 1.737e6; // m
     const MOON_DIST_M: f64 = 3.844e8; // m (semi-major axis)
     const MOON_SPEED: f64 = 1022.0; // m/s (mean orbital speed)
-                                    // Metres -> display units: Earth's radius becomes 1.0, so the Moon sits ~60 units out.
+    const SUN_MASS: f64 = 1.989e30; // kg — holds and lights the system
+    const AU_M: f64 = 1.496e11; // m (Earth–Sun distance)
+    const EARTH_HELIO_SPEED: f64 = 29_780.0; // m/s (Earth's mean heliocentric speed = sqrt(G·M_sun/AU))
+                                             // Metres -> display units: Earth's radius becomes 1.0, so the Moon sits ~60 units out.
     const DISPLAY_SCALE: f64 = 1.0 / EARTH_RADIUS_M;
     // Fast-forward so a full ~27.3-day orbit plays in ~20 s. Symplectic Verlet stays stable with many
     // substeps per frame (dt ~= 125 s at this scale => thousands of steps per orbit).
@@ -967,10 +970,13 @@ mod app {
         sphere_gpu: GpuMesh,
         planet_uni: UniformSlot,
         moon_uni: UniformSlot,
-        bodies: Vec<crate::orbit::Body>, // [Earth, Moon]
+        bodies: Vec<crate::orbit::Body>, // [Sun, Earth, Moon]
         acc: Vec<glam::DVec3>,
         time_scale: f64,
         camera: Camera,
+        /// The body the view is centred on — the viewport's physical frame of reference (docs/17).
+        /// 1 = Earth (default), 2 = Moon.
+        focus: usize,
         // Body colours are the *aggregate albedo of a real composition* (materials.json), not painted
         // tints — see `materials::aggregate_albedo` / docs/17. Reflectance only; the shader supplies
         // brightness (illumination × reflectance), so a dark-but-lit body still reads bright.
@@ -1055,18 +1061,27 @@ mod app {
             let moon_uni = make_space_uniform(&device, &bind_layout);
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
 
-            // Earth + Moon in real SI units, in a barycentric (zero net momentum) frame so the whole
-            // system stays centered on screen while the two bodies orbit their common center of mass.
-            let v_earth = MOON_SPEED * MOON_MASS / EARTH_MASS;
+            // The real three-body system in SI units: [Sun, Earth, Moon] (orbit.rs). The Earth carries
+            // its true heliocentric velocity and the Moon co-moves with it plus its own orbital speed,
+            // so the whole nesting is emergent — the Moon stays bound to the Earth while the Earth
+            // orbits the Sun (verified by `orbit::sun_earth_moon_system_is_bound`), not hand-placed.
+            // The Sun both holds the system (gravity) and lights it. At this zoom it sits ~23,000
+            // display units off-frame, so it is the *light source*, not a drawn disk — the scale-
+            // adaptive choice (docs/17): render what matters at this scale.
             let bodies = vec![
                 crate::orbit::Body {
                     pos: glam::DVec3::ZERO,
-                    vel: glam::DVec3::new(0.0, -v_earth, 0.0),
+                    vel: glam::DVec3::ZERO,
+                    mass: SUN_MASS,
+                },
+                crate::orbit::Body {
+                    pos: glam::DVec3::new(AU_M, 0.0, 0.0),
+                    vel: glam::DVec3::new(0.0, EARTH_HELIO_SPEED, 0.0),
                     mass: EARTH_MASS,
                 },
                 crate::orbit::Body {
-                    pos: glam::DVec3::new(MOON_DIST_M, 0.0, 0.0),
-                    vel: glam::DVec3::new(0.0, MOON_SPEED, 0.0),
+                    pos: glam::DVec3::new(AU_M + MOON_DIST_M, 0.0, 0.0),
+                    vel: glam::DVec3::new(0.0, EARTH_HELIO_SPEED + MOON_SPEED, 0.0),
                     mass: MOON_MASS,
                 },
             ];
@@ -1099,7 +1114,9 @@ mod app {
                 base_distance: (MOON_DIST_M * DISPLAY_SCALE) as f32 * 1.7,
             };
 
-            log::info!("orbit demo ready: Earth + Moon at real scale, {ORBIT_TIME_SCALE:.0}x time");
+            log::info!(
+                "orbit demo ready: Sun+Earth+Moon at real scale, sun-lit, {ORBIT_TIME_SCALE:.0}x time"
+            );
             Ok(OrbitDemo {
                 surface,
                 device,
@@ -1114,9 +1131,24 @@ mod app {
                 acc,
                 time_scale: ORBIT_TIME_SCALE,
                 camera,
+                focus: 1, // start on the planet
                 earth_tint,
                 moon_tint,
             })
+        }
+
+        /// Cycle the view's frame of reference between the bodies we can stand on (Earth ⇄ Moon). The
+        /// focused body becomes the origin; everything else moves honestly around it (docs/17).
+        pub fn cycle_focus(&mut self) {
+            self.focus = if self.focus == 1 { 2 } else { 1 };
+        }
+
+        /// Name of the currently-focused body (for the HUD / focus button).
+        pub fn focus_label(&self) -> String {
+            match self.focus {
+                2 => "Moon".to_string(),
+                _ => "Earth".to_string(),
+            }
         }
 
         pub fn set_orbit(&mut self, yaw: f32, pitch: f32, zoom: f32) {
@@ -1141,7 +1173,7 @@ mod app {
 
         /// Live Earth–Moon separation in km (for the HUD). Should hover near 384,400 km.
         pub fn moon_distance_km(&self) -> f64 {
-            (self.bodies[1].pos - self.bodies[0].pos).length() / 1000.0
+            (self.bodies[2].pos - self.bodies[1].pos).length() / 1000.0
         }
 
         pub fn render(&mut self) -> Result<(), JsValue> {
@@ -1153,19 +1185,28 @@ mod app {
             }
 
             let view_proj = self.view_proj();
-            let light = Vec3::new(1.0, 0.35, 0.55).normalize();
 
-            let earth_pos = (self.bodies[0].pos * DISPLAY_SCALE).as_vec3();
-            let moon_pos = (self.bodies[1].pos * DISPLAY_SCALE).as_vec3();
+            // Render in the focused body's frame of reference (docs/17): its position is the origin,
+            // everything else is drawn relative to it. Switching focus re-centres the whole view.
+            let focus = self.bodies[self.focus].pos;
+            let sun = self.bodies[0].pos;
+            let earth_pos = ((self.bodies[1].pos - focus) * DISPLAY_SCALE).as_vec3();
+            let moon_pos = ((self.bodies[2].pos - focus) * DISPLAY_SCALE).as_vec3();
             let earth_r = (EARTH_RADIUS_M * DISPLAY_SCALE) as f32;
             let moon_r = (MOON_RADIUS_M * DISPLAY_SCALE) as f32;
+
+            // Light direction = TO the real Sun from each body (per-body; the Sun is the illuminant,
+            // not a hardcoded direction). So the lit hemisphere and the Moon's phases come from the
+            // actual geometry.
+            let earth_light = (sun - self.bodies[1].pos).as_vec3().normalize();
+            let moon_light = (sun - self.bodies[2].pos).as_vec3().normalize();
 
             write_space_uniform(
                 &self.queue,
                 &self.planet_uni,
                 view_proj,
                 Mat4::from_translation(earth_pos) * Mat4::from_scale(Vec3::splat(earth_r)),
-                light,
+                earth_light,
                 self.earth_tint, // aggregate albedo of ocean+rock+ice (docs/17), not a painted tint
             );
             write_space_uniform(
@@ -1173,7 +1214,7 @@ mod app {
                 &self.moon_uni,
                 view_proj,
                 Mat4::from_translation(moon_pos) * Mat4::from_scale(Vec3::splat(moon_r)),
-                light,
+                moon_light,
                 self.moon_tint, // aggregate albedo of basalt (docs/17); dark, lit bright by the sun
             );
 

@@ -5,6 +5,7 @@
 // be debugged, and shows a big on-screen status/error banner.
 
 import init, { Engine } from "./wasm/engine.js";
+import "./scene-nav";
 
 // --- Log relay: mirror console + global errors to the dev server ---
 function report(level: string, msg: string): void {

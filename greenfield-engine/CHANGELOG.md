@@ -9,6 +9,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+### Added
+- **Live real-Sun lighting + selectable focus frame** in the space band (`docs/17`). The demo now
+  simulates `[Sun, Earth, Moon]` with the Earth on its true heliocentric orbit; the shader lights each
+  body from the Sun's *actual position* (per-body, so phases are geometric), and the Sun — far
+  off-frame at this zoom — is the light source, not a drawn disk. A focus toggle (`cycle_focus`) makes
+  the viewport a physical frame of reference, re-centring on Earth or the Moon.
+- **Scene picker** (`web/src/scene-nav.ts`) — a small nav injected on both pages to switch between the
+  terrain slice and the space band; the scene list lives in one place.
+
 ### Changed
 - **Honest space-band appearance** (`docs/17`) — removed the hardcoded ocean-blue/grey body tints
   (fudge) in favour of colour derived from a **real material composition**, aggregated by the new
