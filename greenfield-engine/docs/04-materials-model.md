@@ -70,9 +70,15 @@ The same solver reads these numbers; the *difference in behavior is entirely in 
 
 ## Data plan
 
-- **Storage:** a machine-readable table in the repo — `crates/matter-core/materials/*.ron`
-  (or a single `materials.ron`/`.json`). RON is Rust-native and comment-friendly; JSON is portable
-  for tooling. (Decision pending; leaning RON for the Rust core.)
+- **Format: JSON** (decided). Chosen over RON for universal tooling and web-friendliness — the
+  material data feeds a planned **web-based creation system**, and a TypeScript/web material
+  browser/editor should read it with zero friction. Citations live in a structured `sources`
+  field (better than free-text comments: queryable, surfaceable in tooling).
+- **Source of truth: PostgreSQL** (see [`05-data-pipeline.md`](05-data-pipeline.md)). The
+  authoritative asset store is a Postgres DB, edited over time via the web tooling; the repo's
+  `materials.json` is an **export** of that DB, regenerated per release and bundled as the base
+  dataset for OSS users/contributors (who don't need DB access to build).
+- **In-repo path:** `greenfield-engine/data/materials.json` (exported artifact, committed).
 - **Provenance:** each property value cites a source (engineering-toolbox / materials handbooks /
   USGS / peer-reviewed refs). Values that vary by condition store a representative value + range.
 - **Loading:** `matter-core` deserializes into a `Material` struct at startup; the voxel store
@@ -82,7 +88,8 @@ The same solver reads these numbers; the *difference in behavior is entirely in 
 
 ## Open questions
 
-1. **RON vs JSON** for the data file (Rust-native readability vs. universal tooling).
+1. ~~RON vs JSON~~ **Resolved: JSON** (web tooling + contributor accessibility). Postgres is the
+   source of truth; JSON is the exported, bundled artifact.
 2. **Units & anisotropy** — some rocks are strongly anisotropic (bedding/grain); do we model a
    single scalar strength now and add tensor properties later?
 3. **Condition dependence** — soil/dirt properties swing with moisture; do we bake one "typical"
