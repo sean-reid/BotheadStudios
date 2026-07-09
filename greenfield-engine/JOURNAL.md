@@ -5,6 +5,30 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-08 — Phase 4: emergent textures (v0.5.0) — vertical slice complete
+
+**What.** Materials now look distinct, generated *from their own properties* with **no bundled
+images**. `texture.rs` synthesizes a high-res (512²) mip-mapped texture per material from
+albedo + color_variance + metallic (grain/mottle + flecks + metal sparkle), seamless. The world
+shader triplanar-samples a per-material texture array and adds a specular highlight (shine) from
+per-material roughness/metallic. HUD gains an FPS counter. `docs/12` documents the approach + CC0
+sources (ambientCG/Poly Haven) for optional user textures.
+
+**Why.** Closes the appearance side of the thesis: look emerges from the same cited data that drives
+mass, gravity, and fracture — one source of truth. User asked for high-res + no licensed photos;
+procedural generation delivers both (mipmaps = scale-down; zero image assets = zero licensing).
+
+**Verified (TDD).** `cargo test`: 16/16 (added 4 texture tests: size+mip chain, mean tracks albedo,
+materials differ, non-flat variation). fmt + clippy (`-D warnings`) clean; wasm build clean; `tsc` +
+`vite build` green. **Pending human check:** `npm run dev` → speckled granite, mottled dirt, green
+grass, a shiny iron probe; dig to see textured debris.
+
+**Milestone.** This completes the **Phase 0–4 vertical slice** from the plan: layered voxel matter ·
+self-gravity (F=ma) · dig & material-driven fracture · emergent texture — all driven by the cited
+material database. All four project pillars are demonstrable.
+
+---
+
 ## 2026-07-08 — Phase 3: dig & material-driven fracture (v0.4.0)
 
 **What.** Destructible matter. `matter.rs` is a CPU matter solver: click-to-dig (voxel raycast DDA)

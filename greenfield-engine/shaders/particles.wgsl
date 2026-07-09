@@ -20,8 +20,8 @@ struct VOut {
 fn vs_main(
     @location(0) pos    : vec3<f32>,   // cube-local position
     @location(1) normal : vec3<f32>,
-    @location(3) offset : vec3<f32>,   // per-instance world position (centered coords)
-    @location(4) color  : vec3<f32>,   // per-instance material albedo
+    @location(4) offset : vec3<f32>,   // per-instance world position (centered coords)
+    @location(5) color  : vec3<f32>,   // per-instance material albedo
 ) -> VOut {
     var o : VOut;
     o.clip = u.view_proj * vec4<f32>(pos + offset, 1.0);

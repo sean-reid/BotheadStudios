@@ -1,44 +1,80 @@
-// Phase 1 world shader: transform voxel-mesh vertices and shade with one directional light
-// plus ambient. Vertex colors are the materials' linear-RGB albedo; the sRGB surface encodes
-// on write, so we output linear here.
+// Phase 4 world shader: triplanar-sample the per-material procedural texture array, light it, and
+// add a specular highlight (shine) driven by the material's roughness/metallic. Textures are
+// generated from physical properties on the CPU (see texture.rs) — no external image assets.
 
 struct Uniforms {
     view_proj : mat4x4<f32>,
-    model     : mat4x4<f32>, // per-object model transform (identity for the static world)
+    model     : mat4x4<f32>,
     light_dir : vec4<f32>,   // xyz = direction TO the light (world space), normalized
     camera_pos: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;
+@group(0) @binding(1) var tex : texture_2d_array<f32>;
+@group(0) @binding(2) var samp : sampler;
+// Per-material params: x = roughness, y = metallic (rest reserved).
+@group(0) @binding(3) var<uniform> matparams : array<vec4<f32>, 32>;
 
 struct VOut {
-    @builtin(position) clip : vec4<f32>,
-    @location(0) normal     : vec3<f32>,
-    @location(1) color      : vec3<f32>,
+    @builtin(position) clip      : vec4<f32>,
+    @location(0) normal          : vec3<f32>, // world space
+    @location(1) local           : vec3<f32>, // object space, for triplanar coords
+    @location(2) world_pos       : vec3<f32>,
+    @location(3) @interpolate(flat) mat : u32,
 };
 
 @vertex
 fn vs_main(
     @location(0) pos    : vec3<f32>,
     @location(1) normal : vec3<f32>,
-    @location(2) color  : vec3<f32>,
+    @location(3) mat    : u32,
 ) -> VOut {
     var o : VOut;
-    let world_pos = u.model * vec4<f32>(pos, 1.0);
-    o.clip = u.view_proj * world_pos;
+    let world = u.model * vec4<f32>(pos, 1.0);
+    o.clip = u.view_proj * world;
     o.normal = (u.model * vec4<f32>(normal, 0.0)).xyz;
-    o.color = color;
+    o.local = pos;
+    o.world_pos = world.xyz;
+    o.mat = mat;
     return o;
+}
+
+const TEX_SCALE : f32 = 1.0 / 8.0; // one texture tile per 8 metres
+
+fn triplanar(local : vec3<f32>, n : vec3<f32>, layer : u32) -> vec3<f32> {
+    var w = abs(n);
+    w = w / (w.x + w.y + w.z);
+    let cx = textureSample(tex, samp, local.yz * TEX_SCALE, layer).rgb;
+    let cy = textureSample(tex, samp, local.xz * TEX_SCALE, layer).rgb;
+    let cz = textureSample(tex, samp, local.xy * TEX_SCALE, layer).rgb;
+    return cx * w.x + cy * w.y + cz * w.z;
 }
 
 @fragment
 fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     let n = normalize(i.normal);
     let l = normalize(u.light_dir.xyz);
+
+    let albedo = triplanar(i.local, n, i.mat);
+
+    // Diffuse + ambient + a little hemispheric fill.
     let diffuse = max(dot(n, l), 0.0);
-    let ambient = 0.38;
-    // A touch of hemispheric fill so downward faces aren't pure black.
+    let ambient = 0.36;
     let sky = 0.12 * (0.5 + 0.5 * n.y);
-    let shade = ambient + sky + (1.0 - ambient) * diffuse;
-    return vec4<f32>(i.color * shade, 1.0);
+    var color = albedo * (ambient + sky + (1.0 - ambient) * diffuse);
+
+    // Specular highlight (shine) from material params.
+    let params = matparams[i.mat];
+    let rough = clamp(params.x, 0.03, 1.0);
+    let metal = clamp(params.y, 0.0, 1.0);
+    let view = normalize(u.camera_pos.xyz - i.world_pos);
+    let h = normalize(l + view);
+    let ndoth = max(dot(n, h), 0.0);
+    let shininess = mix(6.0, 400.0, 1.0 - rough);
+    let spec = pow(ndoth, shininess) * diffuse; // gate by lit side
+    let spec_color = mix(vec3<f32>(1.0), albedo, metal); // metals tint their highlight
+    let spec_strength = mix(0.05, 1.0, metal) * (1.0 - rough);
+    color += spec_color * (spec * spec_strength);
+
+    return vec4<f32>(color, 1.0);
 }

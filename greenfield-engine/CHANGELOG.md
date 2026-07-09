@@ -9,6 +9,29 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-08
+
+**Phase 4 — emergent textures.** Completes the vertical-slice roadmap. Materials get a distinct look
+generated *from their own physical properties* — no bundled image files, zero licensing exposure.
+
+### Added
+- `texture.rs` — procedural texture generator: high-res (512²) RGBA with a full mip chain, synthesized
+  from `albedo` + `color_variance` + `metallic` (grain/mottle from tileable multi-octave noise,
+  mineral flecks, metal sparkle specks). Seamless (wrapping lattice). Native tests: size + mip chain,
+  mean color tracks albedo, materials differ, non-flat variation.
+- World shader: **triplanar** sampling of a per-material procedural texture array (no UVs), plus a
+  **specular highlight (shine)** driven by per-material `roughness`/`metallic` (metals get a tighter,
+  tinted highlight). Material id per vertex; the probe renders as textured iron.
+- `materials.rs` loads `roughness`/`metallic`/`color_variance`. HUD adds an **FPS** counter.
+- `docs/12` — texture approach + verified CC0 sources (ambientCG/Poly Haven) for optional
+  user-supplied real textures via the module system.
+
+### Notes
+- Mipmapping is the "client can scale it down" mechanism; `TEX_SIZE` is one constant to raise for
+  more detail. The engine bundles **no images** — a material *module* may later drop in a CC0 photo.
+- This closes the initial Phase 0–4 vertical slice: layered voxel matter · self-gravity · dig &
+  fracture · emergent texture — all from the cited material database.
+
 ## [0.4.0] — 2026-07-08
 
 **Phase 3 — dig & material-driven fracture.** Click to dig; matter breaks apart according to each
@@ -98,7 +121,8 @@ pipeline is live, driven by a thin Vite/TypeScript host.
 - Pinned to `wgpu` 24.0.5. WebGPU-only backend to keep the WASM small.
 - **Public API is unstable** while we're pre-1.0 (see versioning policy).
 
-[Unreleased]: https://example.invalid/compare/v0.4.0...HEAD
+[Unreleased]: https://example.invalid/compare/v0.5.0...HEAD
+[0.5.0]: https://example.invalid/releases/tag/v0.5.0
 [0.4.0]: https://example.invalid/releases/tag/v0.4.0
 [0.3.0]: https://example.invalid/releases/tag/v0.3.0
 [0.2.0]: https://example.invalid/releases/tag/v0.2.0

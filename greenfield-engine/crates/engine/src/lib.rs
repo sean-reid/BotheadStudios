@@ -25,6 +25,7 @@ mod gravity;
 mod materials;
 mod matter;
 mod mesher;
+mod texture;
 mod world;
 
 #[cfg(target_arch = "wasm32")]
@@ -34,7 +35,7 @@ pub use app::Engine;
 #[cfg(target_arch = "wasm32")]
 mod app {
     use crate::mesher::{self, Mesh, Vertex};
-    use crate::{body, gravity, materials, matter, world};
+    use crate::{body, gravity, materials, matter, texture, world};
     use glam::{Mat4, Vec3};
     use wasm_bindgen::prelude::*;
     use web_sys::HtmlCanvasElement;
@@ -121,6 +122,7 @@ mod app {
         cube_gpu: GpuMesh,
         particle_pipeline: wgpu::RenderPipeline,
         particle_instances: wgpu::Buffer,
+        particle_bind: wgpu::BindGroup,
 
         camera: Camera,
     }
@@ -189,8 +191,14 @@ mod app {
             let field = gravity::MassField::build(&world, &mats, GRAVITY_BLOCK);
 
             let world_mesh = mesher::build(&world, &mats);
-            let iron = mats[materials::index_of(&mats, "iron")].albedo;
-            let sphere_mesh = mesher::build_uv_sphere(SPHERE_RADIUS, iron, 16, 24);
+            let iron_idx = materials::index_of(&mats, "iron");
+            let sphere_mesh = mesher::build_uv_sphere(
+                SPHERE_RADIUS,
+                iron_idx as u32,
+                mats[iron_idx].albedo,
+                16,
+                24,
+            );
             let world_gpu = upload_mesh(&device, "world", &world_mesh);
             let sphere_gpu = upload_mesh(&device, "sphere", &sphere_mesh);
 
@@ -209,23 +217,139 @@ mod app {
                 field.acceleration_at(spawn, GRAVITY_SOFTENING).length()
             );
 
-            // --- Pipeline + two uniform slots (world + sphere share one pipeline/layout) ---
-            let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("uniform-layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
+            // --- Procedural material textures (Phase 4): a mip-mapped array, one layer per material.
+            let textures = texture::generate_all(&mats);
+            let n_layers = textures.len() as u32;
+            let mip_count = textures[0].mips.len() as u32;
+            let material_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("material-textures"),
+                size: wgpu::Extent3d {
+                    width: texture::TEX_SIZE as u32,
+                    height: texture::TEX_SIZE as u32,
+                    depth_or_array_layers: n_layers,
+                },
+                mip_level_count: mip_count,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
             });
-            let world_uni = make_uniform_slot(&device, &bind_layout);
-            let sphere_uni = make_uniform_slot(&device, &bind_layout);
-            let pipeline = build_pipeline(&device, &bind_layout, config.format);
+            for (layer, t) in textures.iter().enumerate() {
+                for (mip, data) in t.mips.iter().enumerate() {
+                    let msize = (texture::TEX_SIZE >> mip) as u32;
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &material_tex,
+                            mip_level: mip as u32,
+                            origin: wgpu::Origin3d {
+                                x: 0,
+                                y: 0,
+                                z: layer as u32,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        data,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(4 * msize),
+                            rows_per_image: Some(msize),
+                        },
+                        wgpu::Extent3d {
+                            width: msize,
+                            height: msize,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+            }
+            let tex_view = material_tex.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("material-sampler"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Linear,
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::Repeat,
+                address_mode_w: wgpu::AddressMode::Repeat,
+                ..Default::default()
+            });
+            // Per-material shine params: [roughness, metallic, _, _] (padded to 32 for the shader).
+            let mut params: Vec<[f32; 4]> = vec![[0.0; 4]; 32];
+            for (i, m) in mats.iter().enumerate().take(32) {
+                params[i] = [m.roughness, m.metallic, 0.0, 0.0];
+            }
+            let matparams_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("matparams"),
+                size: (32 * std::mem::size_of::<[f32; 4]>()) as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&matparams_buf, 0, bytemuck::cast_slice(&params));
+
+            // --- Bind group layouts: world (uniform + texture + sampler + params); particles (uniform) ---
+            let world_bind_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("world-bind-layout"),
+                    entries: &[
+                        uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT),
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2Array,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                        uniform_entry(3, wgpu::ShaderStages::FRAGMENT),
+                    ],
+                });
+            let particle_bind_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("particle-bind-layout"),
+                    entries: &[uniform_entry(
+                        0,
+                        wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    )],
+                });
+
+            // --- Uniform buffers + bind groups ---
+            let world_ubuf = make_uniform_buffer(&device);
+            let sphere_ubuf = make_uniform_buffer(&device);
+            let world_uni = UniformSlot {
+                bind: make_world_bind(
+                    &device,
+                    &world_bind_layout,
+                    &world_ubuf,
+                    &tex_view,
+                    &sampler,
+                    &matparams_buf,
+                ),
+                buf: world_ubuf,
+            };
+            let sphere_uni = UniformSlot {
+                bind: make_world_bind(
+                    &device,
+                    &world_bind_layout,
+                    &sphere_ubuf,
+                    &tex_view,
+                    &sampler,
+                    &matparams_buf,
+                ),
+                buf: sphere_ubuf,
+            };
+            let pipeline = build_pipeline(&device, &world_bind_layout, config.format);
 
             // Debris: a unit cube instanced per particle, tinted by material albedo.
             let matter = matter::MatterSim::new(MAX_PARTICLES);
@@ -240,7 +364,16 @@ mod app {
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let particle_pipeline = build_particle_pipeline(&device, &bind_layout, config.format);
+            let particle_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("particle-bind"),
+                layout: &particle_bind_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: world_uni.buf.as_entire_binding(),
+                }],
+            });
+            let particle_pipeline =
+                build_particle_pipeline(&device, &particle_bind_layout, config.format);
 
             let max_dim = world.w.max(world.h).max(world.d) as f32;
             let camera = Camera {
@@ -271,6 +404,7 @@ mod app {
                 cube_gpu,
                 particle_pipeline,
                 particle_instances,
+                particle_bind,
                 camera,
             })
         }
@@ -431,7 +565,7 @@ mod app {
 
                 if particle_count > 0 {
                     pass.set_pipeline(&self.particle_pipeline);
-                    pass.set_bind_group(0, &self.world_uni.bind, &[]);
+                    pass.set_bind_group(0, &self.particle_bind, &[]);
                     pass.set_vertex_buffer(0, self.cube_gpu.vertex_buf.slice(..));
                     pass.set_vertex_buffer(1, self.particle_instances.slice(..));
                     pass.set_index_buffer(
@@ -513,22 +647,58 @@ mod app {
         pass.draw_indexed(0..mesh.index_count, 0, 0..1);
     }
 
-    fn make_uniform_slot(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> UniformSlot {
-        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+    fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+        wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }
+    }
+
+    fn make_uniform_buffer(device: &wgpu::Device) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("uniforms"),
             size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("uniform-bind-group"),
+        })
+    }
+
+    fn make_world_bind(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        ubuf: &wgpu::Buffer,
+        tex_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        matparams: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("world-bind-group"),
             layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buf.as_entire_binding(),
-            }],
-        });
-        UniformSlot { buf, bind }
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ubuf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: matparams.as_entire_binding(),
+                },
+            ],
+        })
     }
 
     fn build_pipeline(
@@ -545,8 +715,8 @@ mod app {
             bind_group_layouts: &[bind_layout],
             push_constant_ranges: &[],
         });
-        const ATTRS: [wgpu::VertexAttribute; 3] =
-            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3];
+        const ATTRS: [wgpu::VertexAttribute; 4] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32];
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -613,10 +783,10 @@ mod app {
             bind_group_layouts: &[bind_layout],
             push_constant_ranges: &[],
         });
-        const CUBE_ATTRS: [wgpu::VertexAttribute; 3] =
-            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3];
+        const CUBE_ATTRS: [wgpu::VertexAttribute; 4] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32];
         const INST_ATTRS: [wgpu::VertexAttribute; 2] =
-            wgpu::vertex_attr_array![3 => Float32x3, 4 => Float32x3];
+            wgpu::vertex_attr_array![4 => Float32x3, 5 => Float32x3];
         let buffers = [
             wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
@@ -801,7 +971,7 @@ mod tests {
     #[test]
     fn sphere_mesh_is_valid() {
         let (rings, sectors) = (16, 24);
-        let mesh = mesher::build_uv_sphere(3.0, [0.5, 0.5, 0.5], rings, sectors);
+        let mesh = mesher::build_uv_sphere(3.0, 0, [0.5, 0.5, 0.5], rings, sectors);
         assert_eq!(mesh.vertices.len(), (rings + 1) * (sectors + 1));
         assert_eq!(mesh.indices.len(), rings * sectors * 6);
         let vmax = mesh.vertices.len() as u32;

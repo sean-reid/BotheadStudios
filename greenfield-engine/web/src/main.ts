@@ -116,6 +116,9 @@ async function main(): Promise<void> {
     // --- Live physics HUD ---
     const stats = document.getElementById("stats");
     const fmt = (x: number) => x.toExponential(2);
+    let fps = 0;
+    let framesSinceFps = 0;
+    let lastFpsTime = performance.now();
     const updateStats = () => {
       if (!stats) return;
       const g = engine.surface_gravity();
@@ -127,12 +130,20 @@ async function main(): Promise<void> {
         `speed <b>${fmt(engine.sphere_speed())}</b> m/s &nbsp;·&nbsp; ` +
         (resting ? "<b>at rest ✔</b>" : "falling…") +
         `<br>debris: <b>${engine.particle_count()}</b> particles &nbsp;·&nbsp; ` +
-        `time-scale <b>${engine.time_scale().toFixed(0)}×</b> (<kbd>[</kbd>/<kbd>]</kbd>)<br>` +
+        `time-scale <b>${engine.time_scale().toFixed(0)}×</b> (<kbd>[</kbd>/<kbd>]</kbd>) &nbsp;·&nbsp; ` +
+        `<b>${fps}</b> fps<br>` +
         `<b>click</b> to dig soil/grass &nbsp;·&nbsp; <b>shift-click</b> to blast rock &nbsp;·&nbsp; ` +
         `drag orbit · scroll zoom · <kbd>Space</kbd> re-drop`;
     };
 
     const frame = () => {
+      framesSinceFps++;
+      const nowT = performance.now();
+      if (nowT - lastFpsTime >= 500) {
+        fps = Math.round((framesSinceFps * 1000) / (nowT - lastFpsTime));
+        framesSinceFps = 0;
+        lastFpsTime = nowT;
+      }
       if (!userInteracted) cam.yaw += 0.0025;
       engine.set_orbit(cam.yaw, cam.pitch, cam.zoom);
       try {

@@ -37,6 +37,12 @@ struct RawMechanical {
 struct RawOptical {
     /// Linear RGB, each 0..1.
     albedo: [f32; 3],
+    #[serde(default)]
+    roughness: f32,
+    #[serde(default)]
+    metallic: f32,
+    #[serde(default)]
+    color_variance: f32,
 }
 
 /// A material as the engine consumes it.
@@ -49,6 +55,12 @@ pub struct Material {
     /// Pa. How hard it is to fracture/detach a chunk (Phase 3): rock is high (barely chips), soil and
     /// grass are ~1000× lower (detach easily). Falls back to cohesion, then to "effectively unbreakable".
     pub fracture_strength: f32,
+    /// 0 (mirror) .. 1 (matte). Drives specular highlight width (Phase 4).
+    pub roughness: f32,
+    /// 0 (dielectric) .. 1 (metal). Metals get a tinted, tighter highlight (sparkle).
+    pub metallic: f32,
+    /// 0 (uniform) .. 1 (high per-grain spread). Drives procedural texture contrast (Phase 4).
+    pub color_variance: f32,
 }
 
 /// Parse the embedded database. Panics with a clear message if the bundled JSON is malformed
@@ -67,6 +79,9 @@ pub fn load() -> Vec<Material> {
                 .tensile_strength
                 .or(m.mechanical.cohesion)
                 .unwrap_or(1.0e12),
+            roughness: m.optical.roughness,
+            metallic: m.optical.metallic,
+            color_variance: m.optical.color_variance,
         })
         .collect()
 }

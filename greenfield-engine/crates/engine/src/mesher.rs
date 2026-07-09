@@ -15,6 +15,8 @@ pub struct Vertex {
     pub pos: [f32; 3],
     pub nrm: [f32; 3],
     pub col: [f32; 3],
+    /// Material index — the layer to sample in the procedural texture array (Phase 4).
+    pub mat: u32,
 }
 
 pub struct Mesh {
@@ -129,6 +131,7 @@ pub fn build(world: &World, materials: &[Material]) -> Mesh {
                             ],
                             nrm: *normal,
                             col: color,
+                            mat: mat as u32,
                         });
                     }
                     indices.extend_from_slice(&[
@@ -149,7 +152,13 @@ pub fn build(world: &World, materials: &[Material]) -> Mesh {
 
 /// Build a unit-normal UV sphere mesh of the given radius and color, centered at its local origin.
 /// Placed in the world via a model matrix at draw time. Used for the dropped probe (Phase 2).
-pub fn build_uv_sphere(radius: f32, color: [f32; 3], rings: usize, sectors: usize) -> Mesh {
+pub fn build_uv_sphere(
+    radius: f32,
+    mat: u32,
+    color: [f32; 3],
+    rings: usize,
+    sectors: usize,
+) -> Mesh {
     use std::f32::consts::{PI, TAU};
     let mut vertices: Vec<Vertex> = Vec::new();
     for i in 0..=rings {
@@ -161,6 +170,7 @@ pub fn build_uv_sphere(radius: f32, color: [f32; 3], rings: usize, sectors: usiz
                 pos: [n[0] * radius, n[1] * radius, n[2] * radius],
                 nrm: n,
                 col: color,
+                mat,
             });
         }
     }
@@ -193,6 +203,7 @@ pub fn build_cube(half: f32, color: [f32; 3]) -> Mesh {
                 ],
                 nrm: *normal,
                 col: color,
+                mat: 0,
             });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
