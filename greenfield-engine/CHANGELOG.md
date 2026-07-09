@@ -9,6 +9,30 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-08
+
+**Phase 3 — dig & material-driven fracture.** Click to dig; matter breaks apart according to each
+material's own strength, falls under gravity, and settles back into the world.
+
+### Added
+- `matter.rs` — CPU matter solver: spherical dig via voxel raycast; a voxel detaches into a particle
+  only if the tool's stress exceeds its material's `fracture_strength` (granite resists a tool that
+  shreds soil/grass — no per-material special-casing, just the numbers). Debris falls under the
+  Phase-2 field and, on rest, deposits back into the voxel grid (piling; matter-conserving). Native
+  tests: soft-vs-hard selectivity, and matter conservation through dig + settle.
+- `world.rs` — voxel raycast (Amanatides–Woo DDA) for picking, `set_voxel`, `solid_count`.
+- `materials.rs` — loads `fracture_strength` (tensile strength, falling back to cohesion).
+- Renderer — instanced debris cubes (`particles.wgsl`), terrain re-mesh on edit; HUD shows debris
+  count. Controls: **click** to dig soil/grass, **shift-click** to blast rock.
+
+### Notes
+- This is the CPU-tested **foundation** for full continuum MLS-MPM, not the full method yet — it
+  delivers dig/fracture/granular behavior emergent from material data. MLS-MPM (deformation gradient +
+  constitutive stress, then a WGSL port) is the planned evolution (`docs/06`/`08`).
+- Micro-gravity again: ejection is capped below the world's ~7 cm/s escape velocity so debris stays
+  bound and re-settles (correct physics, viewed via the time-scale).
+- Digging a mid-column hole can leave voxels above "floating" — structural collapse is future work.
+
 ## [0.3.0] — 2026-07-08
 
 **Phase 2 — self-gravity & the falling probe.** Density stops being decorative and starts doing
@@ -74,7 +98,8 @@ pipeline is live, driven by a thin Vite/TypeScript host.
 - Pinned to `wgpu` 24.0.5. WebGPU-only backend to keep the WASM small.
 - **Public API is unstable** while we're pre-1.0 (see versioning policy).
 
-[Unreleased]: https://example.invalid/compare/v0.3.0...HEAD
+[Unreleased]: https://example.invalid/compare/v0.4.0...HEAD
+[0.4.0]: https://example.invalid/releases/tag/v0.4.0
 [0.3.0]: https://example.invalid/releases/tag/v0.3.0
 [0.2.0]: https://example.invalid/releases/tag/v0.2.0
 [0.1.0]: https://example.invalid/releases/tag/v0.1.0

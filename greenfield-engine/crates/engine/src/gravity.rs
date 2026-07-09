@@ -97,6 +97,14 @@ impl MassField {
         }
     }
 
+    /// Cheap single-point (center-of-mass) approximation of the field — O(1). Adequate for large
+    /// numbers of small debris particles, where the exact per-lump field isn't worth its cost.
+    pub fn acceleration_point_approx(&self, p: Vec3, softening: f32) -> Vec3 {
+        let d = self.com - p;
+        let r2 = d.length_squared() + softening * softening;
+        d * (G * self.total_mass * r2.powf(-1.5))
+    }
+
     /// Gravitational acceleration at `p`. `softening` (metres) removes the singularity when very
     /// close to a mass point; keep it ~the block size. Acceleration is mass-independent (the
     /// equivalence principle): the same `g` acts on a 5 kg or a 5 t probe.

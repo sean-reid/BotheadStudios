@@ -23,6 +23,7 @@
 mod body;
 mod gravity;
 mod materials;
+mod matter;
 mod mesher;
 mod world;
 
@@ -33,7 +34,7 @@ pub use app::Engine;
 #[cfg(target_arch = "wasm32")]
 mod app {
     use crate::mesher::{self, Mesh, Vertex};
-    use crate::{body, gravity, materials, world};
+    use crate::{body, gravity, materials, matter, world};
     use glam::{Mat4, Vec3};
     use wasm_bindgen::prelude::*;
     use web_sys::HtmlCanvasElement;
@@ -51,6 +52,13 @@ mod app {
     const PHYS_SUBSTEPS: u32 = 8;
     const DEFAULT_TIME_SCALE: f32 = 250.0; // sim-seconds per real-second (fast-forward)
 
+    // Phase 3 dig/fracture.
+    const MAX_PARTICLES: usize = 60_000;
+    const PARTICLE_CUBE_HALF: f32 = 0.42;
+    const DIG_RADIUS: f32 = 3.0;
+    const DIG_POWER: f32 = 1.5e6; // breaks soil/grass, not granite
+    const BLAST_POWER: f32 = 3.0e7; // breaks granite too
+
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Uniforms {
@@ -58,6 +66,13 @@ mod app {
         model: [[f32; 4]; 4],
         light_dir: [f32; 4],
         camera_pos: [f32; 4],
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct InstanceRaw {
+        offset: [f32; 3],
+        color: [f32; 3],
     }
 
     struct Camera {
@@ -94,11 +109,18 @@ mod app {
         sphere_uni: UniformSlot,
 
         // Simulation
+        mats: Vec<materials::Material>,
         world: world::World,
         field: gravity::MassField,
         sphere: body::Sphere,
+        matter: matter::MatterSim,
         spawn: Vec3,
         time_scale: f32,
+
+        // Debris (particle) rendering
+        cube_gpu: GpuMesh,
+        particle_pipeline: wgpu::RenderPipeline,
+        particle_instances: wgpu::Buffer,
 
         camera: Camera,
     }
@@ -205,6 +227,21 @@ mod app {
             let sphere_uni = make_uniform_slot(&device, &bind_layout);
             let pipeline = build_pipeline(&device, &bind_layout, config.format);
 
+            // Debris: a unit cube instanced per particle, tinted by material albedo.
+            let matter = matter::MatterSim::new(MAX_PARTICLES);
+            let cube_gpu = upload_mesh(
+                &device,
+                "cube",
+                &mesher::build_cube(PARTICLE_CUBE_HALF, [1.0, 1.0, 1.0]),
+            );
+            let particle_instances = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("particle-instances"),
+                size: (MAX_PARTICLES * std::mem::size_of::<InstanceRaw>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let particle_pipeline = build_particle_pipeline(&device, &bind_layout, config.format);
+
             let max_dim = world.w.max(world.h).max(world.d) as f32;
             let camera = Camera {
                 yaw: 0.7,
@@ -224,11 +261,16 @@ mod app {
                 sphere_gpu,
                 world_uni,
                 sphere_uni,
+                mats,
                 world,
                 field,
                 sphere,
+                matter,
                 spawn,
                 time_scale: DEFAULT_TIME_SCALE,
+                cube_gpu,
+                particle_pipeline,
+                particle_instances,
                 camera,
             })
         }
@@ -280,9 +322,58 @@ mod app {
             self.sphere = body::Sphere::new(self.spawn, SPHERE_MASS, SPHERE_RADIUS);
         }
 
+        /// Number of airborne debris particles (HUD).
+        pub fn particle_count(&self) -> u32 {
+            self.matter.particle_count() as u32
+        }
+
+        /// Dig at a screen point (normalized device coords, y up). `blast` uses a stronger tool that
+        /// can break rock. Casts a ray from the camera and fractures the first solid voxel region.
+        pub fn dig(&mut self, ndc_x: f32, ndc_y: f32, blast: bool) {
+            let (view_proj, eye) = self.view_proj();
+            let inv = view_proj.inverse();
+            let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
+            let far = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
+            let dir = (far - near).normalize_or_zero();
+            if let Some((_x, _y, _z, hit)) = self.world.raycast(eye, dir, 6000.0) {
+                let power = if blast { BLAST_POWER } else { DIG_POWER };
+                self.matter
+                    .dig(&mut self.world, &self.mats, hit, DIG_RADIUS, power);
+            }
+        }
+
+        fn remesh_world(&mut self) {
+            let mesh = mesher::build(&self.world, &self.mats);
+            self.world_gpu = upload_mesh(&self.device, "world", &mesh);
+        }
+
+        fn upload_particles(&self) -> u32 {
+            let instances: Vec<InstanceRaw> = self
+                .matter
+                .particles
+                .iter()
+                .map(|p| InstanceRaw {
+                    offset: [p.pos.x, p.pos.y, p.pos.z],
+                    color: self.mats[p.material].albedo,
+                })
+                .collect();
+            if !instances.is_empty() {
+                self.queue.write_buffer(
+                    &self.particle_instances,
+                    0,
+                    bytemuck::cast_slice(&instances),
+                );
+            }
+            instances.len() as u32
+        }
+
         /// Render one frame (advances the simulation first).
         pub fn render(&mut self) -> Result<(), JsValue> {
             self.step_physics();
+            if self.matter.take_dirty() {
+                self.remesh_world();
+            }
+            let particle_count = self.upload_particles();
 
             let (view_proj, eye) = self.view_proj();
             let light = Vec3::new(0.45, 0.9, 0.4).normalize();
@@ -337,6 +428,18 @@ mod app {
                 pass.set_pipeline(&self.pipeline);
                 draw(&mut pass, &self.world_uni, &self.world_gpu);
                 draw(&mut pass, &self.sphere_uni, &self.sphere_gpu);
+
+                if particle_count > 0 {
+                    pass.set_pipeline(&self.particle_pipeline);
+                    pass.set_bind_group(0, &self.world_uni.bind, &[]);
+                    pass.set_vertex_buffer(0, self.cube_gpu.vertex_buf.slice(..));
+                    pass.set_vertex_buffer(1, self.particle_instances.slice(..));
+                    pass.set_index_buffer(
+                        self.cube_gpu.index_buf.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..self.cube_gpu.index_count, 0, 0..particle_count);
+                }
             }
             self.queue.submit(std::iter::once(encoder.finish()));
             output.present();
@@ -354,6 +457,7 @@ mod app {
                     .acceleration_at(self.sphere.pos, GRAVITY_SOFTENING);
                 let ground_y = self.ground_under_sphere();
                 self.sphere.step(accel, dt, ground_y);
+                self.matter.step(&mut self.world, &self.field, dt);
             }
         }
 
@@ -456,6 +560,83 @@ mod app {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[vertex_layout],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        })
+    }
+
+    fn build_particle_pipeline(
+        device: &wgpu::Device,
+        bind_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("particle-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../../shaders/particles.wgsl").into(),
+            ),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("particle-pipeline-layout"),
+            bind_group_layouts: &[bind_layout],
+            push_constant_ranges: &[],
+        });
+        const CUBE_ATTRS: [wgpu::VertexAttribute; 3] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3];
+        const INST_ATTRS: [wgpu::VertexAttribute; 2] =
+            wgpu::vertex_attr_array![3 => Float32x3, 4 => Float32x3];
+        let buffers = [
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &CUBE_ATTRS,
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<InstanceRaw>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &INST_ATTRS,
+            },
+        ];
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("particle-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &buffers,
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -665,5 +846,18 @@ mod tests {
             (s.pos.y - (surf + radius)).abs() < 1.0,
             "rests on the surface"
         );
+    }
+
+    #[test]
+    fn raycast_hits_terrain_from_above() {
+        let mats = materials::load();
+        let w = world::generate(&mats);
+        let c = w.center();
+        let origin = glam::Vec3::new(0.0, c.y + 50.0, 0.0);
+        let hit = w.raycast(origin, glam::Vec3::NEG_Y, 1000.0);
+        assert!(hit.is_some(), "a downward ray should hit the terrain");
+        let (_x, _y, _z, p) = hit.unwrap();
+        let surf = w.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+        assert!((p.y - surf).abs() < 2.0, "hit near the surface height");
     }
 }

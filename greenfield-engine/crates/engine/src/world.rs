@@ -6,7 +6,7 @@
 //! generate a layered plateau — rock, ~10 m of dirt, a skin of grass — and render it.
 
 use crate::materials::{index_of, Material};
-use glam::Vec3;
+use glam::{IVec3, Vec3};
 
 /// Width (X), height (Y, up), depth (Z) of the world in voxels. 1 voxel = 1 metre.
 pub const W: usize = 96;
@@ -79,6 +79,103 @@ impl World {
             }
         }
         None
+    }
+
+    /// Set a voxel's material (`None` = air). Out-of-bounds writes are ignored.
+    pub fn set_voxel(&mut self, x: i32, y: i32, z: i32, material: Option<usize>) {
+        if x < 0
+            || y < 0
+            || z < 0
+            || x as usize >= self.w
+            || y as usize >= self.h
+            || z as usize >= self.d
+        {
+            return;
+        }
+        let i = self.idx(x as usize, y as usize, z as usize);
+        self.voxels[i] = material.map(|m| m as u16 + 1).unwrap_or(0);
+    }
+
+    /// Total number of solid voxels — used for matter-conservation checks (tests).
+    #[allow(dead_code)]
+    pub fn solid_count(&self) -> usize {
+        self.voxels.iter().filter(|&&v| v != 0).count()
+    }
+
+    /// March a ray (given in centered coordinates) through the grid; return the first solid voxel it
+    /// hits and the centered hit position. Amanatides–Woo DDA — used for click-to-dig picking.
+    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<(i32, i32, i32, Vec3)> {
+        let d = dir.normalize_or_zero();
+        if d == Vec3::ZERO {
+            return None;
+        }
+        let o = origin + self.center(); // ray origin in voxel space
+
+        let mut v = IVec3::new(o.x.floor() as i32, o.y.floor() as i32, o.z.floor() as i32);
+        let step = IVec3::new(sign(d.x), sign(d.y), sign(d.z));
+
+        // Parametric distance to the first voxel boundary on each axis, and per-voxel increments.
+        let t_max = |oc: f32, dc: f32, s: i32| -> f32 {
+            if dc == 0.0 {
+                f32::INFINITY
+            } else if s > 0 {
+                (oc.floor() + 1.0 - oc) / dc
+            } else {
+                (oc.floor() - oc) / dc
+            }
+        };
+        let mut tmx = t_max(o.x, d.x, step.x);
+        let mut tmy = t_max(o.y, d.y, step.y);
+        let mut tmz = t_max(o.z, d.z, step.z);
+        let tdx = if d.x != 0.0 {
+            (1.0 / d.x).abs()
+        } else {
+            f32::INFINITY
+        };
+        let tdy = if d.y != 0.0 {
+            (1.0 / d.y).abs()
+        } else {
+            f32::INFINITY
+        };
+        let tdz = if d.z != 0.0 {
+            (1.0 / d.z).abs()
+        } else {
+            f32::INFINITY
+        };
+
+        let mut t = 0.0f32;
+        for _ in 0..8192 {
+            if self.is_solid(v.x, v.y, v.z) {
+                return Some((v.x, v.y, v.z, origin + d * t));
+            }
+            if tmx <= tmy && tmx <= tmz {
+                v.x += step.x;
+                t = tmx;
+                tmx += tdx;
+            } else if tmy <= tmz {
+                v.y += step.y;
+                t = tmy;
+                tmy += tdy;
+            } else {
+                v.z += step.z;
+                t = tmz;
+                tmz += tdz;
+            }
+            if t > max_dist {
+                break;
+            }
+        }
+        None
+    }
+}
+
+fn sign(x: f32) -> i32 {
+    if x > 0.0 {
+        1
+    } else if x < 0.0 {
+        -1
+    } else {
+        0
     }
 }
 

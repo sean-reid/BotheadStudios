@@ -5,6 +5,32 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-08 — Phase 3: dig & material-driven fracture (v0.4.0)
+
+**What.** Destructible matter. `matter.rs` is a CPU matter solver: click-to-dig (voxel raycast DDA)
+fractures a spherical region — a voxel detaches into a particle only if the tool's stress exceeds its
+material's `fracture_strength` (loaded from the cited DB). Debris falls under the Phase-2 gravity
+field and, on rest, deposits back into the voxel grid (piling, matter-conserving). Instanced debris
+rendering (`particles.wgsl`), terrain re-mesh on edit, HUD debris count. Click digs soil/grass;
+shift-click blasts rock.
+
+**Why.** Proves the core destruction thesis — materials break *differently by their own numbers*
+(granite shrugs off what shreds grass), with no per-material special-casing. Framed honestly as the
+**CPU, testable foundation** for full continuum MLS-MPM (deformation/stress + WGSL port) later, since
+GPU MLS-MPM can't be unit-tested natively and TDD is canonical.
+
+**Verified (TDD).** `cargo test`: 12/12, incl. `dig_detaches_soft_but_not_hard` (soil detaches under
+1e6 Pa, granite needs a 2e7 blast) and `matter_conserved_through_dig_and_settle` (voxels + airborne
+particles == original, every step, until all settle). Plus raycast-hits-terrain. fmt + clippy
+(`-D warnings`) clean; wasm build clean; `tsc` + `vite build` green.
+**Pending human check:** `npm run dev` → click the grass/dirt to blow a crater of tumbling debris
+that resettles; click rock (nothing) then shift-click (it breaks).
+
+**Known limits (noted for later):** mid-column digs can leave floating voxels (no structural
+collapse yet); full-world re-mesh per edit (dirty-chunk meshing is the optimization).
+
+---
+
 ## 2026-07-08 — Phase 2: self-gravity + falling probe (v0.3.0)
 
 **What.** Made density physically active. `gravity.rs` computes a real Newtonian field from the

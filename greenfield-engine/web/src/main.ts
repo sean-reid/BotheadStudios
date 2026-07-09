@@ -54,18 +54,29 @@ async function main(): Promise<void> {
     let lastX = 0;
     let lastY = 0;
 
+    let moved = 0;
+
     canvas.addEventListener("pointerdown", (e) => {
       dragging = true;
       lastX = e.clientX;
       lastY = e.clientY;
+      moved = 0;
       canvas.setPointerCapture(e.pointerId);
     });
     canvas.addEventListener("pointerup", (e) => {
       dragging = false;
       canvas.releasePointerCapture(e.pointerId);
+      // A near-stationary click is a dig; a drag orbits the camera.
+      if (moved < 6) {
+        const rect = canvas.getBoundingClientRect();
+        const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        const ndcY = 1 - ((e.clientY - rect.top) / rect.height) * 2;
+        engine.dig(ndcX, ndcY, e.shiftKey); // shift = stronger blast (breaks rock)
+      }
     });
     canvas.addEventListener("pointermove", (e) => {
       if (!dragging) return;
+      moved += Math.abs(e.clientX - lastX) + Math.abs(e.clientY - lastY);
       cam.yaw -= (e.clientX - lastX) * 0.008;
       cam.pitch += (e.clientY - lastY) * 0.008;
       cam.pitch = Math.max(-1.4, Math.min(1.4, cam.pitch));
@@ -115,8 +126,10 @@ async function main(): Promise<void> {
         `probe (5&nbsp;kg): altitude <b>${engine.sphere_altitude().toFixed(2)}</b> m &nbsp;·&nbsp; ` +
         `speed <b>${fmt(engine.sphere_speed())}</b> m/s &nbsp;·&nbsp; ` +
         (resting ? "<b>at rest ✔</b>" : "falling…") +
-        `<br>time-scale: <b>${engine.time_scale().toFixed(0)}×</b> ` +
-        `(fast-forward — <kbd>[</kbd>/<kbd>]</kbd>) &nbsp;·&nbsp; <kbd>Space</kbd> re-drop`;
+        `<br>debris: <b>${engine.particle_count()}</b> particles &nbsp;·&nbsp; ` +
+        `time-scale <b>${engine.time_scale().toFixed(0)}×</b> (<kbd>[</kbd>/<kbd>]</kbd>)<br>` +
+        `<b>click</b> to dig soil/grass &nbsp;·&nbsp; <b>shift-click</b> to blast rock &nbsp;·&nbsp; ` +
+        `drag orbit · scroll zoom · <kbd>Space</kbd> re-drop`;
     };
 
     const frame = () => {

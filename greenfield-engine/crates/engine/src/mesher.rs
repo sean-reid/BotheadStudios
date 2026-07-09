@@ -176,6 +176,30 @@ pub fn build_uv_sphere(radius: f32, color: [f32; 3], rings: usize, sectors: usiz
     Mesh { vertices, indices }
 }
 
+/// Build a small cube mesh centered on its local origin (half-extent `half`), colored `color`.
+/// Used as the instanced base mesh for debris particles (Phase 3); the per-instance offset places
+/// each copy, so `color` here is just a fallback.
+pub fn build_cube(half: f32, color: [f32; 3]) -> Mesh {
+    let mut vertices: Vec<Vertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    for (_, normal, corners) in FACES.iter() {
+        let base = vertices.len() as u32;
+        for c in corners.iter() {
+            vertices.push(Vertex {
+                pos: [
+                    (c[0] * 2.0 - 1.0) * half,
+                    (c[1] * 2.0 - 1.0) * half,
+                    (c[2] * 2.0 - 1.0) * half,
+                ],
+                nrm: *normal,
+                col: color,
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    Mesh { vertices, indices }
+}
+
 /// A little deterministic per-voxel brightness jitter so large flat material regions get subtle
 /// variation instead of reading as a single poster color — a first hint of "grain" before real
 /// procedural texturing (docs/06).

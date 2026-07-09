@@ -25,6 +25,12 @@ struct RawMaterial {
 struct RawMechanical {
     /// kg/m^3. Present for every material in the seed database.
     density: f32,
+    /// Pa. Resistance to being pulled apart; null for liquids. Drives fracture (Phase 3).
+    #[serde(default)]
+    tensile_strength: Option<f32>,
+    /// Pa. Fallback bonding strength where tensile isn't given.
+    #[serde(default)]
+    cohesion: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -33,15 +39,16 @@ struct RawOptical {
     albedo: [f32; 3],
 }
 
-/// A material as the engine consumes it in Phase 1.
+/// A material as the engine consumes it.
 #[derive(Clone, Debug)]
 pub struct Material {
     pub id: String,
-    /// kg/m^3. Stored now as the authoritative per-material mass; Phase 2 uses it for self-gravity
-    /// (voxel mass = density * volume). Not read yet in Phase 1's renderer.
-    #[allow(dead_code)]
+    /// kg/m^3. Authoritative per-material mass; drives self-gravity (voxel mass = density * volume).
     pub density: f32,
     pub albedo: [f32; 3],
+    /// Pa. How hard it is to fracture/detach a chunk (Phase 3): rock is high (barely chips), soil and
+    /// grass are ~1000× lower (detach easily). Falls back to cohesion, then to "effectively unbreakable".
+    pub fracture_strength: f32,
 }
 
 /// Parse the embedded database. Panics with a clear message if the bundled JSON is malformed
@@ -55,6 +62,11 @@ pub fn load() -> Vec<Material> {
             id: m.id,
             density: m.mechanical.density,
             albedo: m.optical.albedo,
+            fracture_strength: m
+                .mechanical
+                .tensile_strength
+                .or(m.mechanical.cohesion)
+                .unwrap_or(1.0e12),
         })
         .collect()
 }
