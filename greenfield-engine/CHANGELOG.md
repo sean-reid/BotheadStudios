@@ -9,6 +9,23 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-08
+
+**Phase 5 — structural collapse.** Matter that a dig undercuts or isolates no longer floats: anything
+not connected to the ground falls. Removes the Phase-3 "floating voxels" limitation.
+
+### Added
+- `world.find_unsupported()` — flood-fill from the anchored base (`y = 0`); returns every solid voxel
+  not connected to it (6-connectivity). Handles overhangs, undercuts, and blasted-off chunks uniformly.
+- `MatterSim::collapse()` — detaches unsupported voxels into falling particles (from rest); one pass
+  suffices (the remainder is fully supported). Triggered after every dig.
+- Native tests: intact terrain has zero unsupported voxels; an isolated voxel collapses, conserves
+  matter, and re-settles into the grid.
+
+### Notes
+- Collapse is O(voxels) per edit (a user action, not per-frame). If a collapse would exceed the
+  particle budget it caps (a few voxels may remain floating) — noted as a bound, not a silent drop.
+
 ## [0.5.0] — 2026-07-08
 
 **Phase 4 — emergent textures.** Completes the vertical-slice roadmap. Materials get a distinct look
@@ -121,7 +138,8 @@ pipeline is live, driven by a thin Vite/TypeScript host.
 - Pinned to `wgpu` 24.0.5. WebGPU-only backend to keep the WASM small.
 - **Public API is unstable** while we're pre-1.0 (see versioning policy).
 
-[Unreleased]: https://example.invalid/compare/v0.5.0...HEAD
+[Unreleased]: https://example.invalid/compare/v0.6.0...HEAD
+[0.6.0]: https://example.invalid/releases/tag/v0.6.0
 [0.5.0]: https://example.invalid/releases/tag/v0.5.0
 [0.4.0]: https://example.invalid/releases/tag/v0.4.0
 [0.3.0]: https://example.invalid/releases/tag/v0.3.0

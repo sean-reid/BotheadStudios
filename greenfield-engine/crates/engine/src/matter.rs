@@ -122,6 +122,36 @@ impl MatterSim {
         spawned
     }
 
+    /// Structural collapse: detach every voxel no longer connected to the anchored base into a
+    /// falling particle (starting from rest). Run after an edit that may have undercut or isolated
+    /// matter (a dig). One pass suffices — `find_unsupported` returns the complete disconnected set,
+    /// so the remainder is fully supported. Returns the number collapsed.
+    pub fn collapse(&mut self, world: &mut World, materials: &[Material]) -> usize {
+        let center = world.center();
+        let mut n = 0;
+        for (x, y, z) in world.find_unsupported() {
+            if self.particles.len() >= self.max_particles {
+                break;
+            }
+            if let Some(mat) = world.material_at(x, y, z) {
+                world.set_voxel(x, y, z, None);
+                let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - center;
+                self.particles.push(Particle {
+                    pos,
+                    vel: Vec3::ZERO,
+                    material: mat,
+                    mass: materials[mat].density,
+                    resting_frames: 0,
+                });
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.dirty = true;
+        }
+        n
+    }
+
     /// Advance all particles by `dt`: gravity from the field, terrain collision, and — when a
     /// particle comes to rest — deposit it back into the voxel grid (piling; matter-conserving).
     pub fn step(&mut self, world: &mut World, field: &MassField, dt: f32) {
@@ -250,5 +280,45 @@ mod tests {
             before,
             "matter fully conserved after settling"
         );
+    }
+
+    #[test]
+    fn supported_terrain_has_no_floating() {
+        let mats = materials::load();
+        let w = world::generate(&mats);
+        assert!(
+            w.find_unsupported().is_empty(),
+            "intact terrain is fully supported (connected to the base)"
+        );
+    }
+
+    #[test]
+    fn collapse_drops_floating_and_conserves() {
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let field = gravity::MassField::build(&w, &mats, 4);
+        let rock = materials::index_of(&mats, "granite");
+        let before = w.solid_count();
+
+        // An isolated voxel high in the air, disconnected from the base.
+        let fy = w.max_top as i32 + 2;
+        w.set_voxel(5, fy, 5, Some(rock));
+        assert_eq!(w.find_unsupported(), vec![(5, fy, 5)]);
+
+        let mut sim = MatterSim::new(50_000);
+        let n = sim.collapse(&mut w, &mats);
+        assert_eq!(n, 1, "only the isolated voxel collapses");
+        assert!(w.find_unsupported().is_empty(), "nothing floating remains");
+        assert_eq!(w.solid_count() + sim.particle_count(), before + 1);
+
+        // It falls and re-settles into the grid.
+        for _ in 0..40_000 {
+            sim.step(&mut w, &field, 5.0);
+            if sim.particle_count() == 0 {
+                break;
+            }
+        }
+        assert_eq!(sim.particle_count(), 0, "collapsed matter settles");
+        assert_eq!(w.solid_count(), before + 1, "matter conserved");
     }
 }

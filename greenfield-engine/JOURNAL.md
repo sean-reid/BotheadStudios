@@ -5,6 +5,23 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-08 — Phase 5: structural collapse (v0.6.0)
+
+**What.** Undercut or isolated matter no longer floats. `world.find_unsupported()` flood-fills from
+the anchored base (`y=0`) and returns any solid voxel not connected to it; `MatterSim::collapse()`
+detaches those into falling particles, run after every dig. This closes the Phase-3 "floating voxels"
+known limitation — overhangs, undercuts, and blasted-off chunks all fall and re-settle.
+
+**Why.** Real matter needs support. Connectivity-to-anchor is the general, correct model (works on a
+plateau now and a planet core later) and needs no per-case rules.
+
+**Verified (TDD).** `cargo test`: 18/18 (added: intact terrain has no unsupported voxels; an isolated
+voxel collapses, conserves matter, and re-settles). fmt + clippy (`-D warnings`) clean; wasm + web
+build green. **Pending human check:** `npm run dev` → shift-click to undercut a ledge and watch the
+overhang break loose and tumble down.
+
+---
+
 ## 2026-07-08 — Phase 4: emergent textures (v0.5.0) — vertical slice complete
 
 **What.** Materials now look distinct, generated *from their own properties* with **no bundled

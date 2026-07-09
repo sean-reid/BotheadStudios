@@ -473,6 +473,8 @@ mod app {
                 let power = if blast { BLAST_POWER } else { DIG_POWER };
                 self.matter
                     .dig(&mut self.world, &self.mats, hit, DIG_RADIUS, power);
+                // Anything the dig undercut or isolated now collapses and falls.
+                self.matter.collapse(&mut self.world, &self.mats);
             }
         }
 

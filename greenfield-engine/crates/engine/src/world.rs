@@ -167,6 +167,67 @@ impl World {
         }
         None
     }
+
+    /// Solid voxels **not** connected (6-connectivity, through solid) to the anchored base (the
+    /// `y = 0` layer). These are unsupported and should collapse. A flood-fill from the base marks
+    /// everything supported; the rest is returned. O(number of voxels).
+    pub fn find_unsupported(&self) -> Vec<(i32, i32, i32)> {
+        const NEIGHBORS: [(i32, i32, i32); 6] = [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ];
+        let mut supported = vec![false; self.w * self.h * self.d];
+        let mut stack: Vec<usize> = Vec::new();
+
+        // Seed with every solid voxel in the base layer.
+        for z in 0..self.d {
+            for x in 0..self.w {
+                if self.is_solid(x as i32, 0, z as i32) {
+                    let i = self.idx(x, 0, z);
+                    if !supported[i] {
+                        supported[i] = true;
+                        stack.push(i);
+                    }
+                }
+            }
+        }
+
+        // Flood-fill through connected solid voxels.
+        while let Some(i) = stack.pop() {
+            let x = i % self.w;
+            let rem = i / self.w;
+            let z = rem % self.d;
+            let y = rem / self.d;
+            for (dx, dy, dz) in NEIGHBORS {
+                let (nx, ny, nz) = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+                if self.is_solid(nx, ny, nz) {
+                    let j = self.idx(nx as usize, ny as usize, nz as usize);
+                    if !supported[j] {
+                        supported[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+        }
+
+        // Collect solid voxels the fill never reached.
+        let mut out = Vec::new();
+        for y in 0..self.h {
+            for z in 0..self.d {
+                for x in 0..self.w {
+                    if self.is_solid(x as i32, y as i32, z as i32) && !supported[self.idx(x, y, z)]
+                    {
+                        out.push((x as i32, y as i32, z as i32));
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 fn sign(x: f32) -> i32 {
