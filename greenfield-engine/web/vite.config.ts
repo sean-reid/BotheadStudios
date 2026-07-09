@@ -1,5 +1,9 @@
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import basicSsl from "@vitejs/plugin-basic-ssl";
+
+const root = fileURLToPath(new URL(".", import.meta.url));
 
 // Relay the client's console output + errors to the dev-server stdout, so console-less devices
 // (iPad Safari, etc.) can be debugged. The page POSTs JSON {level, msg} to /__log.
@@ -57,5 +61,14 @@ export default defineConfig({
   },
   optimizeDeps: {
     exclude: ["engine"],
+  },
+  build: {
+    rollupOptions: {
+      // Multi-page: the terrain vertical slice (index) and the space band (orbit).
+      input: {
+        main: resolve(root, "index.html"),
+        orbit: resolve(root, "orbit.html"),
+      },
+    },
   },
 });

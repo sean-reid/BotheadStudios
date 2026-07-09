@@ -9,6 +9,28 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-09
+
+**Space band — you can now *watch* the Moon orbit.** The first rung of the scale-relative ladder
+(`docs/13`, Step A): a spectator view of the real Earth + Moon, positioned by the validated N-body
+physics from `orbit.rs` (v0.8.0). Physics runs in real SI units (f64); metres map to display units
+(Earth radius → 1) only for drawing. Separate page, so the terrain slice is untouched.
+
+### Added
+- `OrbitDemo` (wasm) + `shaders/space.wgsl` — two lit spheres (ocean-blue Earth, grey Moon) with a
+  directional "sun" (so you see phases), driven by `orbit::verlet_step` each frame, time-scaled so a
+  full ~27.3-day orbit plays in ~20 s. HUD shows live Earth–Moon separation (hovers near 384,400 km).
+- `web/orbit.html` + `web/src/orbit.ts` — camera-only host (drag orbit, pinch/wheel zoom); Vite
+  multi-page build now emits both the terrain slice and the space band.
+- `docs/13-scale-relative-simulation.md` — the north-star architecture (observer-relative fidelity).
+- `docs/14-validation-demonstrations.md` — catalogue mapping each physics test to what it proves and
+  how it becomes a visible demonstration for the full build.
+
+### Notes
+- The physics is verified natively (`orbit::moon_orbits_earth`); the *visuals* are confirmed on-device
+  (headless WebGPU can't render the pipeline here). Next: Step B — refine the planet surface into the
+  voxel terrain as you zoom in.
+
 ## [0.8.0] — 2026-07-09
 
 **Orbital-mechanics validation (N-body).** The gravity law is now validated against real celestial

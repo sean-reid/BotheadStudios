@@ -5,6 +5,30 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — Space band: watch the Moon orbit (v0.9.0)
+
+**What.** Step A of the scale-relative "orbit-to-ground" (`docs/13`): a spectator view of the real
+Earth + Moon (`/orbit.html`). `OrbitDemo` runs `orbit.rs` (real SI, f64) each frame and renders two
+lit spheres via a tiny new `space.wgsl` (position/normal + per-body tint + one directional sun, so we
+get phases). Metres → display units (Earth radius → 1); the Moon sits ~60 units out. Time-scaled so a
+~27.3-day orbit plays in ~20 s, substepped 16× for a stable symplectic step. HUD reads live
+separation (~384,400 km). Kept on a separate page + Vite multi-page input so the terrain slice is
+untouched.
+
+**Why this shape.** I can't self-verify visuals here (headless WebGPU won't render the pipeline), so I
+minimized blind risk: reuse the *proven* GPU setup pattern, the existing sphere mesh + `draw` path, and
+lean on the already-validated physics (`orbit::moon_orbits_earth`). The renderer is a thin shell over
+known-good pieces; the hard part (the orbit) is the tested part.
+
+**Also.** Wrote `docs/13` (north-star: observer-relative fidelity) and `docs/14` (validation
+demonstrations — each physics test mapped to what it proves + how to *show* it), at the user's request
+to preserve the test concepts as demonstrations for the full build.
+
+**Verified.** `cargo test` 22/22; clippy `-D warnings` clean; wasm build compiles `OrbitDemo` warning-
+free; `tsc` clean; LAN dev server serving `/orbit.html`. Visuals to be confirmed on-device.
+
+---
+
 ## 2026-07-09 — Solid-object collision + orbital-mechanics validation (v0.7.2, v0.8.0)
 
 **Collision (v0.7.2).** From an iPad play-test: the probe clipped into crater walls (looked like a

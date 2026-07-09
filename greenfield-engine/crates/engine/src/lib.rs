@@ -30,7 +30,7 @@ mod texture;
 mod world;
 
 #[cfg(target_arch = "wasm32")]
-pub use app::Engine;
+pub use app::{Engine, OrbitDemo};
 
 /// The rendering + browser-host layer. wasm/`wgpu`-only; excluded from native builds and tests.
 #[cfg(target_arch = "wasm32")]
@@ -906,6 +906,397 @@ mod app {
             .copy_from_slice(bytes);
         buffer.unmap();
         buffer
+    }
+
+    // ============================================================================================
+    // Space band (scale-relative "orbit-to-ground", Step A): render the Earth + Moon as two lit
+    // spheres whose positions come from the *validated* N-body physics (orbit.rs), so what you watch
+    // is the same law the `moon_orbits_earth` test proves. Physics runs in real SI units (f64); we
+    // map metres to display units (Earth radius -> 1) only for drawing. This is the coarse "celestial
+    // band" of docs/13 — the first rung of the scale ladder.
+    // ============================================================================================
+
+    // Real-world constants (SI). See docs/04-material-physical-properties / orbit.rs.
+    const EARTH_MASS: f64 = 5.972e24; // kg
+    const MOON_MASS: f64 = 7.342e22; // kg
+    const EARTH_RADIUS_M: f64 = 6.371e6; // m
+    const MOON_RADIUS_M: f64 = 1.737e6; // m
+    const MOON_DIST_M: f64 = 3.844e8; // m (semi-major axis)
+    const MOON_SPEED: f64 = 1022.0; // m/s (mean orbital speed)
+                                    // Metres -> display units: Earth's radius becomes 1.0, so the Moon sits ~60 units out.
+    const DISPLAY_SCALE: f64 = 1.0 / EARTH_RADIUS_M;
+    // Fast-forward so a full ~27.3-day orbit plays in ~20 s. Symplectic Verlet stays stable with many
+    // substeps per frame (dt ~= 125 s at this scale => thousands of steps per orbit).
+    const ORBIT_TIME_SCALE: f64 = 118_000.0; // sim-seconds per real-second
+    const ORBIT_SUBSTEPS: u32 = 16;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct SpaceUniforms {
+        view_proj: [[f32; 4]; 4],
+        model: [[f32; 4]; 4],
+        light_dir: [f32; 4], // xyz = direction to the "sun"
+        tint: [f32; 4],      // body color
+    }
+
+    /// The orbital ("space band") demo handle exposed to JavaScript.
+    #[wasm_bindgen]
+    pub struct OrbitDemo {
+        surface: wgpu::Surface<'static>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        config: wgpu::SurfaceConfiguration,
+        depth_view: wgpu::TextureView,
+        pipeline: wgpu::RenderPipeline,
+        sphere_gpu: GpuMesh,
+        planet_uni: UniformSlot,
+        moon_uni: UniformSlot,
+        bodies: Vec<crate::orbit::Body>, // [Earth, Moon]
+        acc: Vec<glam::DVec3>,
+        time_scale: f64,
+        camera: Camera,
+    }
+
+    #[wasm_bindgen]
+    impl OrbitDemo {
+        /// Initialize the space band: acquire the GPU, build a unit sphere, seed the Earth + Moon.
+        pub async fn create(canvas: HtmlCanvasElement) -> Result<OrbitDemo, JsValue> {
+            console_error_panic_hook::set_once();
+            let _ = console_log::init_with_level(log::Level::Info);
+
+            let width = canvas.width().max(1);
+            let height = canvas.height().max(1);
+
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::BROWSER_WEBGPU,
+                ..Default::default()
+            });
+            let surface = instance
+                .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                .map_err(|e| JsValue::from_str(&format!("create_surface failed: {e}")))?;
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: Some(&surface),
+                })
+                .await
+                .ok_or_else(|| JsValue::from_str("no suitable GPU adapter found"))?;
+            let (device, queue) = adapter
+                .request_device(
+                    &wgpu::DeviceDescriptor {
+                        label: Some("greenfield-orbit"),
+                        required_features: wgpu::Features::empty(),
+                        required_limits: adapter.limits(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await
+                .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
+
+            let caps = surface.get_capabilities(&adapter);
+            let format = caps
+                .formats
+                .iter()
+                .copied()
+                .find(|f| f.is_srgb())
+                .unwrap_or(caps.formats[0]);
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format,
+                width,
+                height,
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode: caps.alpha_modes[0],
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            };
+            surface.configure(&device, &config);
+            let depth_view = create_depth_view(&device, width, height);
+
+            // One white unit sphere, tinted per-body in the shader.
+            let sphere_gpu = upload_mesh(
+                &device,
+                "orbit-sphere",
+                &mesher::build_uv_sphere(1.0, 0, [1.0, 1.0, 1.0], 48, 64),
+            );
+
+            // Uniform-only bind layout + the simple lit-sphere pipeline.
+            let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("space-bind-layout"),
+                entries: &[uniform_entry(
+                    0,
+                    wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                )],
+            });
+            let planet_uni = make_space_uniform(&device, &bind_layout);
+            let moon_uni = make_space_uniform(&device, &bind_layout);
+            let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
+
+            // Earth + Moon in real SI units, in a barycentric (zero net momentum) frame so the whole
+            // system stays centered on screen while the two bodies orbit their common center of mass.
+            let v_earth = MOON_SPEED * MOON_MASS / EARTH_MASS;
+            let bodies = vec![
+                crate::orbit::Body {
+                    pos: glam::DVec3::ZERO,
+                    vel: glam::DVec3::new(0.0, -v_earth, 0.0),
+                    mass: EARTH_MASS,
+                },
+                crate::orbit::Body {
+                    pos: glam::DVec3::new(MOON_DIST_M, 0.0, 0.0),
+                    vel: glam::DVec3::new(0.0, MOON_SPEED, 0.0),
+                    mass: MOON_MASS,
+                },
+            ];
+            let acc = crate::orbit::accelerations(&bodies);
+
+            let camera = Camera {
+                yaw: 0.6,
+                pitch: 0.5,
+                zoom: 1.0,
+                base_distance: (MOON_DIST_M * DISPLAY_SCALE) as f32 * 1.7,
+            };
+
+            log::info!("orbit demo ready: Earth + Moon at real scale, {ORBIT_TIME_SCALE:.0}x time");
+            Ok(OrbitDemo {
+                surface,
+                device,
+                queue,
+                config,
+                depth_view,
+                pipeline,
+                sphere_gpu,
+                planet_uni,
+                moon_uni,
+                bodies,
+                acc,
+                time_scale: ORBIT_TIME_SCALE,
+                camera,
+            })
+        }
+
+        pub fn set_orbit(&mut self, yaw: f32, pitch: f32, zoom: f32) {
+            self.camera.yaw = yaw;
+            self.camera.pitch = pitch.clamp(-1.5, 1.5);
+            self.camera.zoom = zoom.clamp(0.2, 6.0);
+        }
+
+        pub fn resize(&mut self, width: u32, height: u32) {
+            if width == 0 || height == 0 {
+                return;
+            }
+            self.config.width = width;
+            self.config.height = height;
+            self.surface.configure(&self.device, &self.config);
+            self.depth_view = create_depth_view(&self.device, width, height);
+        }
+
+        pub fn set_time_scale(&mut self, scale: f32) {
+            self.time_scale = (scale as f64).clamp(1.0, 2_000_000.0);
+        }
+
+        /// Live Earth–Moon separation in km (for the HUD). Should hover near 384,400 km.
+        pub fn moon_distance_km(&self) -> f64 {
+            (self.bodies[1].pos - self.bodies[0].pos).length() / 1000.0
+        }
+
+        pub fn render(&mut self) -> Result<(), JsValue> {
+            // Advance the N-body orbit (real SI seconds), substepped for a stable symplectic step.
+            let sim_dt = self.time_scale / 60.0;
+            let dt = sim_dt / ORBIT_SUBSTEPS as f64;
+            for _ in 0..ORBIT_SUBSTEPS {
+                crate::orbit::verlet_step(&mut self.bodies, &mut self.acc, dt);
+            }
+
+            let view_proj = self.view_proj();
+            let light = Vec3::new(1.0, 0.35, 0.55).normalize();
+
+            let earth_pos = (self.bodies[0].pos * DISPLAY_SCALE).as_vec3();
+            let moon_pos = (self.bodies[1].pos * DISPLAY_SCALE).as_vec3();
+            let earth_r = (EARTH_RADIUS_M * DISPLAY_SCALE) as f32;
+            let moon_r = (MOON_RADIUS_M * DISPLAY_SCALE) as f32;
+
+            write_space_uniform(
+                &self.queue,
+                &self.planet_uni,
+                view_proj,
+                Mat4::from_translation(earth_pos) * Mat4::from_scale(Vec3::splat(earth_r)),
+                light,
+                [0.20, 0.45, 0.85, 1.0], // ocean blue
+            );
+            write_space_uniform(
+                &self.queue,
+                &self.moon_uni,
+                view_proj,
+                Mat4::from_translation(moon_pos) * Mat4::from_scale(Vec3::splat(moon_r)),
+                light,
+                [0.58, 0.58, 0.60, 1.0], // lunar grey
+            );
+
+            let output = self
+                .surface
+                .get_current_texture()
+                .map_err(|e| JsValue::from_str(&format!("get_current_texture failed: {e}")))?;
+            let view = output
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("orbit-frame"),
+                });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("orbit-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.01,
+                                g: 0.01,
+                                b: 0.03,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.pipeline);
+                draw(&mut pass, &self.planet_uni, &self.sphere_gpu);
+                draw(&mut pass, &self.moon_uni, &self.sphere_gpu);
+            }
+            self.queue.submit(std::iter::once(encoder.finish()));
+            output.present();
+            Ok(())
+        }
+
+        fn view_proj(&self) -> Mat4 {
+            let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+            let proj = Mat4::perspective_rh(0.9, aspect, 0.05, 100_000.0);
+            let cp = self.camera.pitch.cos();
+            let dir = Vec3::new(
+                cp * self.camera.yaw.sin(),
+                self.camera.pitch.sin(),
+                cp * self.camera.yaw.cos(),
+            );
+            let eye = dir * (self.camera.base_distance * self.camera.zoom);
+            let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+            proj * view
+        }
+    }
+
+    fn make_space_uniform(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> UniformSlot {
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("space-uniform"),
+            size: std::mem::size_of::<SpaceUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("space-bind"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf.as_entire_binding(),
+            }],
+        });
+        UniformSlot { buf, bind }
+    }
+
+    fn write_space_uniform(
+        queue: &wgpu::Queue,
+        slot: &UniformSlot,
+        view_proj: Mat4,
+        model: Mat4,
+        light: Vec3,
+        tint: [f32; 4],
+    ) {
+        let u = SpaceUniforms {
+            view_proj: view_proj.to_cols_array_2d(),
+            model: model.to_cols_array_2d(),
+            light_dir: [light.x, light.y, light.z, 0.0],
+            tint,
+        };
+        queue.write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
+    }
+
+    fn build_space_pipeline(
+        device: &wgpu::Device,
+        bind_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("space-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/space.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("space-pipeline-layout"),
+            bind_group_layouts: &[bind_layout],
+            push_constant_ranges: &[],
+        });
+        // Same vertex layout as the world mesh; the space shader only reads position + normal.
+        const ATTRS: [wgpu::VertexAttribute; 4] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32];
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &ATTRS,
+        };
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("space-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[vertex_layout],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        })
     }
 }
 
