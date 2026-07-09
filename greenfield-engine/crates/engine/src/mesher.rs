@@ -222,24 +222,32 @@ pub fn build_surface_nets(world: &World, materials: &[Material]) -> Mesh {
     use fast_surface_nets::{surface_nets, SurfaceNetsBuffer};
     use ndshape::{ConstShape, ConstShape3u32};
 
-    // Padded by one cell on every side so the outer boundary (solid voxel ↔ outside air) is meshed.
-    const PX: u32 = crate::world::W as u32 + 2;
-    const PY: u32 = crate::world::H as u32 + 2;
-    const PZ: u32 = crate::world::D as u32 + 2;
+    // Padded by TWO cells on every side. The boundary walls must sit at least one cell inside the
+    // grid, or Surface Nets can't form the closing quads there and the mesh has holes ("hollow").
+    const PAD: u32 = 2;
+    const PX: u32 = crate::world::W as u32 + 2 * PAD;
+    const PY: u32 = crate::world::H as u32 + 2 * PAD;
+    const PZ: u32 = crate::world::D as u32 + 2 * PAD;
     type Shape = ConstShape3u32<PX, PY, PZ>;
 
-    // Signed field: negative inside solid, positive in air (surface at 0). Padding stays air.
-    let mut sdf = vec![1.0f32; (PX * PY * PZ) as usize];
+    // Occupancy field (1 = solid, 0 = air) in the padded grid, then smoothed so Surface Nets places
+    // the surface along a real gradient. A binary ±1 field only "erodes" cubes; a smoothed field
+    // genuinely rounds the geometry and gives consistently-outward normals.
+    let n = (PX * PY * PZ) as usize;
+    let mut occ = vec![0.0f32; n];
     for y in 0..world.h {
         for z in 0..world.d {
             for x in 0..world.w {
                 if world.is_solid(x as i32, y as i32, z as i32) {
-                    let i = Shape::linearize([x as u32 + 1, y as u32 + 1, z as u32 + 1]) as usize;
-                    sdf[i] = -1.0;
+                    occ[Shape::linearize([x as u32 + PAD, y as u32 + PAD, z as u32 + PAD])
+                        as usize] = 1.0;
                 }
             }
         }
     }
+    smooth_field(&mut occ, PX, PY, PZ, 2);
+    // Signed field: inside (occ > 0.5) negative, outside positive; the surface is the occ = 0.5 iso.
+    let sdf: Vec<f32> = occ.iter().map(|o| 0.5 - o).collect();
 
     let mut buffer = SurfaceNetsBuffer::default();
     surface_nets(
@@ -250,37 +258,17 @@ pub fn build_surface_nets(world: &World, materials: &[Material]) -> Mesh {
         &mut buffer,
     );
 
-    // Recompute smooth normals from the meshed geometry (the binary field's own gradient is blocky),
-    // oriented to agree with the surface-nets outward normal so lighting isn't inverted.
-    use glam::Vec3;
-    let mut accum = vec![Vec3::ZERO; buffer.positions.len()];
-    for tri in buffer.indices.chunks_exact(3) {
-        let (ia, ib, ic) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-        let a = Vec3::from(buffer.positions[ia]);
-        let b = Vec3::from(buffer.positions[ib]);
-        let c = Vec3::from(buffer.positions[ic]);
-        let face = (b - a).cross(c - a); // area-weighted, not normalized
-        accum[ia] += face;
-        accum[ib] += face;
-        accum[ic] += face;
-    }
-
+    // The smoothed field gives Surface Nets good, consistently-outward normals — use them directly.
     let center = world.center();
     let mut vertices = Vec::with_capacity(buffer.positions.len());
-    for (i, p) in buffer.positions.iter().enumerate() {
+    for (p, nrm) in buffer.positions.iter().zip(buffer.normals.iter()) {
         // Padded coords → voxel coords → centered world coords (matching the other meshes).
-        let (wx, wy, wz) = (p[0] - 1.0, p[1] - 1.0, p[2] - 1.0);
+        let pad = PAD as f32;
+        let (wx, wy, wz) = (p[0] - pad, p[1] - pad, p[2] - pad);
         let mat = nearest_material(world, wx, wy, wz);
-        let smooth = accum[i].normalize_or_zero();
-        let reference = Vec3::from(buffer.normals[i]);
-        let n = if smooth.dot(reference) < 0.0 {
-            -smooth
-        } else {
-            smooth
-        };
         vertices.push(Vertex {
             pos: [wx - center.x, wy - center.y, wz - center.z],
-            nrm: [n.x, n.y, n.z],
+            nrm: *nrm,
             col: materials[mat].albedo,
             mat: mat as u32,
         });
@@ -288,6 +276,55 @@ pub fn build_surface_nets(world: &World, materials: &[Material]) -> Mesh {
     Mesh {
         vertices,
         indices: buffer.indices,
+    }
+}
+
+/// Separable 3-tap box blur applied `passes` times (border-clamped). Smooths a 0/1 occupancy field
+/// so the iso-surface rounds instead of looking like eroded cubes.
+fn smooth_field(field: &mut [f32], px: u32, py: u32, pz: u32, passes: u32) {
+    let (px, py, pz) = (px as usize, py as usize, pz as usize);
+    let idx = |x: usize, y: usize, z: usize| x + px * (y + py * z);
+    let mut tmp = vec![0.0f32; field.len()];
+    for _ in 0..passes {
+        for z in 0..pz {
+            for y in 0..py {
+                for x in 0..px {
+                    let c = field[idx(x, y, z)];
+                    let l = if x > 0 { field[idx(x - 1, y, z)] } else { c };
+                    let r = if x + 1 < px {
+                        field[idx(x + 1, y, z)]
+                    } else {
+                        c
+                    };
+                    tmp[idx(x, y, z)] = (l + c + r) / 3.0;
+                }
+            }
+        }
+        for z in 0..pz {
+            for y in 0..py {
+                for x in 0..px {
+                    let c = tmp[idx(x, y, z)];
+                    let d = if y > 0 { tmp[idx(x, y - 1, z)] } else { c };
+                    let u = if y + 1 < py { tmp[idx(x, y + 1, z)] } else { c };
+                    field[idx(x, y, z)] = (d + c + u) / 3.0;
+                }
+            }
+        }
+        for z in 0..pz {
+            for y in 0..py {
+                for x in 0..px {
+                    let c = field[idx(x, y, z)];
+                    let b = if z > 0 { field[idx(x, y, z - 1)] } else { c };
+                    let f = if z + 1 < pz {
+                        field[idx(x, y, z + 1)]
+                    } else {
+                        c
+                    };
+                    tmp[idx(x, y, z)] = (b + c + f) / 3.0;
+                }
+            }
+        }
+        field.copy_from_slice(&tmp);
     }
 }
 

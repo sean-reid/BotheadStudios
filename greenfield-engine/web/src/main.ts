@@ -89,6 +89,10 @@ async function main(): Promise<void> {
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;
     report("info", "engine created OK");
+    report(
+      "info",
+      `canvas ${canvas.width}x${canvas.height} client ${canvas.clientWidth}x${canvas.clientHeight} dpr ${window.devicePixelRatio}`,
+    );
 
     window.addEventListener("resize", () => {
       sizeCanvas(canvas);

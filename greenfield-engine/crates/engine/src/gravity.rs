@@ -97,8 +97,9 @@ impl MassField {
         }
     }
 
-    /// Cheap single-point (center-of-mass) approximation of the field — O(1). Adequate for large
-    /// numbers of small debris particles, where the exact per-lump field isn't worth its cost.
+    /// Cheap single-point (center-of-mass) approximation of the field — O(1). Kept as an option;
+    /// note it drifts off-center bodies toward the COM, so debris uses the full field instead.
+    #[allow(dead_code)]
     pub fn acceleration_point_approx(&self, p: Vec3, softening: f32) -> Vec3 {
         let d = self.com - p;
         let r2 = d.length_squared() + softening * softening;

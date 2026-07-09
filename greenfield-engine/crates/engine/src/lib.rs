@@ -48,8 +48,8 @@ mod app {
                                     // 5 kg iron ball is ~5 cm; free-fall is size- and mass-independent, so this doesn't affect the
                                     // measured acceleration).
     const SPHERE_MASS: f32 = 5.0; // kg
-    const GRAVITY_SOFTENING: f32 = 4.0; // ~ mass-aggregation block size
-    const GRAVITY_BLOCK: usize = 4; // voxel aggregation for the mass field
+    const GRAVITY_SOFTENING: f32 = 6.0; // ~ mass-aggregation block size
+    const GRAVITY_BLOCK: usize = 8; // voxel aggregation for the mass field (coarser = cheaper queries)
     const PHYS_SUBSTEPS: u32 = 8;
     const DEFAULT_TIME_SCALE: f32 = 250.0; // sim-seconds per real-second (fast-forward)
 
@@ -201,6 +201,11 @@ mod app {
             );
             let world_gpu = upload_mesh(&device, "world", &world_mesh);
             let sphere_gpu = upload_mesh(&device, "sphere", &sphere_mesh);
+            log::info!(
+                "meshes: world {} tris, sphere {} tris",
+                world_mesh.indices.len() / 3,
+                sphere_mesh.indices.len() / 3
+            );
 
             // --- Spawn the probe above the center column ---
             let c = world.center();
@@ -1061,5 +1066,27 @@ mod tests {
             })
             .count();
         assert!(non_axis > 0, "surface nets should yield smooth normals");
+    }
+
+    #[test]
+    fn surface_nets_mesh_is_closed() {
+        // "Hollow from two sides" would mean an open surface. A closed (watertight) mesh shares every
+        // undirected edge an even number of times; a boundary edge (odd count) is a hole.
+        use std::collections::HashMap;
+        let mats = materials::load();
+        let w = world::generate(&mats);
+        let mesh = mesher::build_surface_nets(&w, &mats);
+        let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
+        for tri in mesh.indices.chunks_exact(3) {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edges.entry(key).or_insert(0) += 1;
+            }
+        }
+        let boundary = edges.values().filter(|&&c| c % 2 != 0).count();
+        assert_eq!(
+            boundary, 0,
+            "mesh must be closed (watertight); found {boundary} boundary edges"
+        );
     }
 }

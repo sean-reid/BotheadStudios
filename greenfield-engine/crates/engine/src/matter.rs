@@ -161,8 +161,10 @@ impl MatterSim {
         let mut i = 0;
         while i < self.particles.len() {
             let mut p = self.particles[i];
-            // Debris uses the cheap COM approximation — O(1) per particle, adequate for many lumps.
-            let accel = field.acceleration_point_approx(p.pos, 4.0);
+            // Full aggregated field so debris falls ~straight down on the wide slab. (The cheap
+            // center-of-mass approximation pulls off-center debris toward the middle, making it drift
+            // inward and pile into growing mounds.)
+            let accel = field.acceleration_at(p.pos, 6.0);
             p.vel += accel * dt;
             p.vel *= DRAG;
             p.pos += p.vel * dt;
@@ -250,7 +252,7 @@ mod tests {
     fn matter_conserved_through_dig_and_settle() {
         let mats = materials::load();
         let mut w = world::generate(&mats);
-        let field = gravity::MassField::build(&w, &mats, 4);
+        let field = gravity::MassField::build(&w, &mats, 8);
         let before = w.solid_count();
         let surf = center_surface(&w);
 
@@ -296,7 +298,7 @@ mod tests {
     fn collapse_drops_floating_and_conserves() {
         let mats = materials::load();
         let mut w = world::generate(&mats);
-        let field = gravity::MassField::build(&w, &mats, 4);
+        let field = gravity::MassField::build(&w, &mats, 8);
         let rock = materials::index_of(&mats, "granite");
         let before = w.solid_count();
 

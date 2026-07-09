@@ -1,6 +1,6 @@
 {
   "name": "greenfield-engine-web",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "type": "module",
   "description": "Thin browser host for greenfield-engine (loads the Rust/WASM core).",
@@ -15,6 +15,7 @@
   "devDependencies": {
     "@vitejs/plugin-basic-ssl": "^2.3.0",
     "@webgpu/types": "^0.1.52",
+    "playwright": "^1.61.1",
     "typescript": "^5.6.3",
     "vite": "^6.0.5"
   }

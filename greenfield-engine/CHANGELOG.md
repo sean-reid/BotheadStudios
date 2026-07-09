@@ -9,6 +9,27 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-07-08
+
+**Phase 6 fixes** (from an iPad play-test).
+
+### Fixed
+- **Terrain was hollow / open on some sides.** Surface Nets had only one cell of boundary padding, so
+  the outer walls sat at the grid edge where closing quads can't form → holes. Padded by two cells;
+  new `surface_nets_mesh_is_closed` test verifies the mesh is **watertight** (0 boundary edges).
+- **"Eroded cubes" / poor shading.** Feed Surface Nets a **smoothed** (box-blurred) occupancy field so
+  the iso-surface rounds properly, and use its own **consistently-outward** normals (a binary field's
+  gradient is blocky and my geometry-normal recompute could invert walls).
+- **Long-press blast "grew" mounds.** Debris used a center-of-mass gravity approximation that pulls
+  off-center matter inward, so it drifted to the middle and piled up. Debris now uses the **full**
+  aggregated field (near-straight-down on the slab); the field is coarsened (block 8) to keep the
+  per-particle queries cheap.
+
+### Added
+- `web/screenshot.mjs` — a headless-Chromium (Playwright) visual-check harness for verifying the
+  WebGPU render. Needs GPU render-node access; without it, Chromium falls back to software (SwiftShader),
+  which can't run the texture-array pipeline.
+
 ## [0.7.0] — 2026-07-08
 
 **Phase 6 — smooth surface meshing.** Terrain and craters render as smooth surfaces instead of
@@ -158,7 +179,8 @@ pipeline is live, driven by a thin Vite/TypeScript host.
 - Pinned to `wgpu` 24.0.5. WebGPU-only backend to keep the WASM small.
 - **Public API is unstable** while we're pre-1.0 (see versioning policy).
 
-[Unreleased]: https://example.invalid/compare/v0.7.0...HEAD
+[Unreleased]: https://example.invalid/compare/v0.7.1...HEAD
+[0.7.1]: https://example.invalid/releases/tag/v0.7.1
 [0.7.0]: https://example.invalid/releases/tag/v0.7.0
 [0.6.0]: https://example.invalid/releases/tag/v0.6.0
 [0.5.0]: https://example.invalid/releases/tag/v0.5.0
