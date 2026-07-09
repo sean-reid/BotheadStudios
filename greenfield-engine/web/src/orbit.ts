@@ -89,33 +89,64 @@ async function main(): Promise<void> {
     if (stats) stats.hidden = false;
     report("info", "orbit demo created OK");
 
-    // --- Focus control: the viewport is a physical frame of reference (docs/17). Tap to re-centre
-    // the whole view on the Earth or the Moon. ---
-    const focusBtn = document.createElement("button");
-    const refreshFocusLabel = (): void => {
-      focusBtn.textContent = `Focus: ${demo.focus_label()} ⇄`;
-    };
-    Object.assign(focusBtn.style, {
+    // --- Control bar: frame of reference + the orbital-decay experiment + time control ---
+    const bar = document.createElement("div");
+    Object.assign(bar.style, {
       position: "fixed",
-      left: "12px",
+      left: "50%",
       bottom: "12px",
+      transform: "translateX(-50%)",
       zIndex: "10",
-      padding: "10px 14px",
-      font: "600 15px/1 system-ui, sans-serif",
-      color: "#fff",
-      background: "rgba(20,24,40,0.72)",
-      border: "1px solid rgba(255,255,255,0.25)",
-      borderRadius: "10px",
-      backdropFilter: "blur(6px)",
-      cursor: "pointer",
-      touchAction: "manipulation",
+      display: "flex",
+      gap: "6px",
+      flexWrap: "wrap",
+      justifyContent: "center",
+      maxWidth: "96vw",
     });
-    refreshFocusLabel();
-    focusBtn.addEventListener("click", () => {
+    const mkBtn = (label: string, onClick: () => void): HTMLButtonElement => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      Object.assign(b.style, {
+        padding: "9px 13px",
+        font: "600 14px/1 system-ui, sans-serif",
+        color: "#fff",
+        background: "rgba(20,24,40,0.72)",
+        border: "1px solid rgba(255,255,255,0.25)",
+        borderRadius: "10px",
+        backdropFilter: "blur(6px)",
+        cursor: "pointer",
+        touchAction: "manipulation",
+      });
+      b.addEventListener("click", onClick);
+      bar.appendChild(b);
+      return b;
+    };
+
+    // The viewport is a physical frame of reference (docs/17): re-centre on Earth or Moon.
+    const focusBtn = mkBtn("", () => {
       demo.cycle_focus();
-      refreshFocusLabel();
+      focusBtn.textContent = `Focus: ${demo.focus_label()}`;
     });
-    document.body.appendChild(focusBtn);
+    focusBtn.textContent = `Focus: ${demo.focus_label()}`;
+
+    // Orbital decay: brake the Moon until its orbit crashes into the planet.
+    mkBtn("Brake Moon ½×", () => demo.brake_moon());
+    mkBtn("Drop Moon", () => demo.drop_moon());
+    mkBtn("Reset", () => demo.reset_moon());
+
+    // Variable time multiplier.
+    let timeScale = demo.time_scale_value();
+    const applyTime = (): void => demo.set_time_scale(timeScale);
+    mkBtn("⏪ slower", () => {
+      timeScale = Math.max(1, timeScale / 2);
+      applyTime();
+    });
+    mkBtn("⏩ faster", () => {
+      timeScale = Math.min(2_000_000, timeScale * 2);
+      applyTime();
+    });
+
+    document.body.appendChild(bar);
 
     window.addEventListener("resize", () => {
       sizeCanvas(canvas);
@@ -190,10 +221,30 @@ async function main(): Promise<void> {
     let lastFpsTime = performance.now();
     const updateStats = () => {
       if (!stats) return;
+      const peri = demo.moon_perigee_km();
+      let line2: string;
+      if (demo.has_impacted()) {
+        const e = demo.impact_energy_j();
+        const shatter = Math.round(e / demo.moon_binding_energy_j());
+        line2 =
+          `<b style="color:#ff8a8a">💥 IMPACT — ${e.toExponential(2)} J</b> ` +
+          `(~${shatter.toLocaleString()}× the Moon's binding energy → both bodies would be ` +
+          `destroyed) <span style="opacity:.7">· fragmentation not yet modelled</span>`;
+      } else if (peri < 0) {
+        line2 = `perigee <b>unbound</b> (would escape)`;
+      } else {
+        const crash = peri < 8108; // Earth radius + Moon radius, km → surfaces meet
+        line2 =
+          `perigee <b style="color:${crash ? "#ff8a8a" : "#dfe6ff"}">` +
+          `${Math.round(peri).toLocaleString()}</b> km ` +
+          `<span style="opacity:.7">(Earth R ≈ 6,371 — brake below this to crash)</span>`;
+      }
       stats.innerHTML =
-        `<b>Sun · Earth · Moon</b> · real mass, size, velocity &amp; sunlight<br>` +
-        `frame <b>${demo.focus_label()}</b> · Earth–Moon <b>${demo.moon_distance_km().toFixed(0)}</b> km (real ≈ 384,400)<br>` +
-        `<b>${fps}</b> fps · drag orbit · pinch / wheel zoom`;
+        `<b>Sun · Earth · Moon</b> · frame <b>${demo.focus_label()}</b> · ` +
+        `Earth–Moon <b>${demo.moon_distance_km().toFixed(0)}</b> km<br>` +
+        `${line2}<br>` +
+        `time <b>${Math.round(demo.time_scale_value()).toLocaleString()}×</b> · ` +
+        `<b>${fps}</b> fps · drag / pinch`;
     };
 
     let firstFrame = true;

@@ -982,6 +982,13 @@ mod app {
         // brightness (illumination × reflectance), so a dark-but-lit body still reads bright.
         earth_tint: [f32; 4],
         moon_tint: [f32; 4],
+        /// Snapshot of the initial [Sun, Earth, Moon] state, for the "reset" control.
+        initial_bodies: Vec<crate::orbit::Body>,
+        /// True once the Moon has struck the Earth (contact resolution fired) — for the HUD.
+        impacted: bool,
+        /// Kinetic energy (J) the impact dissipated — the energy that would become damage. Reported,
+        /// not yet turned into actual fragmentation (docs/17 honesty: measure it, don't hide it).
+        impact_energy_j: f64,
     }
 
     #[wasm_bindgen]
@@ -1086,6 +1093,7 @@ mod app {
                 },
             ];
             let acc = crate::orbit::accelerations(&bodies);
+            let initial_bodies = bodies.clone();
 
             // Body colours derived from a real composition, aggregated (docs/17) — NOT hand-picked.
             // Earth: ~71% ocean water, ~24% continental (granitic) rock, ~5% polar ice. This EXCLUDES
@@ -1134,7 +1142,64 @@ mod app {
                 focus: 1, // start on the planet
                 earth_tint,
                 moon_tint,
+                initial_bodies,
+                impacted: false,
+                impact_energy_j: 0.0,
             })
+        }
+
+        // --- Orbital-decay controls: brake the Moon and watch its orbit tighten into a crash. ---
+
+        /// Halve the Moon's velocity *relative to the Earth* — the orbital-decay control. Each tap
+        /// tightens the orbit (watch `moon_perigee_km` fall); a few taps drop the perigee below the
+        /// planet's surface and the Moon crashes. (A single halving still misses — real orbital
+        /// mechanics, not a trick.)
+        pub fn brake_moon(&mut self) {
+            let earth_vel = self.bodies[1].vel;
+            self.bodies[2].vel = earth_vel + (self.bodies[2].vel - earth_vel) * 0.5;
+        }
+
+        /// Cancel the Moon's velocity relative to the Earth entirely — it drops straight in and
+        /// crashes. The dramatic version.
+        pub fn drop_moon(&mut self) {
+            self.bodies[2].vel = self.bodies[1].vel;
+        }
+
+        /// Restore the original Sun–Earth–Moon state (undo braking / the crash).
+        pub fn reset_moon(&mut self) {
+            self.bodies = self.initial_bodies.clone();
+            self.acc = crate::orbit::accelerations(&self.bodies);
+            self.impacted = false;
+            self.impact_energy_j = 0.0;
+        }
+
+        /// Predicted perigee (closest approach) of the Moon's orbit about the Earth, in km — or a
+        /// negative value if the orbit is unbound. Drops below Earth's radius (~6,371 km) before a crash.
+        pub fn moon_perigee_km(&self) -> f64 {
+            let rel_pos = self.bodies[2].pos - self.bodies[1].pos;
+            let rel_vel = self.bodies[2].vel - self.bodies[1].vel;
+            let mu = crate::orbit::G * (self.bodies[1].mass + self.bodies[2].mass);
+            crate::orbit::perigee(rel_pos, rel_vel, mu).map_or(-1.0, |p| p / 1000.0)
+        }
+
+        /// Whether the Moon has struck the planet (HUD).
+        pub fn has_impacted(&self) -> bool {
+            self.impacted
+        }
+
+        /// Energy (J) the impact released — what would become heat, fracture, and ejecta.
+        pub fn impact_energy_j(&self) -> f64 {
+            self.impact_energy_j
+        }
+
+        /// The Moon's gravitational binding energy (J), for comparison: impact ≫ binding ⇒ it shatters.
+        pub fn moon_binding_energy_j(&self) -> f64 {
+            crate::orbit::binding_energy(MOON_MASS, MOON_RADIUS_M)
+        }
+
+        /// Current time multiplier (sim-seconds per real-second), for the HUD.
+        pub fn time_scale_value(&self) -> f64 {
+            self.time_scale
         }
 
         /// Cycle the view's frame of reference between the bodies we can stand on (Earth ⇄ Moon). The
@@ -1180,8 +1245,23 @@ mod app {
             // Advance the N-body orbit (real SI seconds), substepped for a stable symplectic step.
             let sim_dt = self.time_scale / 60.0;
             let dt = sim_dt / ORBIT_SUBSTEPS as f64;
+            let contact = EARTH_RADIUS_M + MOON_RADIUS_M; // Earth + Moon radii: surfaces touch here
             for _ in 0..ORBIT_SUBSTEPS {
                 crate::orbit::verlet_step(&mut self.bodies, &mut self.acc, dt);
+                // Earth (index 1) vs Moon (index 2): solid bodies collide at their surfaces — they
+                // don't tunnel through each other as point masses into a 1/r² singularity.
+                let (head, tail) = self.bodies.split_at_mut(2);
+                let (earth, moon) = (&mut head[1], &mut tail[0]);
+                // Measure the impact energy BEFORE the (energy-removing) contact resolution, so we can
+                // honestly report the damage this collision would do (docs/17) even though the
+                // fragmentation itself isn't modelled yet.
+                let dissipated = crate::orbit::inelastic_dissipation(earth, moon);
+                if crate::orbit::resolve_contact(earth, moon, contact) {
+                    if !self.impacted {
+                        self.impact_energy_j = dissipated;
+                    }
+                    self.impacted = true;
+                }
             }
 
             let view_proj = self.view_proj();

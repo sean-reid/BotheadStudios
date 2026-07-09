@@ -76,6 +76,74 @@ pub fn angular_momentum(bodies: &[Body]) -> DVec3 {
         .fold(DVec3::ZERO, |l, b| l + b.mass * b.pos.cross(b.vel))
 }
 
+/// Perigee (closest approach) of the relative two-body orbit, in metres — or `None` if the orbit is
+/// unbound (it would escape, not come back). `mu = G·(m1 + m2)`. Lets the HUD tell, live, whether a
+/// slowed Moon will merely graze, plunge deep, or crash into the planet. Standard orbital-elements
+/// relations (specific energy + angular momentum → semi-major axis + eccentricity → perigee).
+pub fn perigee(rel_pos: DVec3, rel_vel: DVec3, mu: f64) -> Option<f64> {
+    let r = rel_pos.length();
+    if r == 0.0 {
+        return Some(0.0);
+    }
+    let energy = 0.5 * rel_vel.length_squared() - mu / r;
+    if energy >= 0.0 {
+        return None; // unbound (parabolic/hyperbolic) — no perigee it returns to
+    }
+    let a = -mu / (2.0 * energy);
+    let h = rel_pos.cross(rel_vel).length();
+    let e = (1.0 + 2.0 * energy * h * h / (mu * mu)).max(0.0).sqrt();
+    Some(a * (1.0 - e))
+}
+
+/// Perfectly-inelastic **contact resolution** for two solid bodies that have interpenetrated: separate
+/// them until their surfaces just touch (`r_sum` apart) and remove the approaching relative velocity
+/// along the contact normal, so they can't pass through one another. Momentum-conserving. Returns
+/// `true` if they were in contact. This is the celestial-scale echo of the voxel body/particle
+/// contacts (`docs/16`): solid things collide at their surfaces — a point mass tunnelling through
+/// another into a 1/r² singularity would be a fudge (and a numerical explosion), not a collision.
+pub fn resolve_contact(a: &mut Body, b: &mut Body, r_sum: f64) -> bool {
+    let d = b.pos - a.pos;
+    let dist = d.length();
+    if dist >= r_sum || dist == 0.0 {
+        return false;
+    }
+    let n = d / dist; // contact normal, a → b
+    let inv_a = 1.0 / a.mass;
+    let inv_b = 1.0 / b.mass;
+    let inv_sum = inv_a + inv_b;
+
+    // Separate to just-touching, split by inverse mass (the heavier body barely moves).
+    let pen = r_sum - dist;
+    a.pos -= n * (pen * inv_a / inv_sum);
+    b.pos += n * (pen * inv_b / inv_sum);
+
+    // Kill the approaching normal velocity (perfectly inelastic along the normal).
+    let rel = (b.vel - a.vel).dot(n);
+    if rel < 0.0 {
+        let j = -rel / inv_sum;
+        a.vel -= n * (j * inv_a);
+        b.vel += n * (j * inv_b);
+    }
+    true
+}
+
+/// Kinetic energy (J) a perfectly-inelastic collision between two bodies would dissipate: ½·μ·|Δv|²
+/// with reduced mass μ = m_a·m_b/(m_a+m_b). This is the energy that *must* go somewhere real — heat,
+/// fracture, melt, ejecta. Our contact resolution currently removes it without modelling where it
+/// goes; surfacing this number keeps us honest that a "click to rest" is a placeholder, not the whole
+/// truth of an impact.
+pub fn inelastic_dissipation(a: &Body, b: &Body) -> f64 {
+    let reduced = a.mass * b.mass / (a.mass + b.mass);
+    0.5 * reduced * (b.vel - a.vel).length_squared()
+}
+
+/// Gravitational **binding energy** (J) of a uniform sphere: (3/5)·G·M²/R — roughly the energy needed
+/// to disperse the body. Comparing an impact's energy to this tells us, honestly, whether the impact
+/// would shatter the body (impact ≫ binding) rather than merely dent it.
+pub fn binding_energy(mass: f64, radius: f64) -> f64 {
+    0.6 * G * mass * mass / radius
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +292,107 @@ mod tests {
         assert!(
             (total_energy(&bodies) - e0).abs() / e0.abs() < 0.01,
             "3-body energy conserved to <1%"
+        );
+    }
+
+    #[test]
+    fn perigee_tracks_how_hard_the_moon_is_braked() {
+        let mu = G * (5.972e24 + 7.342e22); // Earth+Moon
+        let r = 3.844e8;
+        let vc = (mu / r).sqrt(); // circular speed at this radius
+
+        // A circular orbit's perigee is (essentially) its radius.
+        let rp = perigee(DVec3::new(r, 0.0, 0.0), DVec3::new(0.0, vc, 0.0), mu).unwrap();
+        assert!((rp - r).abs() / r < 1e-3, "circular perigee ≈ radius");
+
+        // Halving the speed drops perigee deep inside (analytic: r·f²/(2−f²), f=0.5 → 0.1429 r) — still
+        // well above Earth's radius, so a single halving does NOT crash the Moon.
+        let rp_half = perigee(DVec3::new(r, 0.0, 0.0), DVec3::new(0.0, 0.5 * vc, 0.0), mu).unwrap();
+        assert!((rp_half - 0.1429 * r).abs() / (0.1429 * r) < 0.02);
+        assert!(rp_half > 6.371e6, "halving alone misses the planet");
+
+        // Cancelling the velocity entirely → radial plunge → perigee 0 → a guaranteed impact.
+        let rp_drop = perigee(DVec3::new(r, 0.0, 0.0), DVec3::ZERO, mu).unwrap();
+        assert!(
+            rp_drop < 1.0,
+            "a dropped Moon falls straight through the centre (perigee ≈ 0)"
+        );
+    }
+
+    #[test]
+    fn a_dropped_moon_crashes_into_the_planet_and_stops_at_the_surface() {
+        // Cancel the Moon's orbital velocity and let it fall: it must reach the Earth's surface and be
+        // caught by contact resolution (not tunnel through the point-mass singularity).
+        let m_earth = 5.972e24;
+        let m_moon = 7.342e22;
+        let r_earth = 6.371e6;
+        let r_moon = 1.737e6;
+        let r_sum = r_earth + r_moon;
+        let d = 3.844e8;
+
+        let mut bodies = vec![
+            Body {
+                pos: DVec3::ZERO,
+                vel: DVec3::ZERO,
+                mass: m_earth,
+            },
+            Body {
+                pos: DVec3::new(d, 0.0, 0.0),
+                vel: DVec3::ZERO, // dropped from rest → radial plunge
+                mass: m_moon,
+            },
+        ];
+
+        let dt = 30.0;
+        let mut acc = accelerations(&bodies);
+        let mut impacted = false;
+        // ~5 days is plenty for the fall from 384,400 km.
+        for _ in 0..(5 * 86_400 / 30) {
+            verlet_step(&mut bodies, &mut acc, dt);
+            let (left, right) = bodies.split_at_mut(1);
+            if resolve_contact(&mut left[0], &mut right[0], r_sum) {
+                impacted = true;
+                break;
+            }
+        }
+
+        assert!(impacted, "the dropped Moon should reach the planet");
+        let sep = (bodies[1].pos - bodies[0].pos).length();
+        assert!(
+            sep >= r_sum - 1.0 && sep < r_sum + 5.0e5,
+            "it rests at the surface, not inside the planet (sep {sep:.3e}, r_sum {r_sum:.3e})"
+        );
+    }
+
+    #[test]
+    fn impact_energy_would_shatter_both_bodies() {
+        // A Moon arriving at ~11 km/s releases far more energy than holds it together — so a real
+        // impact is catastrophic disruption, not a gentle stop. We measure it even though the
+        // fragmentation itself is not simulated yet (honesty: report the damage, don't hide it).
+        let m_earth = 5.972e24;
+        let m_moon = 7.342e22;
+        let r_earth = 6.371e6;
+        let r_moon = 1.737e6;
+        let earth = Body {
+            pos: DVec3::ZERO,
+            vel: DVec3::ZERO,
+            mass: m_earth,
+        };
+        let moon = Body {
+            pos: DVec3::new(r_earth + r_moon, 0.0, 0.0),
+            vel: DVec3::new(-11_090.0, 0.0, 0.0), // ~free-fall speed from lunar distance
+            mass: m_moon,
+        };
+
+        let ke = inelastic_dissipation(&earth, &moon);
+        let bind = binding_energy(m_moon, r_moon);
+        assert!(
+            ke > 1.0e30 && ke < 1.0e31,
+            "impact energy ~4.5e30 J (got {ke:.3e})"
+        );
+        assert!(
+            ke > 10.0 * bind,
+            "impact energy dwarfs the Moon's binding energy (ke {ke:.3e}, bind {bind:.3e})"
         );
     }
 }

@@ -5,6 +5,43 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — Orbital-decay control: brake the Moon until it crashes (with real collision)
+
+**What.** The requested experiment — slow the Moon and watch its orbit decay into the planet — plus the
+honest physics that makes a "smash" real rather than a numerical explosion. `orbit::resolve_contact`
+adds **surface collision**: two solid bodies stop when their surfaces meet (perfectly inelastic,
+momentum-conserving), instead of tunnelling through each other as point masses into a 1/r² singularity
+— the celestial echo of the voxel body contacts (`docs/16`). `orbit::perigee` computes the live
+closest-approach so the HUD can show the orbit tightening. OrbitDemo exposes `brake_moon` (halve the
+Moon's velocity relative to Earth), `drop_moon` (cancel it → radial plunge), `reset_moon`, plus a
+variable **time multiplier** in the HUD. The web control bar gains Brake / Drop / Reset + slower/faster,
+and the HUD shows perigee (reddening below Earth's radius) and "💥 IMPACT".
+
+**Why.** Robin wanted to watch the Moon smash the Earth. The honest lesson is built in: in a
+conservative two-body system a *single* halving does NOT crash — it drops into a tighter eccentric
+ellipse (perigee ~55,000 km, still a miss); it takes a few brakes (or a full drop) to push perigee
+below the surface. Real orbital mechanics, shown, not faked. Also exposed the time multiplier per
+Robin's note (and it lets you slow time to watch the impact).
+
+**Verified.** `cargo test` 31/31 — including `perigee_tracks_how_hard_the_moon_is_braked` and
+`a_dropped_moon_crashes_into_the_planet_and_stops_at_the_surface` (it reaches the surface and rests
+there, no tunnelling). clippy `-D warnings` clean; fmt clean; wasm + `tsc` green. Visuals pending
+Robin's on-device check.
+
+**Impact energy (honesty).** Robin noted that at these masses an impact must do *damage* — and that a
+perfectly-inelastic "stop at the surface" silently *deletes* the kinetic energy, which is itself a
+fudge. So we now **measure and report** it: `orbit::inelastic_dissipation` (the KE the collision
+removes) and `orbit::binding_energy`. A dropped Moon hits at ~11 km/s → ~4.5e30 J ≈ **36× the Moon's
+gravitational binding energy**; the HUD shows this and states plainly that both bodies would be
+destroyed. We measure the damage rather than hide it or fake it.
+
+**Honest scope note.** "Collision" here is surface contact + inelastic stop, plus the reported impact
+energy; actual **fragmentation** (deformation, melt, debris, merging) is a future subsystem — the
+honest zoom-in unification of the voxel-fracture model (`matter.rs` `fracture_strength`) at scale.
+Flagged, not faked.
+
+---
+
 ## 2026-07-09 — Live real-Sun lighting, selectable focus frame, scene picker
 
 **What.** Wired the real Sun into the *live* space band (following the validated physics): the demo now

@@ -10,6 +10,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **Orbital-decay control + real collision** in the space band (`docs/17`). `Brake Moon ½×` halves the
+  Moon's velocity relative to Earth (a single halving still misses — real orbital mechanics), `Drop
+  Moon` cancels it for a radial plunge, `Reset` restores. `orbit::resolve_contact` gives the bodies
+  **surface collision** (they stop when their surfaces meet instead of tunnelling through as point
+  masses); `orbit::perigee` drives a live closest-approach readout that reddens before a crash. The
+  impact's energy is measured and reported (`orbit::inelastic_dissipation` vs `binding_energy`): a
+  dropped Moon releases ~4.5e30 J ≈ 36× the Moon's binding energy — the HUD says plainly both bodies
+  would be destroyed (actual fragmentation is future, flagged not faked). Variable **time multiplier**
+  now exposed in the HUD.
 - **Live real-Sun lighting + selectable focus frame** in the space band (`docs/17`). The demo now
   simulates `[Sun, Earth, Moon]` with the Earth on its true heliocentric orbit; the shader lights each
   body from the Sun's *actual position* (per-body, so phases are geometric), and the Sun — far
