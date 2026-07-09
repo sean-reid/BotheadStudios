@@ -9,6 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-07-09
+
+### Fixed
+- **Probe clipped into crater walls — looked duplicated and rested at the wrong height.** The sphere
+  only collided with the terrain column directly beneath it, so near a dig it embedded in the wall
+  (visible through the thin smoothed surface as a "second ball"). Replaced with proper **sphere-vs-
+  voxel collision**: it's pushed out of *any* solid voxel it overlaps (floor, walls, corners), with
+  restitution + friction. Solid objects act solid now. Native tests: rests on a voxel floor without
+  penetrating; doesn't clip into a wall.
+
 ## [0.7.1] — 2026-07-08
 
 **Phase 6 fixes** (from an iPad play-test).

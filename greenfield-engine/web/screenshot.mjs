@@ -14,7 +14,6 @@ const browser = await chromium.launch({
     "--no-sandbox",
     "--enable-unsafe-webgpu",
     "--enable-features=Vulkan",
-    "--use-angle=vulkan",
     "--ignore-gpu-blocklist",
     "--enable-gpu",
   ],
@@ -29,7 +28,6 @@ page.on("console", (m) => console.log("PAGE", m.type(), m.text()));
 page.on("pageerror", (e) => console.log("PAGEERR", e.message));
 
 await page.goto(url, { waitUntil: "load", timeout: 30000 });
-console.log("navigator.gpu present:", await page.evaluate(() => "gpu" in navigator));
 await page.waitForTimeout(waitMs);
 
 if (action) {

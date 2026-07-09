@@ -596,8 +596,8 @@ mod app {
                 let accel = self
                     .field
                     .acceleration_at(self.sphere.pos, GRAVITY_SOFTENING);
-                let ground_y = self.ground_under_sphere();
-                self.sphere.step(accel, dt, ground_y);
+                self.sphere.integrate(accel, dt);
+                self.sphere.collide(&self.world, accel, dt);
                 self.matter.step(&mut self.world, &self.field, dt);
             }
         }
@@ -1005,14 +1005,9 @@ mod tests {
         // Fast-forward: the accel is tiny and smooth, so large steps integrate fine.
         let dt = 5.0;
         for _ in 0..8000 {
-            let accel = field.acceleration_at(s.pos, 4.0);
-            let xi = (s.pos.x + c.x).floor() as i32;
-            let zi = (s.pos.z + c.z).floor() as i32;
-            let ground_y = w
-                .surface_top_voxel(xi, zi)
-                .map(|t| t as f32 - c.y)
-                .unwrap_or(-1.0e30);
-            s.step(accel, dt, ground_y);
+            let accel = field.acceleration_at(s.pos, 6.0);
+            s.integrate(accel, dt);
+            s.collide(&w, accel, dt);
             if s.resting {
                 break;
             }
