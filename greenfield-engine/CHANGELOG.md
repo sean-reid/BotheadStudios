@@ -9,6 +9,22 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-09
+
+**Orbital-mechanics validation (N-body).** The gravity law is now validated against real celestial
+motion, not just voxel self-gravity.
+
+### Added
+- `orbit.rs` — N-body point-mass gravity with a symplectic **velocity-Verlet** integrator, plus
+  energy/angular-momentum helpers. Native test: the **real Earth + Moon** (masses, 384,400 km,
+  ~1.022 km/s) produce a **bound orbit** — the Moon completes ≥1 revolution, its distance stays
+  within 15% of the real value, and energy + angular momentum are conserved to <1%. "If the Moon
+  orbits the planet, the simulator is good" — it does.
+
+### Notes
+- Foundation for a future planet-scale demo. The validation itself needs **no rendering** (a pure
+  native test), which sidesteps the headless-WebGPU limitation entirely.
+
 ## [0.7.2] — 2026-07-09
 
 ### Fixed

@@ -25,6 +25,7 @@ mod gravity;
 mod materials;
 mod matter;
 mod mesher;
+mod orbit;
 mod texture;
 mod world;
 

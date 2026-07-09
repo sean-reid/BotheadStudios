@@ -5,6 +5,30 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — Solid-object collision + orbital-mechanics validation (v0.7.2, v0.8.0)
+
+**Collision (v0.7.2).** From an iPad play-test: the probe clipped into crater walls (looked like a
+duplicate ball, rested too high) because it only collided with the terrain column directly beneath
+it. Replaced with proper **sphere-vs-voxel collision** (`body.rs`): integrate under gravity, then
+iteratively push out of the deepest solid voxel the sphere overlaps (floor, walls, corners) with
+restitution + friction. Solid objects act solid.
+
+**Orbital validation (v0.8.0).** Added `orbit.rs` — N-body point-mass gravity + a symplectic
+velocity-Verlet integrator. The native test drops in the **real Earth + Moon** (masses, 384,400 km,
+1.022 km/s) and confirms a bound orbit: ≥1 full revolution, distance within 15% of real, energy +
+angular momentum conserved <1%. This proves the gravity law reproduces real celestial motion — the
+"does the Moon orbit the planet?" test — and, importantly, it's a **pure native test** (no rendering),
+so it verifies the physics despite headless WebGPU being unavailable here.
+
+**Note on tooling.** Headless Chromium here renders WebGPU only via software (SwiftShader) or hits a
+Dawn instance bug on the real GPU, so I can't screenshot the full render; I lean on native tests
+(watertight mesh, collision, orbit) + the user's iPad for visual confirmation. `web/screenshot.mjs`
+is kept for environments with GPU access.
+
+**Verified.** `cargo test` 22/22; clippy `-D warnings` clean; wasm + web build green.
+
+---
+
 ## 2026-07-08 — Phase 6: smooth surface meshing (v0.7.0)
 
 **What.** Terrain and craters now render smooth instead of blocky cubes. `mesher::build_surface_nets`
