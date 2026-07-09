@@ -128,6 +128,97 @@ impl MatterSim {
         spawned
     }
 
+    /// A projectile striking the world — the generalized, **energy-driven impact** that a bullet, a
+    /// pebble, or a falling moon all use (`docs/18`). It deposits kinetic `energy` (J) at `site`
+    /// (centered coords) travelling along `direction`; spending the energy nearest-first, each voxel
+    /// whose material fracture strength the budget can pay for (σ·V joules) detaches into ejecta, and
+    /// too-strong voxels are left intact. So bigger energy → bigger crater, stronger material → smaller
+    /// crater, and a liquid (σ≈0) yields everywhere it reaches (a splash). Ejecta fly along the impact
+    /// + outward, sharing the leftover energy as kinetic. Returns the number of voxels ejected.
+    ///
+    /// **Scale-invariant:** a 10 g bullet at ~300 m/s (~450 J) and the Moon at ~11 km/s (~4.5e30 J)
+    /// are the *same call* — only the numbers differ. The one non-physical knob is a hard search-radius
+    /// cap, standing in for LOD: a truly huge impact should be *summarized* at coarse scale, not
+    /// materialised voxel-by-voxel (`docs/18`).
+    pub fn impact(
+        &mut self,
+        world: &mut World,
+        materials: &[Material],
+        site: Vec3,
+        direction: Vec3,
+        energy: f32,
+    ) -> usize {
+        const MAX_R: i32 = 24; // LOD guard on the materialised crater
+        let center = world.center();
+        let sv = site + center; // voxel space
+        let dir = direction.normalize_or_zero();
+        let (cx, cy, cz) = (
+            sv.x.floor() as i32,
+            sv.y.floor() as i32,
+            sv.z.floor() as i32,
+        );
+
+        // Solid voxels in range, nearest first (a stand-in for "most stressed first").
+        let mut candidates: Vec<(f32, i32, i32, i32, usize)> = Vec::new();
+        for dz in -MAX_R..=MAX_R {
+            for dy in -MAX_R..=MAX_R {
+                for dx in -MAX_R..=MAX_R {
+                    let (x, y, z) = (cx + dx, cy + dy, cz + dz);
+                    let vc = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                    let d = (vc - sv).length();
+                    if d > MAX_R as f32 {
+                        continue;
+                    }
+                    if let Some(mat) = world.material_at(x, y, z) {
+                        candidates.push((d, x, y, z, mat));
+                    }
+                }
+            }
+        }
+        candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        // Spend the energy budget fracturing what it can afford; a voxel costs σ·V (Pa·m³ = J) to
+        // detach. Too-strong voxels are skipped (left intact), so weak matter craters while strong
+        // matter resists — bullet-in-rock vs pebble-in-pond falls out of the material, not a branch.
+        let mut budget = energy;
+        let mut ejecta: Vec<usize> = Vec::new();
+        for (_d, x, y, z, mat) in candidates {
+            if self.particles.len() >= self.max_particles {
+                break;
+            }
+            let work = materials[mat].fracture_strength; // σ · 1 m³
+            if budget < work {
+                continue; // can't afford this one — leave it intact, try the rest
+            }
+            budget -= work;
+            world.set_voxel(x, y, z, None);
+            let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - center;
+            let outward = (pos - site).normalize_or_zero();
+            let ev = (dir * 0.5 + outward * 0.5).normalize_or_zero();
+            ejecta.push(self.particles.len());
+            self.particles.push(Particle {
+                pos,
+                vel: ev, // unit direction now; speed assigned below from the energy share
+                material: mat,
+                mass: materials[mat].density,
+                resting_frames: 0,
+            });
+        }
+
+        // Share ~30% of the impact energy among the ejecta as kinetic energy (the rest went into
+        // breaking bonds and heat); v = sqrt(2·KE/m). Ejecta energetics are a first model (`docs/18`).
+        if !ejecta.is_empty() {
+            let ke_each = 0.3 * energy / ejecta.len() as f32;
+            for &i in &ejecta {
+                let m = self.particles[i].mass.max(1.0e-6);
+                let speed = (2.0 * ke_each / m).sqrt();
+                self.particles[i].vel *= speed;
+            }
+            self.dirty = true;
+        }
+        ejecta.len()
+    }
+
     /// Structural collapse: detach every voxel no longer connected to the anchored base into a
     /// falling particle (starting from rest). Run after an edit that may have undercut or isolated
     /// matter (a dig). One pass suffices — `find_unsupported` returns the complete disconnected set,
@@ -462,6 +553,81 @@ mod tests {
             sim.particle_count(),
             1,
             "the blocked debris survives (rests on the body), it is not deleted"
+        );
+    }
+
+    #[test]
+    fn impact_is_material_and_scale_invariant() {
+        // The unified impact operator (docs/18): one call, response from material + energy.
+        let mats = materials::load();
+        let surf = center_surface(&world::generate(&mats));
+
+        // Material invariance: the SAME energy craters soft ground but not deep granite.
+        let e = 5.0e6;
+        let mut wd = world::generate(&mats);
+        let mut sd = MatterSim::new(200_000);
+        let n_soft = sd.impact(
+            &mut wd,
+            &mats,
+            Vec3::new(0.0, surf - 1.5, 0.0),
+            Vec3::NEG_Y,
+            e,
+        );
+        assert!(n_soft > 0, "a modest impact craters soft ground");
+
+        let mut wg = world::generate(&mats);
+        let mut sg = MatterSim::new(200_000);
+        let n_rock = sg.impact(
+            &mut wg,
+            &mats,
+            Vec3::new(0.0, surf - 40.0, 0.0),
+            Vec3::NEG_Y,
+            e,
+        );
+        assert_eq!(
+            n_rock, 0,
+            "the same energy can't crack deep granite (material-invariant)"
+        );
+
+        // Scale invariance: on the same granite, more energy → a bigger crater (the same call).
+        let mut w1 = world::generate(&mats);
+        let mut s1 = MatterSim::new(200_000);
+        let small = s1.impact(
+            &mut w1,
+            &mats,
+            Vec3::new(0.0, surf - 40.0, 0.0),
+            Vec3::NEG_Y,
+            1.0e8,
+        );
+        let mut w2 = world::generate(&mats);
+        let mut s2 = MatterSim::new(200_000);
+        let big = s2.impact(
+            &mut w2,
+            &mats,
+            Vec3::new(0.0, surf - 40.0, 0.0),
+            Vec3::NEG_Y,
+            1.0e9,
+        );
+        assert!(
+            small > 0 && big > small,
+            "the crater grows with energy (small {small}, big {big})"
+        );
+
+        // Liquid: a pond yields to even a gentle impact (pebble in a pond) — σ≈0, so it splashes.
+        let water = materials::index_of(&mats, "water");
+        let n = 12usize;
+        let mut pond = World {
+            w: n,
+            h: n,
+            d: n,
+            voxels: vec![water as u16 + 1; n * n * n],
+            max_top: n,
+        };
+        let mut sp = MatterSim::new(200_000);
+        let splash = sp.impact(&mut pond, &mats, Vec3::ZERO, Vec3::NEG_Y, 50.0);
+        assert!(
+            splash > 0,
+            "a gentle impact still displaces water (a splash)"
         );
     }
 }

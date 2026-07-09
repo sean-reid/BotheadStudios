@@ -17,6 +17,8 @@ struct RawFile {
 #[derive(Deserialize)]
 struct RawMaterial {
     id: String,
+    #[serde(default)]
+    phase: String, // "solid" | "granular" | "liquid" | …
     mechanical: RawMechanical,
     optical: RawOptical,
 }
@@ -49,6 +51,11 @@ struct RawOptical {
 #[derive(Clone, Debug)]
 pub struct Material {
     pub id: String,
+    /// State of matter: "solid" | "granular" | "liquid" | … . Governs the deformation response
+    /// (docs/18): solids fracture at their strength, granular media crater and flow, liquids yield at
+    /// ~no strength and flow. Data-driven, so a bullet-in-rock and a pebble-in-a-pond are the *same*
+    /// operator with different material.
+    pub phase: String,
     /// kg/m^3. Authoritative per-material mass; drives self-gravity (voxel mass = density * volume).
     pub density: f32,
     /// Linear-RGB **diffuse reflectance** (0..1) — the fraction of light scattered back, per channel.
@@ -77,18 +84,28 @@ pub fn load() -> Vec<Material> {
         serde_json::from_str(MATERIALS_JSON).expect("bundled data/materials.json is invalid JSON");
     file.materials
         .into_iter()
-        .map(|m| Material {
-            id: m.id,
-            density: m.mechanical.density,
-            albedo: m.optical.albedo,
-            fracture_strength: m
-                .mechanical
-                .tensile_strength
-                .or(m.mechanical.cohesion)
-                .unwrap_or(1.0e12),
-            roughness: m.optical.roughness,
-            metallic: m.optical.metallic,
-            color_variance: m.optical.color_variance,
+        .map(|m| {
+            // A liquid has ~no tensile/shear strength: it yields and flows, it does not hold together.
+            // The old `unwrap_or(1e12)` fallback made a fluid *stronger than granite* — a fudge that
+            // blocked "pebble in a pond". Liquids yield at ~0; other matter uses its real strength.
+            let fracture_strength = if m.phase == "liquid" {
+                0.0
+            } else {
+                m.mechanical
+                    .tensile_strength
+                    .or(m.mechanical.cohesion)
+                    .unwrap_or(1.0e12)
+            };
+            Material {
+                id: m.id,
+                phase: m.phase,
+                density: m.mechanical.density,
+                albedo: m.optical.albedo,
+                fracture_strength,
+                roughness: m.optical.roughness,
+                metallic: m.optical.metallic,
+                color_variance: m.optical.color_variance,
+            }
         })
         .collect()
 }
@@ -162,5 +179,31 @@ mod tests {
 
         // Nothing known → black (no invented colour).
         assert_eq!(aggregate_albedo(&[], &mats), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_liquid_yields_where_a_solid_resists() {
+        // The seed of the unified deformation model (docs/18): the SAME deposited stress yields a
+        // fluid but not a solid — the response comes from material data, not per-object code.
+        let mats = load();
+        let water = &mats[index_of(&mats, "water")];
+        let granite = &mats[index_of(&mats, "granite")];
+
+        assert_eq!(water.phase, "liquid");
+        // A fluid must not be "unbreakable" — that fudge made water stronger than rock.
+        assert!(
+            water.fracture_strength < 1.0,
+            "water yields trivially (it flows)"
+        );
+        assert!(granite.fracture_strength > 1.0e6, "granite resists");
+
+        // A gentle poke (1 kPa) displaces the pond but doesn't crack the rock — bullet-in-rock vs
+        // pebble-in-pond falls out of the material, not a special case.
+        let poke = 1.0e3;
+        assert!(poke >= water.fracture_strength, "the poke displaces water");
+        assert!(
+            poke < granite.fracture_strength,
+            "the same poke leaves granite intact"
+        );
     }
 }

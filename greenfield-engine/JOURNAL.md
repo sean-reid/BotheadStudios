@@ -5,6 +5,39 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — Unified deformation & damage: the design + first honesty slice
+
+**What.** Started the deformation/damage subsystem (`docs/18`) from Robin's requirement that a **bullet,
+a pebble in a pond, and the Moon hitting the Earth be the SAME operator** — differing only in
+parameters and level of detail. The design names two invariances: (1) **material** — the response comes
+from constitutive data (solids fracture at strength, granular media crater, liquids yield at ~0 and
+flow), so bullet-in-rock and pebble-in-pond are one call with different material; (2) **scale/frame** —
+the observer's frame/zoom decides what is materialized (celestial: energy/momentum + crater summary;
+zoom in: voxel fracture + ejecta; zoom way in: grains/buildings), promoting/coarsening across LOD while
+conserving mass/momentum/energy. Two concrete slices landed: (1) parse material **`phase`** and fix the
+liquid fudge — water's `fracture_strength` used to fall back to `1e12` (stronger than granite!); a
+fluid now yields at ~0. (2) `MatterSim::impact(site, direction, energy)` — the **generalized
+energy-driven impact**: it spends the impact energy fracturing voxels nearest-first (σ·V per voxel), so
+bigger energy → bigger crater, stronger material → smaller crater, and a liquid splashes. A 10 g bullet
+(~450 J) and the Moon (~4.5e30 J) are the *same call*.
+
+**Why.** Robin: the same system should observe a bullet, a pebble in a pond, or a planetary impact —
+and at a given scale we simulate only what the observer can perceive (buildings only matter zoomed way
+in; ejecta only zoomed in; celestial scale cares about energy/momentum and a crater summary). This is
+the honest unification of the voxel-fracture model (`matter.rs`) with scale-relative fidelity
+(`docs/13`, `docs/08`) — the endpoint is MLS-MPM with per-phase constitutive models.
+
+**Verified.** `materials::a_liquid_yields_where_a_solid_resists` (a fluid yields to a poke a solid
+withstands) and `matter::impact_is_material_and_scale_invariant` (same energy craters dirt but not deep
+granite; more energy → bigger granite crater; a gentle impact still splashes a pond). `cargo test`
+34/34; clippy `-D warnings` clean; fmt clean; wasm compiles.
+
+**Roadmap remaining (docs/18):** fluid flow (needs a viscosity field, not in the DB yet) → MLS-MPM
+constitutive unification → LOD-adaptive damage (summary ↔ detail on zoom). Robin: "we should get to the
+rest before we're done."
+
+---
+
 ## 2026-07-09 — Orbital-decay control: brake the Moon until it crashes (with real collision)
 
 **What.** The requested experiment — slow the Moon and watch its orbit decay into the planet — plus the

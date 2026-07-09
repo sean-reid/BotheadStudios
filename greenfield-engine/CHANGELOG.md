@@ -10,6 +10,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **Unified deformation & damage — design + first slice** (`docs/18`). One operator for a bullet, a
+  pebble in a pond, and a Moon-into-Earth impact: response governed by material data (material
+  invariance) at the resolution the observer's frame can perceive (scale/frame invariance). Concrete
+  steps: (1) parse material `phase` and fix the liquid fudge — water's `fracture_strength` no longer
+  falls back to an unbreakable `1e12` (it was stronger than granite!); a fluid now yields at ~0. (2)
+  `MatterSim::impact(site, direction, energy)` — the generalized energy-driven impact: spends the
+  impact energy fracturing voxels nearest-first (σ·V each), so bigger energy → bigger crater, stronger
+  material → smaller crater, a liquid splashes; a bullet and the Moon are the same call. Tests:
+  `materials::a_liquid_yields_where_a_solid_resists`, `matter::impact_is_material_and_scale_invariant`.
 - **Orbital-decay control + real collision** in the space band (`docs/17`). `Brake Moon ½×` halves the
   Moon's velocity relative to Earth (a single halving still misses — real orbital mechanics), `Drop
   Moon` cancels it for a radial plunge, `Reset` restores. `orbit::resolve_contact` gives the bodies
