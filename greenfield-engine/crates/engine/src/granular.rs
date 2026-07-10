@@ -36,6 +36,10 @@ pub struct Contact {
     /// Tangential regularization (1/s): how sharply the friction force ramps with slip speed before it
     /// saturates at the Coulomb cap. Avoids a discontinuity at zero slip.
     pub tangent_damp: f64,
+    /// Cap on the normal repulsion acceleration (m/s²). A deep overlap (fast impact, dense jam) would
+    /// otherwise inject a huge penalty force and *launch* the grain — the "flying debris that never
+    /// settles" failure. Capping bounds the spring so overlaps relax gently instead of exploding.
+    pub max_accel: f64,
 }
 
 /// Acceleration on grain *i* due to contact with grain *j* (equal radii). Zero unless they overlap.
@@ -53,9 +57,11 @@ pub fn contact_accel(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) ->
     let v_rel = vi - vj;
     let v_n = v_rel.dot(n); // >0 separating, <0 approaching
 
-    // Normal: repulsion minus damping of the approach. Clamp to ≥0 so a contact can only push apart,
-    // never suck together (an over-damped separating contact would otherwise pull).
-    let a_n_mag = (c.stiffness * overlap - c.normal_damp * v_n).max(0.0);
+    // Normal: repulsion (capped so a deep overlap can't launch the grain) minus damping of the
+    // approach. Clamp to ≥0 so a contact can only push apart, never suck together (an over-damped
+    // separating contact would otherwise pull).
+    let spring = (c.stiffness * overlap).min(c.max_accel);
+    let a_n_mag = (spring - c.normal_damp * v_n).max(0.0);
     let a_n = n * a_n_mag;
 
     // Tangential (Coulomb friction): oppose the slip, but never exceed μ·normal. Regularized so it
@@ -83,6 +89,7 @@ mod tests {
             normal_damp: 140.0,
             friction: 0.6,
             tangent_damp: 200.0,
+            max_accel: 1.0e9, // effectively uncapped for the force-law tests
         }
     }
 
@@ -120,6 +127,29 @@ mod tests {
             "repulsion = stiffness·overlap (got {})",
             a.x
         );
+    }
+
+    #[test]
+    fn the_normal_force_is_capped_so_deep_overlaps_dont_launch() {
+        // A deeply-overlapping pair (fast impact / dense jam) must NOT produce an unbounded penalty
+        // force — otherwise it launches grains and debris never settles (docs/23). With a cap, the
+        // repulsion saturates.
+        let mut c = params();
+        c.max_accel = 400.0;
+        // Big overlap: centres 0.2 apart, touch 1.0 ⇒ overlap 0.8 ⇒ uncapped would be 2e4·0.8 = 16000.
+        let a = contact_accel(
+            DVec3::new(0.2, 0.0, 0.0),
+            DVec3::ZERO,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            &c,
+        );
+        assert!(
+            a.x <= 400.0 + 1e-6,
+            "repulsion capped at max_accel (got {})",
+            a.x
+        );
+        assert!(a.x > 0.0, "still pushes apart");
     }
 
     #[test]

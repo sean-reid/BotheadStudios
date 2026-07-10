@@ -17,7 +17,7 @@ struct Params {
     gravity      : vec3<f32>,
     dt           : f32,
     center       : vec3<f32>, // world.center() offset (centered→voxel coords)
-    _c           : f32,
+    c_max_accel  : f32,       // cap on normal contact accel (prevents deep-overlap launches — docs/23)
     drag         : f32,
     contact_damp : f32,       // ground-collision velocity damping
     settle_speed : f32,
@@ -83,7 +83,10 @@ fn contact_accel(pi : vec3<f32>, vi : vec3<f32>, pj : vec3<f32>, vj : vec3<f32>)
     let overlap = touch - dist;
     let v_rel = vi - vj;
     let v_n = dot(v_rel, n);
-    let a_n_mag = max(P.c_stiffness * overlap - P.c_normal_damp * v_n, 0.0);
+    // Cap the spring term so a deep overlap (fast impact, dense jam) can't launch grains — the fix for
+    // debris flung skyward and never settling (docs/23). Damping then subtracts to make it inelastic.
+    let spring = min(P.c_stiffness * overlap, P.c_max_accel);
+    let a_n_mag = max(spring - P.c_normal_damp * v_n, 0.0);
     let a_n = n * a_n_mag;
     let v_t = v_rel - n * v_n;
     let vt_mag = length(v_t);
@@ -169,6 +172,18 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
             vel = vel * P.contact_damp;
             if (length(vel) < P.settle_speed) { resting = 1.0; }
         }
+    }
+
+    // Static friction (approximation): a grain that is RESTING ON something (net contact force points
+    // up — it is being held against gravity) and moving below the settle speed sticks. Real static
+    // friction holds until shear exceeds μ·N, so a resting grain does not creep — and a pile holds its
+    // angle of repose instead of flattening under the velocity-only (kinetic) friction. Requiring
+    // UPWARD support (not merely "in contact") avoids freezing a grain mid-arc that just grazes
+    // another. Proper static friction needs stateful per-contact tangential springs; this threshold
+    // form is the honest GPU approximation, flagged (docs/23).
+    if (forces[i].y > 1.0 && length(vel) < P.settle_speed) {
+        vel = vec3<f32>(0.0);
+        pos = pt.offset; // don't creep this substep either
     }
 
     pt.offset = pos;

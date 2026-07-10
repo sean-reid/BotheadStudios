@@ -48,6 +48,10 @@ struct RawMechanical {
     /// Pa. Fallback bonding strength where tensile isn't given.
     #[serde(default)]
     cohesion: Option<f32>,
+    /// Coulomb friction coefficient μ (dimensionless). For granular debris this drives the contact
+    /// friction, from which the angle of repose emerges (`docs/23`).
+    #[serde(default)]
+    friction_coefficient: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -100,6 +104,14 @@ pub struct Material {
     /// because its bonds are stiff; the cohesive-aggregate bond stiffness derives from this (`docs/23`).
     /// 0 where not characterized (falls back to a soft default at the call site).
     pub youngs_modulus: f32,
+    /// Coulomb friction coefficient μ (dimensionless). HONESTY NOTE: like [`albedo`], this is a
+    /// *summary* placeholder, not an irreducible fact. Real friction lives in sub-parcel molecular
+    /// roughness/asperities — below voxel resolution (a voxel is ~1e9 molecules), so it can't be
+    /// resolved at this LOD and must be a constitutive summary of that unresolved physics. It is the
+    /// source of truth for debris friction *today* (the angle of repose emerges from it, `docs/23`),
+    /// but the goal is to DERIVE it from contact-bond mechanics at finer scale (`docs/23`'s emergent
+    /// static-vs-kinetic friction), never to tabulate or tune it. 0.6 default where not characterized.
+    pub friction_coefficient: f32,
     /// 0 (mirror) .. 1 (matte). Drives specular highlight width (Phase 4).
     pub roughness: f32,
     /// 0 (dielectric) .. 1 (metal). Metals get a tinted, tighter highlight (sparkle).
@@ -136,6 +148,7 @@ pub fn load() -> Vec<Material> {
                 albedo: m.optical.albedo,
                 fracture_strength,
                 youngs_modulus: m.mechanical.youngs_modulus.unwrap_or(0.0),
+                friction_coefficient: m.mechanical.friction_coefficient.unwrap_or(0.6),
                 roughness: m.optical.roughness,
                 metallic: m.optical.metallic,
                 color_variance: m.optical.color_variance,

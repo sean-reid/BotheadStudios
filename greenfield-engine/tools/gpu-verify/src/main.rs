@@ -1,15 +1,15 @@
 //! Headless GPU verification of the granular debris step (`shaders/particle_step.wgsl`) on a real
 //! device (the box's RTX 2070, via Vulkan). Browser WebGPU can't be driven here, but native wgpu can
-//! run the SAME shader, so we can actually confirm the spatial-hash + contact physics — not just
-//! trust it by construction (docs/23).
+//! run the SAME shader, so we can actually confirm the spatial-hash + contact physics — and TUNE the
+//! contact friction against a measured angle of repose — not just trust it by construction (docs/23).
 //!
-//! Scenes assert the behaviours that were missing:
+//! Scenes:
 //!   A. an overlapping pair pushes apart (contact repels),
-//!   B. a vertical stack STAYS stacked (grains rest on each other — the fix for the "moiré" one-layer
-//!      collapse and the stranded rim ring),
-//!   C. nothing explodes / goes NaN.
+//!   B. a vertical stack STAYS stacked (grains rest on each other),
+//!   D. a dropped column collapses to a cone whose ANGLE OF REPOSE we measure vs the friction μ,
+//!   E. a crater-fill: grains poured into a pit reach the floor, spread, and mound to a repose slope.
 //!
-//! Exit code 0 = all scenes pass.
+//! Exit code 0 = all pass.
 
 const SHADER: &str = include_str!("../../../shaders/particle_step.wgsl");
 
@@ -46,7 +46,7 @@ struct Params {
     gravity: [f32; 3],
     dt: f32,
     center: [f32; 3],
-    _c: f32,
+    c_max_accel: f32,
     drag: f32,
     contact_damp: f32,
     settle_speed: f32,
@@ -65,35 +65,70 @@ struct Params {
     c_tangent_damp: f32,
 }
 
-const PART_HALF: f32 = 0.21;
-const TABLE_SIZE: u32 = 1 << 12; // 4096 cells — plenty for these tiny scenes
+const PART_HALF: f32 = 0.21; // render/ground-collision half-extent
+const CONTACT_RADIUS: f32 = 0.25; // = half the 0.5 m sub-particle spacing ⇒ lattice neighbours TOUCH
+// Contact constants under tuning. Stability at the debris substep (dt≈2 ms) with cubic coordination
+// z≈6 (face-neighbours touch at 0.5): dt·√(z·k) < 2 and dt·z·c < 2. tangent_damp governs how sharply
+// friction saturates to the μ·N cap — too low and there's no static friction, so piles creep flat.
+const C_STIFFNESS: f32 = 4.0e4;
+const C_NORMAL_DAMP: f32 = 50.0;
+const C_TANGENT_DAMP: f32 = 50.0;
+const C_MAX_ACCEL: f32 = 400.0; // cap on normal contact accel (prevents launches)
+const TABLE_SIZE: u32 = 1 << 15; // 32768 cells — ample for these scenes
 const BUCKET_K: u32 = 16;
-const WORLD_W: u32 = 8;
-const WORLD_D: u32 = 8;
 const SUBSTEPS: u32 = 8;
 
-fn base_params(count: u32) -> Params {
-    Params {
-        gravity: [0.0, -9.81, 0.0],
-        dt: (1.0 / 60.0) / SUBSTEPS as f32,
-        center: [4.0, 0.0, 4.0], // ground_y = heightfield_top(0) - center.y(0) = 0
-        _c: 0.0,
-        drag: 0.999,
-        contact_damp: 0.4,
-        settle_speed: 0.02,
-        part_half: PART_HALF,
-        cool_rate: 0.0,
-        count,
-        world_w: WORLD_W,
-        world_d: WORLD_D,
-        cell_size: 2.0 * PART_HALF, // ≥ contact diameter ⇒ contacts stay within ±1 cell
-        table_mask: TABLE_SIZE - 1,
-        bucket_k: BUCKET_K,
-        c_radius: PART_HALF,
-        c_stiffness: 1.0e5,
-        c_normal_damp: 300.0,
-        c_friction: 0.6,
-        c_tangent_damp: 300.0,
+/// Deterministic pseudo-random in [−1,1) from an index (no rand crate; must be reproducible). Real
+/// debris is scattered ejecta, not a crystal lattice — jitter emulates that disorder so grains pack
+/// randomly and can actually flow to a slope (a perfect lattice is metastable and won't).
+fn jitter(i: u32, salt: u32) -> f32 {
+    let x = (i.wrapping_add(salt).wrapping_mul(2654435761)) ^ 0x9e3779b9;
+    ((x >> 8) & 0xffff) as f32 / 32768.0 - 1.0
+}
+
+/// A scene: a heightfield (per-column solid top, in voxel Y) over a `world_w × world_d` grid, with a
+/// `center` offset mapping centered particle coords → voxel coords (`voxel = pos + center`). Ground in
+/// centered coords is `top − center.y`.
+struct Scene {
+    heightfield: Vec<i32>,
+    world_w: u32,
+    world_d: u32,
+    center_y: f32,
+    friction: f32,
+}
+impl Scene {
+    fn flat(world_w: u32, world_d: u32, top: i32, friction: f32) -> Self {
+        Scene {
+            heightfield: vec![top; (world_w * world_d) as usize],
+            world_w,
+            world_d,
+            center_y: top as f32, // ⇒ ground_y = 0 on the plain
+            friction,
+        }
+    }
+    fn params(&self, count: u32) -> Params {
+        Params {
+            gravity: [0.0, -9.81, 0.0],
+            dt: (1.0 / 60.0) / SUBSTEPS as f32,
+            center: [self.world_w as f32 / 2.0, self.center_y, self.world_d as f32 / 2.0],
+            c_max_accel: C_MAX_ACCEL,
+            drag: 0.999,
+            contact_damp: 0.4,
+            settle_speed: 0.30, // supported grains slower than this stick (static-friction approx)
+            part_half: PART_HALF,
+            cool_rate: 0.0,
+            count,
+            world_w: self.world_w,
+            world_d: self.world_d,
+            cell_size: 2.0 * CONTACT_RADIUS,
+            table_mask: TABLE_SIZE - 1,
+            bucket_k: BUCKET_K,
+            c_radius: CONTACT_RADIUS,
+            c_stiffness: C_STIFFNESS,
+            c_normal_damp: C_NORMAL_DAMP,
+            c_friction: self.friction,
+            c_tangent_damp: C_TANGENT_DAMP,
+        }
     }
 }
 
@@ -119,12 +154,15 @@ fn init_gpu() -> Gpu {
     }))
     .expect("no Vulkan adapter (RTX 2070 expected)");
     println!("adapter: {}", adapter.get_info().name);
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("gpu-verify"),
-        required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::default(),
-        memory_hints: wgpu::MemoryHints::Performance,
-    }, None))
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("gpu-verify"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+        },
+        None,
+    ))
     .expect("request_device");
 
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -155,11 +193,11 @@ fn init_gpu() -> Gpu {
                 },
                 count: None,
             },
-            storage(1, false), // particles
-            storage(2, true),  // heightfield
-            storage(3, false), // grid_count
-            storage(4, false), // grid_bucket
-            storage(5, false), // forces
+            storage(1, false),
+            storage(2, true),
+            storage(3, false),
+            storage(4, false),
+            storage(5, false),
         ],
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -188,11 +226,11 @@ fn init_gpu() -> Gpu {
     }
 }
 
-/// Run `frames` frames (each SUBSTEPS substeps) on `particles`; return the settled particles.
-fn simulate(gpu: &Gpu, mut particles: Vec<Particle>, frames: u32) -> Vec<Particle> {
+/// Run `frames` frames (each SUBSTEPS substeps) on `particles` in `scene`; return the settled state.
+fn simulate(gpu: &Gpu, particles: Vec<Particle>, frames: u32, scene: &Scene) -> Vec<Particle> {
     use wgpu::util::DeviceExt;
     let count = particles.len() as u32;
-    let params = base_params(count);
+    let params = scene.params(count);
 
     let pbuf = gpu
         .device
@@ -206,14 +244,13 @@ fn simulate(gpu: &Gpu, mut particles: Vec<Particle>, frames: u32) -> Vec<Particl
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("params"),
             contents: bytemuck::bytes_of(&params),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::UNIFORM,
         });
-    let heightfield = vec![0i32; (WORLD_W * WORLD_D) as usize];
     let hbuf = gpu
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("heightfield"),
-            contents: bytemuck::cast_slice(&heightfield),
+            contents: bytemuck::cast_slice(&scene.heightfield),
             usage: wgpu::BufferUsages::STORAGE,
         });
     let make_storage = |label: &str, size: u64| {
@@ -266,7 +303,6 @@ fn simulate(gpu: &Gpu, mut particles: Vec<Particle>, frames: u32) -> Vec<Particl
         }
     }
 
-    // Read back.
     let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("staging"),
         size: (count as u64) * std::mem::size_of::<Particle>() as u64,
@@ -282,14 +318,96 @@ fn simulate(gpu: &Gpu, mut particles: Vec<Particle>, frames: u32) -> Vec<Particl
     slice.map_async(wgpu::MapMode::Read, |_| {});
     gpu.device.poll(wgpu::Maintain::Wait);
     let data = slice.get_mapped_range();
-    particles = bytemuck::cast_slice::<u8, Particle>(&data).to_vec();
+    let out = bytemuck::cast_slice::<u8, Particle>(&data).to_vec();
     drop(data);
     staging.unmap();
-    particles
+    out
 }
 
 fn finite(ps: &[Particle]) -> bool {
     ps.iter().all(|p| p.offset.iter().all(|c| c.is_finite()))
+}
+
+/// Mean grain speed (m/s). A settled pile is ~0; perpetual motion / flying debris shows up as a speed
+/// that never decays (Robin's "still flying a minute later").
+fn mean_speed(ps: &[Particle]) -> f32 {
+    let n = ps.len().max(1) as f32;
+    ps.iter()
+        .map(|p| (p.vel[0].powi(2) + p.vel[1].powi(2) + p.vel[2].powi(2)).sqrt())
+        .sum::<f32>()
+        / n
+}
+/// The highest grain, relative to the settled floor — catches lone grains launched skyward.
+fn max_height(ps: &[Particle]) -> f32 {
+    ps.iter().fold(f32::MIN, |m, p| m.max(p.offset[1]))
+}
+
+/// Measure a settled heap's **angle of repose** (degrees): bin grains by horizontal distance from the
+/// heap centre, take each ring's surface (max) height, and least-squares fit the descending surface
+/// from the peak outward. slope = −tan(θ).
+fn repose_angle(ps: &[Particle]) -> f32 {
+    let n = ps.len() as f32;
+    let cx = ps.iter().map(|p| p.offset[0]).sum::<f32>() / n;
+    let cz = ps.iter().map(|p| p.offset[2]).sum::<f32>() / n;
+    let bin_w = 0.5f32;
+    let nbins = 60usize;
+    let mut maxh = vec![f32::MIN; nbins];
+    for p in ps {
+        let r = ((p.offset[0] - cx).powi(2) + (p.offset[2] - cz).powi(2)).sqrt();
+        let b = (r / bin_w) as usize;
+        if b < nbins {
+            maxh[b] = maxh[b].max(p.offset[1]);
+        }
+    }
+    let pts: Vec<(f32, f32)> = (0..nbins)
+        .filter(|&b| maxh[b] > f32::MIN)
+        .map(|b| ((b as f32 + 0.5) * bin_w, maxh[b]))
+        .collect();
+    if pts.len() < 3 {
+        return 0.0;
+    }
+    let peak = pts
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1 .1.partial_cmp(&b.1 .1).unwrap())
+        .map(|(i, _)| i)
+        .unwrap();
+    let tail = &pts[peak..];
+    if tail.len() < 2 {
+        return 0.0;
+    }
+    let m = tail.len() as f32;
+    let sr: f32 = tail.iter().map(|p| p.0).sum();
+    let sh: f32 = tail.iter().map(|p| p.1).sum();
+    let srr: f32 = tail.iter().map(|p| p.0 * p.0).sum();
+    let srh: f32 = tail.iter().map(|p| p.0 * p.1).sum();
+    let slope = (m * srh - sr * sh) / (m * srr - sr * sr);
+    (-slope).max(0.0).atan().to_degrees()
+}
+
+/// A solid cylinder of grains (0.5 m lattice) of radius `rad`, height `h`, resting base at `y0`.
+fn column(rad: f32, h: f32, y0: f32) -> Vec<Particle> {
+    let s = 0.5f32;
+    let ri = (rad / s).ceil() as i32;
+    let ny = (h / s).ceil() as i32;
+    let mut v = Vec::new();
+    let j = 0.12 * s; // disorder so it packs randomly and can flow (see `jitter`)
+    for iy in 0..ny {
+        for ix in -ri..=ri {
+            for iz in -ri..=ri {
+                let (x, z) = (ix as f32 * s, iz as f32 * s);
+                if x * x + z * z <= rad * rad {
+                    let i = v.len() as u32;
+                    v.push(Particle::at(
+                        x + j * jitter(i, 1),
+                        y0 + iy as f32 * s + j * jitter(i, 2),
+                        z + j * jitter(i, 3),
+                    ));
+                }
+            }
+        }
+    }
+    v
 }
 
 fn main() {
@@ -298,88 +416,148 @@ fn main() {
 
     // Scene A: an overlapping pair must push apart (contact repels).
     {
-        let ps = vec![
-            Particle::at(-0.15, 5.0, 0.0), // overlap: centres 0.30 < diameter 0.42
-            Particle::at(0.15, 5.0, 0.0),
-        ];
-        let out = simulate(&gpu, ps, 30);
+        let scene = Scene::flat(8, 8, 0, 0.6);
+        let ps = vec![Particle::at(-0.15, 5.0, 0.0), Particle::at(0.15, 5.0, 0.0)];
+        let out = simulate(&gpu, ps, 30, &scene);
         let sep = (out[1].offset[0] - out[0].offset[0]).abs();
         let ok = finite(&out) && sep >= 0.40;
-        println!(
-            "A pair-repels: separation {:.3} (want ≥0.40 = diameter)  {}",
-            sep,
-            if ok { "PASS" } else { "FAIL" }
-        );
+        println!("A pair-repels: separation {:.3} (≥0.40)  {}", sep, pass(ok));
         failures += !ok as i32;
     }
 
-    // Scene B: a vertical stack of 6 grains must STAY stacked (rest on each other), not collapse to a
-    // single layer on the ground. This is the core fix.
+    // Scene B: a vertical stack of 6 grains STAYS stacked (does not collapse to one layer).
     {
-        let n = 6;
-        let ps: Vec<Particle> = (0..n)
+        let scene = Scene::flat(8, 8, 0, 0.6);
+        let ps: Vec<Particle> = (0..6)
             .map(|k| Particle::at(0.0, PART_HALF + k as f32 * (2.0 * PART_HALF), 0.0))
             .collect();
-        let out = simulate(&gpu, ps, 400);
-        let ys: Vec<f32> = out.iter().map(|p| p.offset[1]).collect();
-        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
-        for &y in &ys {
-            lo = lo.min(y);
-            hi = hi.max(y);
-        }
-        let span = hi - lo;
-        // A collapsed pile would span ~0; a preserved stack of 6 spans ~5 diameters (2.1). Allow some
-        // settling compression — require it clearly did NOT collapse.
-        let ok = finite(&out) && span > 3.0 * (2.0 * PART_HALF) && lo > PART_HALF - 0.05;
-        let mut sorted = ys.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        println!(
-            "B stack-preserved: span {:.3} (want >{:.3}), heights {:?}  {}",
-            span,
-            3.0 * (2.0 * PART_HALF),
-            sorted.iter().map(|y| (y * 100.0).round() / 100.0).collect::<Vec<_>>(),
-            if ok { "PASS" } else { "FAIL" }
-        );
+        let out = simulate(&gpu, ps, 400, &scene);
+        let (lo, hi) = min_max(out.iter().map(|p| p.offset[1]));
+        let ok = finite(&out) && (hi - lo) > 3.0 * (2.0 * PART_HALF) && lo > PART_HALF - 0.05;
+        println!("B stack-preserved: span {:.2} (>1.26)  {}", hi - lo, pass(ok));
         failures += !ok as i32;
     }
 
-    // Scene C: a compact 5×5×3 block dropped onto the floor must settle finitely (no explosion) and
-    // spread wider than it started (granular flow toward a slope).
+    // Scene D: verify the EMERGENT angle of repose responds to the material's REAL friction — we do
+    // NOT tune μ to a target angle (that would be fudging). μ is each material's real
+    // `friction_coefficient`; the pile's repose is an OUTPUT, checked for two things: (1) it settles
+    // (no perpetual roiling), and (2) it rises MONOTONICALLY with μ (friction genuinely produces
+    // repose). We also print each material's real `friction_angle` to show the honest gap: spherical
+    // grains roll, so they under-predict rock's steep angle — a flagged limitation (needs rolling
+    // resistance / angular grains), never patched by cranking μ.
+    println!("\nD emergent repose vs REAL material friction (μ = friction_coefficient; not tuned):");
+    let mats = [
+        ("dirt", 0.55f32, 30f32),
+        ("granite", 0.6, 45.0),
+        ("sand", 0.67, 34.0),
+        ("basalt", 0.7, 45.0),
+        ("gravel", 0.84, 40.0),
+    ];
+    let mut angles = Vec::new();
+    let mut settled_all = true;
+    for &(name, mu, real_angle) in &mats {
+        let scene = Scene::flat(40, 40, 6, mu);
+        let out = simulate(&gpu, column(2.0, 9.0, PART_HALF), 700, &scene);
+        let ang = repose_angle(&out);
+        let spd = mean_speed(&out);
+        settled_all &= spd < 0.1 && finite(&out);
+        angles.push(ang);
+        println!(
+            "   {:8} μ={:.2}  emergent repose {:5.1}°   (real friction_angle {:.0}°, atan μ {:.0}°)  settled {:.3} m/s",
+            name, mu, ang, real_angle, mu.atan().to_degrees(), spd
+        );
+    }
+    let monotonic = angles.windows(2).all(|w| w[1] >= w[0] - 1.5); // rises with μ (small tolerance)
+    let ok = settled_all && monotonic;
+    println!(
+        "   → settles: {}, repose rises with μ: {}  {}",
+        settled_all, monotonic, pass(ok)
+    );
+    println!(
+        "     NOTE: a grain is a continuum PARCEL (avg of ~1e9 molecules), so its emergent repose SHOULD\n     equal the material's friction_angle. It under-predicts (parcels roll like marbles) — a model\n     DEFICIENCY to fix with rolling resistance / parcel interlocking, NOT accepted, NOT patched by μ."
+    );
+    failures += !ok as i32;
+
+    // Scene E: CRATER FILL. Pour grains into a square pit; they must reach the floor, spread across
+    // it (flow, not a central spike), and mound to a slope — the real use case.
     {
+        let (w, d) = (30u32, 30u32);
+        let plain = 10i32;
+        let pit_top = 3i32; // 7 deep
+        let (pr, cx, cz) = (5i32, 15i32, 15i32); // pit half-width, centre column
+        let mut hf = vec![plain; (w * d) as usize];
+        for z in 0..d as i32 {
+            for x in 0..w as i32 {
+                if (x - cx).abs() <= pr && (z - cz).abs() <= pr {
+                    hf[(z * w as i32 + x) as usize] = pit_top;
+                }
+            }
+        }
+        let scene = Scene {
+            heightfield: hf,
+            world_w: w,
+            world_d: d,
+            center_y: plain as f32, // plain ground_y = 0; pit floor = pit_top − plain = −7
+            friction: 0.7,
+        };
+        // Pour a block above the pit centre.
         let mut ps = Vec::new();
-        for ix in 0..5 {
-            for iz in 0..5 {
-                for iy in 0..3 {
+        let s = 0.5f32;
+        let j = 0.12 * s;
+        for ix in -8..=8 {
+            for iz in -8..=8 {
+                for iy in 0..14 {
+                    let i = ps.len() as u32;
                     ps.push(Particle::at(
-                        (ix as f32 - 2.0) * 0.44,
-                        PART_HALF + 3.0 + iy as f32 * 0.44,
-                        (iz as f32 - 2.0) * 0.44,
+                        ix as f32 * s + j * jitter(i, 1),
+                        2.0 + iy as f32 * s + j * jitter(i, 2),
+                        iz as f32 * s + j * jitter(i, 3),
                     ));
                 }
             }
         }
-        let x0: Vec<f32> = ps.iter().map(|p| p.offset[0]).collect();
-        let init_spread = x0.iter().cloned().fold(f32::MIN, f32::max)
-            - x0.iter().cloned().fold(f32::MAX, f32::min);
-        let out = simulate(&gpu, ps, 500);
-        let xf: Vec<f32> = out.iter().map(|p| p.offset[0]).collect();
-        let spread = xf.iter().cloned().fold(f32::MIN, f32::max)
-            - xf.iter().cloned().fold(f32::MAX, f32::min);
-        let ok = finite(&out) && spread >= init_spread;
+        let n = ps.len();
+        let out = simulate(&gpu, ps, 900, &scene);
+        let (lo, _hi) = min_max(out.iter().map(|p| p.offset[1]));
+        // Fraction of grains that came to rest inside the pit (below the plain).
+        let in_pit = out.iter().filter(|p| p.offset[1] < -0.5).count();
+        let (xlo, xhi) = min_max(out.iter().map(|p| p.offset[0]));
+        let spread = xhi - xlo;
+        let spd = mean_speed(&out);
+        let high = max_height(&out);
+        let ok = finite(&out)
+            && lo < -6.0                       // grains reached the pit floor (≈ −7)
+            && in_pit as f32 / n as f32 > 0.25 // a good share settled into the pit
+            && spread > 4.0                    // spread across the pit, not a central spike
+            && spd < 0.1                       // SETTLED — no perpetual motion
+            && high < 4.0; // nothing launched far above the plain (ground_y = 0)
         println!(
-            "C pile-flows: x-spread {:.2} → {:.2} (want ≥ initial), finite {}  {}",
-            init_spread,
+            "\nE crater-fill: floor {:.1} (<−6), in-pit {:.0}%, spread {:.1} m, settled speed {:.3} m/s, highest {:.1} m  {}",
+            lo,
+            100.0 * in_pit as f32 / n as f32,
             spread,
-            finite(&out),
-            if ok { "PASS" } else { "FAIL" }
+            spd,
+            high,
+            pass(ok)
         );
         failures += !ok as i32;
     }
 
     if failures == 0 {
-        println!("\nALL GPU SCENES PASS ✔ (granular contact verified on real hardware)");
+        println!("\nALL GPU SCENES PASS ✔ (granular contact + repose verified on real hardware)");
     } else {
-        println!("\n{failures} GPU SCENE(S) FAILED �’");
+        println!("\n{failures} GPU SCENE(S) FAILED");
         std::process::exit(1);
     }
+}
+
+fn pass(ok: bool) -> &'static str {
+    if ok {
+        "PASS"
+    } else {
+        "FAIL"
+    }
+}
+fn min_max(it: impl Iterator<Item = f32>) -> (f32, f32) {
+    it.fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)))
 }

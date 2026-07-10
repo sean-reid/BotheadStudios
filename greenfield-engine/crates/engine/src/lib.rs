@@ -72,14 +72,18 @@ mod app {
     const PROBE_LATTICE: f64 = 1.0; // particle spacing (m)
     const PROBE_STIFFNESS_CAP: f64 = 5.0e9; // N/m — real-time explicit-stability ceiling (flagged)
 
-    /// Granular debris contact (`docs/23`) — the DEM model in `granular.rs`, run on the GPU and
-    /// verified on real hardware by `tools/gpu-verify`. Grains push apart, stack, and flow to a slope.
+    /// Granular debris contact (`docs/23`) — the DEM model in `granular.rs`, run on the GPU and TUNED +
+    /// verified on real hardware by `tools/gpu-verify`. Grains push apart, stack, settle, and flow to a
+    /// slope. Values chosen for explicit stability at the debris substep (dt≈2 ms) with grain
+    /// coordination z≈6: soft contacts + a normal-force cap (no launches) + sub-critical damping.
     const GRID_TABLE_SIZE: u32 = 1 << 20; // spatial-hash cells (≥ ~2× particle capacity → few collisions)
     const GRID_BUCKET_K: u32 = 16; // max particles recorded per cell (overflow is dropped — flagged)
-    const CONTACT_STIFFNESS: f32 = 1.0e5; // normal repulsion (1/s²) per metre of overlap
-    const CONTACT_NORMAL_DAMP: f32 = 300.0; // removes bounce
-    const CONTACT_FRICTION: f32 = 0.6; // Coulomb μ → angle of repose ~31°
-    const CONTACT_TANGENT_DAMP: f32 = 300.0; // friction ramp with slip speed
+    const CONTACT_RADIUS: f32 = SUB_Q; // = ½ the 0.5 m sub-particle spacing ⇒ grains just touch at rest
+    const CONTACT_STIFFNESS: f32 = 4.0e4; // normal repulsion (1/s²) per metre of overlap
+    const CONTACT_MAX_ACCEL: f32 = 400.0; // cap on normal accel — deep overlaps relax, never launch
+    const CONTACT_NORMAL_DAMP: f32 = 50.0; // inelastic (removes bounce) yet stable
+    const CONTACT_TANGENT_DAMP: f32 = 50.0; // friction ramp with slip speed
+    const GRANULAR_SETTLE_SPEED: f32 = 0.3; // supported grains slower than this stick (static-friction approx)
 
     // Phase 3 dig/fracture.
     const MAX_PARTICLES: usize = 60_000;
@@ -728,26 +732,31 @@ mod app {
         /// `matter.rs`, the single source of truth).
         fn gpu_step_params(&self, dt: f32) -> GpuStepParams {
             let c = self.world.center();
+            // Debris friction comes from the REAL material (granite — the bulk rock), not a tuned
+            // number: the angle of repose emerges from it (docs/23). Mixed-material debris using one
+            // representative μ is a flagged approximation (a per-particle μ is a later refinement).
+            let friction =
+                self.mats[materials::index_of(&self.mats, "granite")].friction_coefficient;
             GpuStepParams {
                 gravity: [0.0, -SURFACE_GRAVITY, 0.0],
                 dt,
                 center: [c.x, c.y, c.z],
-                _c: 0.0,
+                c_max_accel: CONTACT_MAX_ACCEL,
                 drag: matter::DRAG,
                 contact_damp: matter::CONTACT_DAMP,
-                settle_speed: matter::SETTLE_SPEED,
+                settle_speed: GRANULAR_SETTLE_SPEED, // static-friction freeze threshold (docs/23)
                 part_half: PARTICLE_CUBE_HALF, // sub-cubes rest at the terrain top + their (half) size
                 cool_rate: 0.4, // 1/s — molten debris fades over a few seconds (docs/20)
                 count: self.gpu_particles.count,
                 world_w: self.world.w as u32,
                 world_d: self.world.d as u32,
-                cell_size: 2.0 * PARTICLE_CUBE_HALF, // ≥ contact diameter ⇒ contacts stay within ±1 cell
+                cell_size: 2.0 * CONTACT_RADIUS, // ≥ contact diameter ⇒ contacts stay within ±1 cell
                 table_mask: GRID_TABLE_SIZE - 1,
                 bucket_k: GRID_BUCKET_K,
-                c_radius: PARTICLE_CUBE_HALF,
+                c_radius: CONTACT_RADIUS,
                 c_stiffness: CONTACT_STIFFNESS,
                 c_normal_damp: CONTACT_NORMAL_DAMP,
-                c_friction: CONTACT_FRICTION,
+                c_friction: friction,
                 c_tangent_damp: CONTACT_TANGENT_DAMP,
             }
         }
@@ -1178,7 +1187,7 @@ mod app {
         gravity: [f32; 3], // uniform planetary surface gravity (m/s²)
         dt: f32,
         center: [f32; 3],
-        _c: f32,
+        c_max_accel: f32, // cap on normal contact accel (prevents deep-overlap launches)
         drag: f32,
         contact_damp: f32,
         settle_speed: f32,
