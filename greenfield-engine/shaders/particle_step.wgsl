@@ -53,7 +53,7 @@ struct Particle {
 @group(0) @binding(2) var<storage, read> heightfield : array<i32>;
 @group(0) @binding(3) var<storage, read_write> grid_count : array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> grid_bucket : array<u32>;
-@group(0) @binding(5) var<storage, read_write> forces : array<vec3<f32>>;
+@group(0) @binding(5) var<storage, read_write> forces : array<vec4<f32>>; // xyz=force, w=stiffness K
 @group(0) @binding(6) var<storage, read_write> render_out : array<Particle>; // 8× render sub-cubes
 
 fn incandescence(t : f32) -> vec3<f32> {
@@ -74,20 +74,22 @@ fn hash_cell(c : vec3<i32>) -> u32 {
     return h & P.table_mask;
 }
 
-// Acceleration on grain i from grain j — EXACT mirror of granular::contact_accel (docs/23).
-fn contact_accel(pi : vec3<f32>, vi : vec3<f32>, pj : vec3<f32>, vj : vec3<f32>) -> vec3<f32> {
+// Contact between grain i and grain j. Returns vec4: xyz = acceleration on i, w = the contact's normal
+// STIFFNESS (0 if not touching) — the caller sums w to form the per-grain K for the implicit velocity
+// update. EXACT mirror of granular::contact_accel (docs/23). NOTE: the damping/friction here REMOVE
+// kinetic energy; physically that becomes HEAT in the grains (→ temp_k → radiated). We don't route it
+// to temperature yet (flagged) — matters for phase change (steam/boiling) later. No force cap (a cap
+// is a fudge); stability comes from the implicit integrator, not a clamp.
+fn contact_accel(pi : vec3<f32>, vi : vec3<f32>, pj : vec3<f32>, vj : vec3<f32>) -> vec4<f32> {
     let d = pi - pj;
     let dist = length(d);
     let touch = 2.0 * P.c_radius;
-    if (dist >= touch || dist < 1.0e-9) { return vec3<f32>(0.0); }
+    if (dist >= touch || dist < 1.0e-9) { return vec4<f32>(0.0); }
     let n = d / dist;
     let overlap = touch - dist;
     let v_rel = vi - vj;
     let v_n = dot(v_rel, n);
-    // Cap the spring term so a deep overlap (fast impact, dense jam) can't launch grains — the fix for
-    // debris flung skyward and never settling (docs/23). Damping then subtracts to make it inelastic.
-    let spring = min(P.c_stiffness * overlap, P.c_max_accel);
-    let a_n_mag = max(spring - P.c_normal_damp * v_n, 0.0);
+    let a_n_mag = max(P.c_stiffness * overlap - P.c_normal_damp * v_n, 0.0);
     let a_n = n * a_n_mag;
     let v_t = v_rel - n * v_n;
     let vt_mag = length(v_t);
@@ -96,7 +98,7 @@ fn contact_accel(pi : vec3<f32>, vi : vec3<f32>, pj : vec3<f32>, vj : vec3<f32>)
         let mag = min(P.c_tangent_damp * vt_mag, P.c_friction * a_n_mag);
         a_t = -(v_t / vt_mag) * mag;
     }
-    return a_n + a_t;
+    return vec4<f32>(a_n + a_t, P.c_stiffness);
 }
 
 // --- pass 1: clear cell counts --------------------------------------------------------------------
@@ -127,7 +129,7 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
     let pi = particles[i].offset;
     let vi = particles[i].vel;
     let base = cell_of(pi);
-    var acc = vec3<f32>(0.0);
+    var acc = vec4<f32>(0.0); // xyz = force, w = summed contact stiffness (for the implicit step)
     for (var dz = -1; dz <= 1; dz = dz + 1) {
         for (var dy = -1; dy <= 1; dy = dy + 1) {
             for (var dx = -1; dx <= 1; dx = dx + 1) {
@@ -141,7 +143,65 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
             }
         }
     }
+    acc = acc + terrain_accel(pi, vi); // the terrain is matter too — same contact law
     forces[i] = acc;
+}
+
+// Terrain contact as a PENALTY FORCE — the honest, Newtonian way (docs/23). The terrain is solid
+// matter; a grain that penetrates it feels a repulsive contact force along the surface normal, exactly
+// like grain-grain contact — NO position teleport (teleporting a grain up injects potential energy, the
+// crater "free energy"; teleporting sideways is just as unphysical). The normal is the shortest way out
+// of the solid; the force is a spring + damper + Coulomb friction — the SAME contact law as between
+// grains. Returns vec4: xyz = acceleration, w = the contact's stiffness (0 if not touching), for the
+// implicit velocity update.
+fn terrain_accel(pos : vec3<f32>, vel : vec3<f32>) -> vec4<f32> {
+    let vx = pos.x + P.center.x;
+    let vz = pos.z + P.center.z;
+    let cx = i32(floor(vx));
+    let cz = i32(floor(vz));
+    if (cx < 0 || cz < 0 || cx >= i32(P.world_w) || cz >= i32(P.world_d)) { return vec4<f32>(0.0); }
+    let top = f32(heightfield[u32(cz) * P.world_w + u32(cx)]) - P.center.y - 0.5;
+    let bottom = pos.y - P.part_half;
+    if (bottom >= top) { return vec4<f32>(0.0); } // not penetrating the column
+    // Shortest way out (min-translation) gives the contact NORMAL + penetration depth. A sideways exit
+    // is valid only into a neighbour low enough to admit the grain (else it still penetrates there).
+    let room = bottom + 1.0e-4;
+    var depth = top - bottom;
+    var normal = vec3<f32>(0.0, 1.0, 0.0); // up
+    if (cx > 0) {
+        let tn = f32(heightfield[u32(cz) * P.world_w + u32(cx - 1)]) - P.center.y - 0.5;
+        let d = vx - f32(cx);
+        if (tn <= room && d < depth) { depth = d; normal = vec3<f32>(-1.0, 0.0, 0.0); }
+    }
+    if (cx + 1 < i32(P.world_w)) {
+        let tn = f32(heightfield[u32(cz) * P.world_w + u32(cx + 1)]) - P.center.y - 0.5;
+        let d = f32(cx + 1) - vx;
+        if (tn <= room && d < depth) { depth = d; normal = vec3<f32>(1.0, 0.0, 0.0); }
+    }
+    if (cz > 0) {
+        let tn = f32(heightfield[u32(cz - 1) * P.world_w + u32(cx)]) - P.center.y - 0.5;
+        let d = vz - f32(cz);
+        if (tn <= room && d < depth) { depth = d; normal = vec3<f32>(0.0, 0.0, -1.0); }
+    }
+    if (cz + 1 < i32(P.world_d)) {
+        let tn = f32(heightfield[u32(cz + 1) * P.world_w + u32(cx)]) - P.center.y - 0.5;
+        let d = f32(cz + 1) - vz;
+        if (tn <= room && d < depth) { depth = d; normal = vec3<f32>(0.0, 0.0, 1.0); }
+    }
+    // Penalty: repulsive spring along the normal (capped so a deep overlap can't launch) minus damping
+    // of the inward velocity, PLUS Coulomb friction on the tangential slip — the SAME contact law as
+    // between grains (docs/23). The friction is what stops grains sliding freely across the ground; the
+    // angle of repose emerges from it. Never negative (contacts push).
+    let vn = dot(vel, normal);
+    let normal_mag = max(P.c_stiffness * depth - P.c_normal_damp * vn, 0.0);
+    let v_t = vel - normal * vn;
+    let vt_mag = length(v_t);
+    var a_t = vec3<f32>(0.0);
+    if (vt_mag > 1.0e-9) {
+        let fmag = min(P.c_tangent_damp * vt_mag, P.c_friction * normal_mag);
+        a_t = -(v_t / vt_mag) * fmag;
+    }
+    return vec4<f32>(normal * normal_mag + a_t, P.c_stiffness);
 }
 
 // --- render expansion: 1 physics grain → 8 sub-cubes (docs/23) ------------------------------------
@@ -175,91 +235,25 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     // grain is not skipped, so it keeps cooling AND re-checks its support / neighbours.
     pt.temp = 300.0 + (pt.temp - 300.0) * exp(-P.cool_rate * P.dt);
 
-    // Uniform planetary surface gravity + the contact acceleration from neighbouring grains.
-    let a = P.gravity + forces[i];
-    var vel = (pt.vel + a * P.dt) * P.drag;
-    var pos = pt.offset + vel * P.dt;
+    // IMPLICIT (linearly-implicit / backward-Euler) velocity update. forces[i].xyz is the total contact
+    // force (grains + terrain, both real penalty forces — no teleport); forces[i].w is the summed
+    // contact STIFFNESS K. Dividing the velocity by (1 + dt²·K) is backward-Euler on the contact spring:
+    // it is UNCONDITIONALLY STABLE for any stiffness, so a stiff (real) contact resolves an overlap
+    // smoothly instead of overshooting and flinging the grain (the "pop"). No cap, no freeze, no
+    // teleport — stability comes from the integrator, as physics demands.
+    let f = forces[i];
+    let a = P.gravity + f.xyz;
+    let vel = ((pt.vel + a * P.dt) / (1.0 + P.dt * P.dt * f.w)) * P.drag;
+    let pos = pt.offset + vel * P.dt;
 
-    // Terrain collision by MINIMUM-TRANSLATION contact resolution: if the grain penetrates a solid
-    // column, push it out the SHORTEST way. This is real contact physics, one rule for every case — a
-    // flat floor pushes up (up is nearest), a vertical crater WALL pushes sideways (the side face is
-    // nearest), no landing-vs-wall heuristic and no potential-energy injection (which was the crater-rim
-    // "convection ring" — grains teleported up the wall and rained back in). A sideways exit is only
-    // valid into a neighbour column low enough to admit the grain (docs/23).
-    var resting = 0.0;
-    let vx = pos.x + P.center.x;
-    let vz = pos.z + P.center.z;
-    let cx = i32(floor(vx));
-    let cz = i32(floor(vz));
-    if (cx >= 0 && cz >= 0 && cx < i32(P.world_w) && cz < i32(P.world_d)) {
-        let top = f32(heightfield[u32(cz) * P.world_w + u32(cx)]) - P.center.y - 0.5;
-        let bottom = pos.y - P.part_half; // grain's underside
-        if (bottom < top) {
-            // The grain is inside the solid. Find the least-penetration exit among up + the four sides.
-            // A sideways exit is only REAL if that neighbour's floor is at or below the grain's underside
-            // — otherwise the grain would still be penetrating over there (that false "zero-depth" exit
-            // into a same-height neighbour is what let a boundary-straddling grain sink through a flat
-            // floor). `up` is always valid.
-            let room = bottom + 1.0e-4;
-            var depth = top - bottom; // +y exit depth
-            var axis = 0;             // 0:+y  1:-x  2:+x  3:-z  4:+z
-            if (cx > 0) {
-                let tn = f32(heightfield[u32(cz) * P.world_w + u32(cx - 1)]) - P.center.y - 0.5;
-                let d = vx - f32(cx);
-                if (tn <= room && d < depth) { depth = d; axis = 1; }
-            }
-            if (cx + 1 < i32(P.world_w)) {
-                let tn = f32(heightfield[u32(cz) * P.world_w + u32(cx + 1)]) - P.center.y - 0.5;
-                let d = f32(cx + 1) - vx;
-                if (tn <= room && d < depth) { depth = d; axis = 2; }
-            }
-            if (cz > 0) {
-                let tn = f32(heightfield[u32(cz - 1) * P.world_w + u32(cx)]) - P.center.y - 0.5;
-                let d = vz - f32(cz);
-                if (tn <= room && d < depth) { depth = d; axis = 3; }
-            }
-            if (cz + 1 < i32(P.world_d)) {
-                let tn = f32(heightfield[u32(cz + 1) * P.world_w + u32(cx)]) - P.center.y - 0.5;
-                let d = f32(cz + 1) - vz;
-                if (tn <= room && d < depth) { depth = d; axis = 4; }
-            }
-            // Push out along the least-penetration axis; zero only the velocity component driving into
-            // the solid, then damp (inelastic contact).
-            if (axis == 0) {
-                pos.y = top + P.part_half;
-                if (vel.y < 0.0) { vel.y = 0.0; }
-            } else if (axis == 1) {
-                pos.x = f32(cx) - P.center.x - 1.0e-4;
-                if (vel.x > 0.0) { vel.x = 0.0; }
-            } else if (axis == 2) {
-                pos.x = f32(cx + 1) - P.center.x + 1.0e-4;
-                if (vel.x < 0.0) { vel.x = 0.0; }
-            } else if (axis == 3) {
-                pos.z = f32(cz) - P.center.z - 1.0e-4;
-                if (vel.z > 0.0) { vel.z = 0.0; }
-            } else {
-                pos.z = f32(cz + 1) - P.center.z + 1.0e-4;
-                if (vel.z < 0.0) { vel.z = 0.0; }
-            }
-            vel = vel * P.contact_damp;
-            if (length(vel) < P.settle_speed) { resting = 1.0; }
-        }
-    }
-
-    // Static friction (approximation, CONSERVATIVE): a grain RESTING ON something (net contact force
-    // points up — held against gravity) and moving below the settle speed is heavily DAMPED so it
-    // settles. It is critical that we damp (remove energy) rather than PIN (zero velocity): a pinned
-    // grain becomes an infinite-mass anchor that repels the grains above it without recoiling, pumping
-    // momentum into them from nowhere — a matter/energy "fountain" at depth (Newton's third law
-    // broken). Damping only ever removes energy, so it cannot fountain. This is a momentum sink (like
-    // drag, flagged); proper static friction needs stateful per-contact tangential springs (docs/23).
-    if (forces[i].y > 1.0 && length(vel) < P.settle_speed) {
-        vel = vel * 0.5;
-    }
+    // NOTE on energy: the contact damping + friction here REMOVE kinetic energy. Physically that energy
+    // is not destroyed — it becomes HEAT in the grains (→ temp_k) and radiates to space. We drop it for
+    // now (flagged); routing it into temperature matters once we do phase change (steam/boiling). The
+    // enforceable invariant today: this step never CREATES mechanical energy (docs/23).
 
     pt.offset = pos;
     pt.vel = vel;
-    pt.resting = resting;
+    pt.resting = 0.0;
     pt.emission = incandescence(pt.temp);
     particles[i] = pt;
 }

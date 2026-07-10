@@ -19,10 +19,12 @@ function shotSink(): Plugin {
           res.end();
           return;
         }
-        let body = "";
-        req.on("data", (c) => (body += c));
+        // Collect raw Buffer chunks — concatenating as strings truncates/corrupts a large PNG data URL.
+        const chunks: Buffer[] = [];
+        req.on("data", (c: Buffer) => chunks.push(c));
         req.on("end", () => {
           try {
+            const body = Buffer.concat(chunks).toString("utf8");
             const b64 = body.replace(/^data:image\/\w+;base64,/, "");
             const buf = Buffer.from(b64, "base64");
             const dir = resolve(root, "shots");

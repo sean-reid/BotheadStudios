@@ -84,11 +84,13 @@ mod app {
     const GRID_BUCKET_K: u32 = 16; // max particles recorded per cell (overflow is dropped — flagged)
     const CONTACT_RADIUS: f32 = 0.5; // = ½ the 1 m grain spacing ⇒ grains just touch at rest
     const DEBRIS_PART_HALF: f32 = 0.5; // a debris grain's collision half-extent (rests on the ground)
-    const CONTACT_STIFFNESS: f32 = 2.5e4; // normal repulsion (1/s²) per metre of overlap
-    const CONTACT_MAX_ACCEL: f32 = 400.0; // cap on normal accel — deep overlaps relax, never launch
-    const CONTACT_NORMAL_DAMP: f32 = 50.0; // inelastic (removes bounce) yet stable
-    const CONTACT_TANGENT_DAMP: f32 = 50.0; // friction ramp with slip speed
-    const GRANULAR_SETTLE_SPEED: f32 = 0.3; // supported grains slower than this stick (static-friction approx)
+                                       // Stiff (real-ish) contact — kept stable by IMPLICIT integration (1/(1+dt²K) in the shader), not by
+                                       // a force cap or a freeze (both removed as fudges). Verified energy-conserving on the 2070
+                                       // (tools/gpu-verify scene I: total mechanical energy only ever decreases). A real angle of repose
+                                       // emerges from the friction (docs/23).
+    const CONTACT_STIFFNESS: f32 = 5.0e5; // normal repulsion (1/s²) per metre of overlap
+    const CONTACT_NORMAL_DAMP: f32 = 100.0; // inelastic (removes bounce)
+    const CONTACT_TANGENT_DAMP: f32 = 100.0; // friction ramp with slip speed
 
     // Phase 3 dig/fracture.
     const MAX_PARTICLES: usize = 60_000;
@@ -776,12 +778,12 @@ mod app {
                 gravity: [0.0, -SURFACE_GRAVITY, 0.0],
                 dt,
                 center: [c.x, c.y, c.z],
-                c_max_accel: CONTACT_MAX_ACCEL,
+                c_max_accel: 0.0, // (unused — force cap removed as a fudge; implicit integration instead)
                 drag: matter::DRAG,
                 contact_damp: matter::CONTACT_DAMP,
-                settle_speed: GRANULAR_SETTLE_SPEED, // static-friction freeze threshold (docs/23)
+                settle_speed: 0.0, // (unused — settle "freeze" removed as a fudge)
                 part_half: DEBRIS_PART_HALF, // the 1 m physics grain's collision half-extent
-                cool_rate: 0.4, // 1/s — molten debris fades over a few seconds (docs/20)
+                cool_rate: 0.4,    // 1/s — molten debris fades over a few seconds (docs/20)
                 count: self.gpu_particles.count,
                 world_w: self.world.w as u32,
                 world_d: self.world.d as u32,
