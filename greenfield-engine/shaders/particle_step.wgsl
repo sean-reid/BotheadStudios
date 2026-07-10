@@ -171,7 +171,7 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     let cx = i32(floor(vx));
     let cz = i32(floor(vz));
     if (cx >= 0 && cz >= 0 && cx < i32(P.world_w) && cz < i32(P.world_d)) {
-        let top = f32(heightfield[u32(cz) * P.world_w + u32(cx)]) - P.center.y;
+        let top = f32(heightfield[u32(cz) * P.world_w + u32(cx)]) - P.center.y - 0.5;
         let bottom = pos.y - P.part_half; // grain's underside
         if (bottom < top) {
             // The grain is inside the solid. Find the least-penetration exit among up + the four sides.
@@ -183,22 +183,22 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
             var depth = top - bottom; // +y exit depth
             var axis = 0;             // 0:+y  1:-x  2:+x  3:-z  4:+z
             if (cx > 0) {
-                let tn = f32(heightfield[u32(cz) * P.world_w + u32(cx - 1)]) - P.center.y;
+                let tn = f32(heightfield[u32(cz) * P.world_w + u32(cx - 1)]) - P.center.y - 0.5;
                 let d = vx - f32(cx);
                 if (tn <= room && d < depth) { depth = d; axis = 1; }
             }
             if (cx + 1 < i32(P.world_w)) {
-                let tn = f32(heightfield[u32(cz) * P.world_w + u32(cx + 1)]) - P.center.y;
+                let tn = f32(heightfield[u32(cz) * P.world_w + u32(cx + 1)]) - P.center.y - 0.5;
                 let d = f32(cx + 1) - vx;
                 if (tn <= room && d < depth) { depth = d; axis = 2; }
             }
             if (cz > 0) {
-                let tn = f32(heightfield[u32(cz - 1) * P.world_w + u32(cx)]) - P.center.y;
+                let tn = f32(heightfield[u32(cz - 1) * P.world_w + u32(cx)]) - P.center.y - 0.5;
                 let d = vz - f32(cz);
                 if (tn <= room && d < depth) { depth = d; axis = 3; }
             }
             if (cz + 1 < i32(P.world_d)) {
-                let tn = f32(heightfield[u32(cz + 1) * P.world_w + u32(cx)]) - P.center.y;
+                let tn = f32(heightfield[u32(cz + 1) * P.world_w + u32(cx)]) - P.center.y - 0.5;
                 let d = f32(cz + 1) - vz;
                 if (tn <= room && d < depth) { depth = d; axis = 4; }
             }

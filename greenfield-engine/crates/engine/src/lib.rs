@@ -890,8 +890,10 @@ mod app {
                 let zi = (p.pos.z as f32 + c.z).floor() as i32;
                 let ground = self
                     .world
+                    // −0.5: surface_top_voxel is the air-start voxel, but the surface-nets iso-surface
+                    // (what's drawn) sits half a voxel below it — rest on the VISIBLE surface, not above.
                     .surface_top_voxel(xi, zi)
-                    .map(|t| t as f64 - c.y as f64)
+                    .map(|t| t as f64 - 0.5 - c.y as f64)
                     .unwrap_or(-1.0e9);
                 let floor = ground + half;
                 if p.pos.y < floor {
