@@ -14,11 +14,18 @@
 
 #![allow(dead_code)] // consumed by the space-band integration (staged) and native tests
 
+use crate::materials::Material;
+use crate::matter::REF_TEMP_K;
 use crate::orbit::{Body, G};
 use glam::DVec3;
 
 pub struct Aggregate {
     pub particles: Vec<Body>,
+    /// Kelvin, per particle — heated by impacts (`deposit_impact`); drives the incandescent glow of
+    /// molten/vaporized debris ([`crate::emission::incandescence`]).
+    pub temps: Vec<f32>,
+    /// Material index (uniform for now — a basalt Moon; per-particle composition is a later slice).
+    pub material: usize,
     /// Softening length (m): removes the 1/r² singularity between close particles. ~half the mean
     /// spacing keeps the cloud stable without erasing its self-gravity.
     pub softening: f64,
@@ -26,9 +33,70 @@ pub struct Aggregate {
 
 impl Aggregate {
     pub fn new(particles: Vec<Body>, softening: f64) -> Self {
+        let n = particles.len();
         Aggregate {
             particles,
+            temps: vec![REF_TEMP_K; n],
+            material: 0,
             softening,
+        }
+    }
+
+    /// Set the aggregate's material (its constituent stuff — e.g. basalt for the Moon).
+    pub fn with_material(mut self, material: usize) -> Self {
+        self.material = material;
+        self
+    }
+
+    /// Deposit impact `energy` (J) at `site` travelling along `dir` — the same physics as
+    /// `matter::impact`, on a self-gravitating cloud instead of a voxel grid (`docs/21`). Energy density
+    /// peaks at the contact and falls off, so each particle **heats** (temperature from `e/(ρc)`) and is
+    /// **kicked** outward + along the impact; vaporized parcels (`damage::classify`) expand faster.
+    /// Whether the aggregate then **survives or shatters is emergent** — it falls out of the kick vs the
+    /// self-gravity that binds it (run `step` and watch `rms_radius`). Energy-conserving deposit
+    /// (`Σ eᵢ·Vᵢ = energy`).
+    pub fn deposit_impact(&mut self, materials: &[Material], site: DVec3, dir: DVec3, energy: f64) {
+        if self.particles.is_empty() {
+            return;
+        }
+        let dir = dir.normalize_or_zero();
+        let mat = &materials[self.material];
+        let density = (mat.density as f64).max(1.0);
+        let c = mat
+            .thermal
+            .as_ref()
+            .map_or(1000.0, |t| t.specific_heat as f64);
+        let vapor = crate::damage::vapor_energy_density(mat);
+
+        // Coupling length ~ half the cloud's spread, so the energy concentrates near the contact.
+        let lambda = (self.rms_radius() * 0.5).max(1.0);
+        // Energy-conserving peak density: Σ eᵢ·Vᵢ = energy, with eᵢ = e0·exp(−dᵢ/λ), Vᵢ = mᵢ/ρ.
+        let wsum: f64 = self
+            .particles
+            .iter()
+            .map(|p| (-(p.pos - site).length() / lambda).exp() * (p.mass / density))
+            .sum();
+        if wsum <= 0.0 {
+            return;
+        }
+        let e0 = energy / wsum;
+
+        for (p, temp) in self.particles.iter_mut().zip(self.temps.iter_mut()) {
+            let off = p.pos - site;
+            let d = off.length();
+            let e_i = e0 * (-d / lambda).exp(); // J/m³ deposited in this particle
+            *temp += (e_i / (density * c)) as f32; // temperature rise
+
+            // Velocity kick from the deposited energy density (shock): v ~ √(2·frac·e/ρ), outward from
+            // the contact and along the impactor. Vaporized parcels are gas/plasma → they expand faster.
+            let mut speed = (2.0 * 0.3 * e_i / density).sqrt();
+            if let Some(ev) = vapor {
+                if e_i >= ev {
+                    speed *= 3.0;
+                }
+            }
+            let kick = (off.normalize_or_zero() * 0.6 + dir * 0.4).normalize_or_zero();
+            p.vel += kick * speed;
         }
     }
 
@@ -196,6 +264,44 @@ mod tests {
         assert!(
             agg.rms_radius() > 10.0 * r0,
             "it disperses (rms {:.1} vs r0 {:.1})",
+            agg.rms_radius(),
+            r0
+        );
+    }
+
+    #[test]
+    fn an_impact_heats_the_core_and_shatters_the_aggregate() {
+        // Deposit an impact into a self-gravitating basalt cloud: the particles heat (a radial gradient
+        // — core hotter than rim) AND, with enough energy, the aggregate flies apart. The shatter is
+        // emergent (kick vs self-gravity), not scripted — the whole point of docs/21.
+        let mats = crate::materials::load();
+        let basalt = crate::materials::index_of(&mats, "basalt");
+        let mut agg = Aggregate::new(cloud(3, 100.0, 1.0e13), 50.0).with_material(basalt);
+        let r0 = agg.rms_radius();
+        let bind = agg.binding_energy();
+        let site = agg.com(); // strike the centre
+
+        agg.deposit_impact(&mats, site, DVec3::NEG_Y, 100.0 * bind);
+
+        let hottest = agg.temps.iter().cloned().fold(0.0f32, f32::max);
+        let coldest = agg.temps.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(hottest > REF_TEMP_K, "the impact deposits heat");
+        assert!(
+            hottest > coldest,
+            "heating has a radial gradient (core {hottest} K hotter than rim {coldest} K)"
+        );
+        assert!(
+            agg.kinetic_energy_com() > bind,
+            "the deposit exceeds binding — it will unbind"
+        );
+
+        let mut acc = agg.accelerations();
+        for _ in 0..400 {
+            agg.step(&mut acc, 2.0);
+        }
+        assert!(
+            agg.rms_radius() > 5.0 * r0,
+            "it shatters and disperses (rms {:.1} vs r0 {:.1})",
             agg.rms_radius(),
             r0
         );
