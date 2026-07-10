@@ -256,8 +256,26 @@ impl Aggregate {
             self.particles.iter().map(|b| b.mass).sum::<f64>() / self.particles.len() as f64;
         let coordination = (2 * self.bonds.len()) as f64 / self.particles.len() as f64;
         let omega = (coordination.max(1.0) * self.stiffness / mean_mass.max(1e-9)).sqrt();
-        // Target dt·ω ≤ 1 (a factor of 2 inside the stability limit for margin against the damper).
-        ((dt * omega).ceil() as usize).max(1)
+        // Target dt·ω ≤ 0.5 (a factor of 4 inside the Verlet limit of 2). The extra margin keeps the
+        // velocity DAMPING term stable too, not just the spring — an overdamped stiff bond blows up
+        // under explicit integration otherwise (the probe-detonation bug, docs/23).
+        ((2.0 * dt * omega).ceil() as usize).max(1)
+    }
+
+    /// A coordination-corrected, **sub-critical** bond damping (N·s/m) that settles the solid without
+    /// the explicit integrator going unstable. A particle with `z` bonds sees effective damping `z·c`;
+    /// its critical damping is `2√(K·m) = 2√(z·k·m)`, so per bond `c_crit = 2√(k·m)/√z`. We use
+    /// `ζ·c_crit` with ζ < 1. The `/√z` is the fix for the detonation bug: using `√(k·m)` directly
+    /// (ignoring z) over-damped every particle ~√z× past critical, and overdamping a stiff spring
+    /// explodes explicitly (`docs/23`).
+    pub fn critically_damped(&self, zeta: f64) -> f64 {
+        if self.bonds.is_empty() || self.particles.is_empty() {
+            return 0.0;
+        }
+        let mean_mass =
+            self.particles.iter().map(|b| b.mass).sum::<f64>() / self.particles.len() as f64;
+        let z = (2 * self.bonds.len()) as f64 / self.particles.len() as f64;
+        zeta * 2.0 * (self.stiffness * mean_mass).sqrt() / z.max(1.0).sqrt()
     }
 
     pub fn step(&mut self, acc: &mut Vec<DVec3>, dt: f64) {
@@ -360,6 +378,66 @@ mod tests {
             }
         }
         v
+    }
+
+    /// A solid ball of lattice particles within `radius` (the shape of the probe).
+    fn ball(radius: f64, mass: f64) -> Vec<Body> {
+        let ri = radius.ceil() as i32;
+        let mut v = Vec::new();
+        for x in -ri..=ri {
+            for y in -ri..=ri {
+                for z in -ri..=ri {
+                    let off = DVec3::new(x as f64, y as f64, z as f64);
+                    if off.length() <= radius {
+                        v.push(Body {
+                            pos: off,
+                            vel: DVec3::ZERO,
+                            mass,
+                        });
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn a_stiff_cohesive_ball_does_not_spontaneously_explode() {
+        // Reproduces the probe: a bonded iron ball whose stiffness derives from Young's modulus,
+        // damped + substepped by the app's own rules. At rest with no external force it must STAY
+        // intact — an unstable integrator makes it fly apart ("spontaneously detonate, leaving only
+        // the core"). Before the coordination-corrected damping fix, this exploded (docs/23).
+        let density = 7870.0;
+        let stiffness = (2.05e11_f64 * 1.0).min(5.0e9); // E·L capped, as build_probe does
+        let mut agg = Aggregate::cohesive(ball(2.0, density), 0, 0.5, 1.75, stiffness, 0.0, 0.06);
+        agg.damping = agg.critically_damped(0.4);
+
+        let n0 = agg.particles.len();
+        let r0 = agg.rms_radius();
+        let bonds0 = agg.bonds.len();
+        let mut acc = agg.accelerations();
+        let frame = 1.0 / 60.0;
+        for _ in 0..40 {
+            // 2/3 s — an unstable integrator blows up exponentially within a few frames
+            let sub = agg.stable_substeps(frame).clamp(1, 256);
+            let pdt = frame / sub as f64;
+            for _ in 0..sub {
+                agg.step(&mut acc, pdt);
+            }
+        }
+        assert_eq!(agg.particles.len(), n0, "no particles lost");
+        assert!(
+            agg.active_bonds() as f64 / bonds0 as f64 > 0.99,
+            "no spurious bond fractures (active {}/{})",
+            agg.active_bonds(),
+            bonds0
+        );
+        assert!(
+            agg.rms_radius() < 1.05 * r0,
+            "stays compact — does not detonate (rms {:.3} vs r0 {:.3})",
+            agg.rms_radius(),
+            r0
+        );
     }
 
     #[test]

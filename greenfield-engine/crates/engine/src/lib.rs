@@ -24,6 +24,7 @@ mod aggregate;
 mod body;
 mod damage;
 mod emission;
+mod granular;
 mod gravity;
 #[cfg(test)]
 mod isotropy;
@@ -70,6 +71,15 @@ mod app {
     /// (flagged). The cap is still ~1000× the old hand-tuned 5e6, so the ball reads as rigid.
     const PROBE_LATTICE: f64 = 1.0; // particle spacing (m)
     const PROBE_STIFFNESS_CAP: f64 = 5.0e9; // N/m — real-time explicit-stability ceiling (flagged)
+
+    /// Granular debris contact (`docs/23`) — the DEM model in `granular.rs`, run on the GPU and
+    /// verified on real hardware by `tools/gpu-verify`. Grains push apart, stack, and flow to a slope.
+    const GRID_TABLE_SIZE: u32 = 1 << 20; // spatial-hash cells (≥ ~2× particle capacity → few collisions)
+    const GRID_BUCKET_K: u32 = 16; // max particles recorded per cell (overflow is dropped — flagged)
+    const CONTACT_STIFFNESS: f32 = 1.0e5; // normal repulsion (1/s²) per metre of overlap
+    const CONTACT_NORMAL_DAMP: f32 = 300.0; // removes bounce
+    const CONTACT_FRICTION: f32 = 0.6; // Coulomb μ → angle of repose ~31°
+    const CONTACT_TANGENT_DAMP: f32 = 300.0; // friction ramp with slip speed
 
     // Phase 3 dig/fracture.
     const MAX_PARTICLES: usize = 60_000;
@@ -731,6 +741,14 @@ mod app {
                 count: self.gpu_particles.count,
                 world_w: self.world.w as u32,
                 world_d: self.world.d as u32,
+                cell_size: 2.0 * PARTICLE_CUBE_HALF, // ≥ contact diameter ⇒ contacts stay within ±1 cell
+                table_mask: GRID_TABLE_SIZE - 1,
+                bucket_k: GRID_BUCKET_K,
+                c_radius: PARTICLE_CUBE_HALF,
+                c_stiffness: CONTACT_STIFFNESS,
+                c_normal_damp: CONTACT_NORMAL_DAMP,
+                c_friction: CONTACT_FRICTION,
+                c_tangent_damp: CONTACT_TANGENT_DAMP,
             }
         }
 
@@ -1169,6 +1187,15 @@ mod app {
         count: u32,
         world_w: u32,
         world_d: u32,
+        // Granular spatial hash + contact (docs/23) — mirrors particle_step.wgsl's Params tail.
+        cell_size: f32,
+        table_mask: u32,
+        bucket_k: u32,
+        c_radius: f32,
+        c_stiffness: f32,
+        c_normal_damp: f32,
+        c_friction: f32,
+        c_tangent_damp: f32,
     }
 
     /// GPU-resident debris: a storage+vertex buffer of `GpuParticle`, a compute pipeline that steps it,
@@ -1178,7 +1205,13 @@ mod app {
         buf: wgpu::Buffer,         // STORAGE | VERTEX | COPY_DST
         params: wgpu::Buffer,      // UNIFORM | COPY_DST
         heightfield: wgpu::Buffer, // STORAGE | COPY_DST
-        pipeline: wgpu::ComputePipeline,
+        grid_count: wgpu::Buffer,  // STORAGE — atomic per-cell particle count (spatial hash)
+        grid_bucket: wgpu::Buffer, // STORAGE — per-cell particle indices
+        forces: wgpu::Buffer,      // STORAGE — accumulated contact acceleration per particle
+        clear: wgpu::ComputePipeline,
+        insert: wgpu::ComputePipeline,
+        force_pass: wgpu::ComputePipeline,
+        integrate: wgpu::ComputePipeline,
         bind: wgpu::BindGroup,
         capacity: u32,
         count: u32,
@@ -1204,6 +1237,27 @@ mod app {
                 label: Some("gpu-particles-heightfield"),
                 size: (world_cells as usize * std::mem::size_of::<i32>()).max(4) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            // Spatial-hash grid + per-particle contact-force scratch (docs/23).
+            let grid_count = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu-grid-count"),
+                size: (GRID_TABLE_SIZE as u64) * std::mem::size_of::<u32>() as u64,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            let grid_bucket = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu-grid-bucket"),
+                size: (GRID_TABLE_SIZE as u64)
+                    * (GRID_BUCKET_K as u64)
+                    * std::mem::size_of::<u32>() as u64,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            let forces = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu-particle-forces"),
+                size: (capacity as u64) * 16, // vec3<f32> laid out with 16-byte stride
+                usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });
 
@@ -1237,8 +1291,11 @@ mod app {
                         },
                         count: None,
                     },
-                    storage(1, false),
-                    storage(2, true),
+                    storage(1, false), // particles
+                    storage(2, true),  // heightfield
+                    storage(3, false), // grid_count
+                    storage(4, false), // grid_bucket
+                    storage(5, false), // forces
                 ],
             });
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1246,14 +1303,20 @@ mod app {
                 bind_group_layouts: &[&layout],
                 push_constant_ranges: &[],
             });
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("particle-step-pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("cs_step"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+            let mk = |entry: &str| {
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pipeline_layout),
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                })
+            };
+            let clear = mk("cs_grid_clear");
+            let insert = mk("cs_grid_insert");
+            let force_pass = mk("cs_forces");
+            let integrate = mk("cs_integrate");
             let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gpu-particles-bind"),
                 layout: &layout,
@@ -1270,6 +1333,18 @@ mod app {
                         binding: 2,
                         resource: heightfield.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: grid_count.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: grid_bucket.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: forces.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -1277,7 +1352,13 @@ mod app {
                 buf,
                 params,
                 heightfield,
-                pipeline,
+                grid_count,
+                grid_bucket,
+                forces,
+                clear,
+                insert,
+                force_pass,
+                integrate,
                 bind,
                 capacity,
                 count: 0,
@@ -1302,7 +1383,9 @@ mod app {
             self.count += take as u32;
         }
 
-        /// Record the compute step for this substep into `encoder` (params already written this frame).
+        /// Record one substep into `encoder`: rebuild the spatial hash, accumulate granular contact
+        /// forces, then integrate (gravity + contact + terrain). Four passes so force-accumulation
+        /// (positions read-only) never races integration (docs/23). Params already written this frame.
         fn dispatch(&self, encoder: &mut wgpu::CommandEncoder) {
             if self.count == 0 {
                 return;
@@ -1311,8 +1394,14 @@ mod app {
                 label: Some("particle-step-pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind, &[]);
+            pass.set_pipeline(&self.clear);
+            pass.dispatch_workgroups(GRID_TABLE_SIZE.div_ceil(64), 1, 1);
+            pass.set_pipeline(&self.insert);
+            pass.dispatch_workgroups(self.count.div_ceil(64), 1, 1);
+            pass.set_pipeline(&self.force_pass);
+            pass.dispatch_workgroups(self.count.div_ceil(64), 1, 1);
+            pass.set_pipeline(&self.integrate);
             pass.dispatch_workgroups(self.count.div_ceil(64), 1, 1);
         }
 
@@ -1322,10 +1411,10 @@ mod app {
     }
 
     /// Build the probe: a **cohesive iron ball** (bonded iron particles) centred at `spawn` — real
-    /// matter that falls, rests, and shatters emergently (`docs/23`). NOTE: the bond stiffness is
-    /// limited by the explicit 60 fps timestep — real iron is far stiffer (Young's modulus ~2e11 Pa)
-    /// and would explode without implicit integration / heavy substepping (a future refinement); this
-    /// value holds the ball's shape and stays stable.
+    /// matter that falls, rests, and shatters emergently (`docs/23`). Its bond stiffness derives from
+    /// iron's real Young's modulus (capped at `PROBE_STIFFNESS_CAP` for explicit-integration stability
+    /// — true steel needs implicit integration, flagged), damped sub-critically and substepped so it
+    /// stays rigid without detonating.
     fn build_probe(mats: &[materials::Material], spawn: Vec3) -> aggregate::Aggregate {
         let iron = materials::index_of(mats, "iron");
         let density = mats[iron].density as f64; // ~7870 kg/m³
@@ -1352,15 +1441,24 @@ mod app {
         // modulus, capped for real-time explicit stability (true k needs implicit integration — flagged).
         let e = mats[iron].youngs_modulus as f64; // 2.05e11 Pa (real, from the material DB)
         let stiffness = (e * PROBE_LATTICE).min(PROBE_STIFFNESS_CAP);
-        // Damping ≈ the bond's critical damping (c ≈ √(k·m)) so the ball settles rigidly, without the
-        // rubbery ringing the old soft stiffness produced.
-        let damping = (stiffness * density).sqrt();
         // Steel is nearly inextensible: it fractures at a small strain rather than stretching like
         // rubber. Small enough to shatter under a meteor, large enough to survive its own landing.
         let break_strain = 0.06;
         // cutoff 1.75 → bond to face/edge/corner neighbours.
-        aggregate::Aggregate::cohesive(particles, iron, 0.5, 1.75, stiffness, damping, break_strain)
-            .with_gravity(glam::DVec3::new(0.0, -SURFACE_GRAVITY as f64, 0.0))
+        let mut probe = aggregate::Aggregate::cohesive(
+            particles,
+            iron,
+            0.5,
+            1.75,
+            stiffness,
+            0.0,
+            break_strain,
+        );
+        // Sub-critical, coordination-corrected damping so the ball settles rigidly WITHOUT the
+        // explicit integrator exploding (the detonation bug: √(k·m) alone over-damped each particle
+        // ~√(bonds)× past critical). See Aggregate::critically_damped (docs/23).
+        probe.damping = probe.critically_damped(0.4);
+        probe.with_gravity(glam::DVec3::new(0.0, -SURFACE_GRAVITY as f64, 0.0))
     }
 
     fn upload_mesh(device: &wgpu::Device, label: &str, mesh: &Mesh) -> GpuMesh {
