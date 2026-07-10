@@ -288,13 +288,16 @@ impl MatterSim {
         let center = world.center();
         let bound = world.w.max(world.h).max(world.d) as f32;
 
+        // Perf: use the O(1) centre-of-mass gravity approximation for debris, not the full ~1000-point
+        // field per particle. A big impact throws thousands of ejecta; the full field (per particle,
+        // per substep) is ~10⁸ ops/frame on one wasm thread → single-digit FPS. The COM approximation is
+        // ~1000× cheaper; the cost is a slight inward drift of off-centre debris (docs/08). The real fix
+        // is moving this whole loop to a GPU compute shader (docs/08 / docs/22) — then we can afford the
+        // full field again, massively parallel.
         let mut i = 0;
         while i < self.particles.len() {
             let mut p = self.particles[i];
-            // Full aggregated field so debris falls ~straight down on the wide slab. (The cheap
-            // center-of-mass approximation pulls off-center debris toward the middle, making it drift
-            // inward and pile into growing mounds.)
-            let accel = field.acceleration_at(p.pos, 6.0);
+            let accel = field.acceleration_point_approx(p.pos, 6.0);
             p.vel += accel * dt;
             p.vel *= DRAG;
             p.pos += p.vel * dt;
