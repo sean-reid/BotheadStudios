@@ -593,7 +593,8 @@ mod app {
                 count: self.gpu_particles.count,
                 world_w: self.world.w as u32,
                 world_d: self.world.d as u32,
-                _p: [0, 0, 0],
+                cool_rate: 0.02, // 1/s of sim time — molten debris fades over a few seconds (docs/20)
+                _p: [0, 0],
             }
         }
 
@@ -1014,7 +1015,8 @@ mod app {
         count: u32,
         world_w: u32,
         world_d: u32,
-        _p: [u32; 3],
+        cool_rate: f32,
+        _p: [u32; 2],
     }
 
     /// GPU-resident debris: a storage+vertex buffer of `GpuParticle`, a compute pipeline that steps it,

@@ -17,7 +17,8 @@ struct Params {
     count        : u32,
     world_w      : u32,
     world_d      : u32,
-    _p0 : u32, _p1 : u32, _p2 : u32,
+    cool_rate    : f32, // 1/s — hot debris cools toward ambient (radiative/conductive), docs/20
+    _p0 : u32, _p1 : u32,
 };
 
 // One particle. Laid out so the renderer reads `offset` (loc4), `color` (loc5), `emission` (loc6)
@@ -57,12 +58,11 @@ fn cs_step(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     var pt = particles[i];
 
-    // Settled particles hold still; just keep their glow current.
-    if (pt.resting > 0.5) {
-        pt.emission = incandescence(pt.temp);
-        particles[i] = pt;
-        return;
-    }
+    // Cool toward ambient (Newton's law of cooling): hot debris radiates/conducts and its glow fades
+    // (docs/20). EVERY particle steps every frame — a settled particle is NOT skipped, so it keeps
+    // cooling AND re-checks its support (if the ground under it is dug away, it falls again). Freezing
+    // "resting" particles was a bug (they never cooled, never fell).
+    pt.temp = 300.0 + (pt.temp - 300.0) * exp(-P.cool_rate * P.dt);
 
     // Gravity (O(1) COM approximation — the GPU could afford the full field; parity with the CPU
     // stopgap for now, docs/22).
