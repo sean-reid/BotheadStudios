@@ -94,6 +94,9 @@ export default defineConfig({
     host: lan ? true : "127.0.0.1",
     port: 5173,
     strictPort: true,
+    // Don't hot-reload when a screenshot is written into web/shots — that was reloading (and
+    // "crashing") the app every time the 📷 button fired.
+    watch: { ignored: ["**/shots/**"] },
     fs: {
       // Allow importing the generated wasm package that lives under src/wasm.
       allow: [".."],
