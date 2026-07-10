@@ -237,7 +237,7 @@ async function main(): Promise<void> {
       if (!stats) return;
       stats.innerHTML =
         `world mass <b>${fmt(engine.total_mass())}</b> kg · g <b>${fmt(engine.surface_gravity())}</b> m/s² (micro-g)<br>` +
-        `probe: alt <b>${engine.sphere_altitude().toFixed(1)}</b> m · ${engine.is_resting() ? "at rest ✔" : "falling…"}<br>` +
+        `probe (iron ball): alt <b>${engine.sphere_altitude().toFixed(1)}</b> m · integrity <b>${(engine.probe_integrity() * 100).toFixed(0)}%</b><br>` +
         `debris <b>${engine.particle_count()}</b> · time ×<b>${engine.time_scale().toFixed(0)}</b> · <b>${fps}</b> fps<br>` +
         `tap dig · long-press blast · ☄/m meteor · drag orbit · pinch zoom`;
     };

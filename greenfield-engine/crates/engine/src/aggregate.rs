@@ -58,6 +58,9 @@ pub struct Aggregate {
     pub damping: f64,
     /// Fractional stretch at which a bond fractures.
     pub break_strain: f64,
+    /// Uniform external gravity (m/s²) applied to every particle — e.g. a planet's surface field for a
+    /// ball resting on the ground. Zero for a free rubble pile (which makes its own gravity).
+    pub gravity: DVec3,
 }
 
 impl Aggregate {
@@ -72,7 +75,14 @@ impl Aggregate {
             stiffness: 0.0,
             damping: 0.0,
             break_strain: f64::INFINITY,
+            gravity: DVec3::ZERO,
         }
+    }
+
+    /// Set a uniform external gravity (e.g. a planet's surface field).
+    pub fn with_gravity(mut self, gravity: DVec3) -> Self {
+        self.gravity = gravity;
+        self
     }
 
     /// A **cohesive solid**: bond every pair of particles within `cutoff` at their current separation,
@@ -112,6 +122,7 @@ impl Aggregate {
             stiffness,
             damping,
             break_strain,
+            gravity: DVec3::ZERO,
         }
     }
 
@@ -196,7 +207,7 @@ impl Aggregate {
     pub fn accelerations(&self) -> Vec<DVec3> {
         let s2 = self.softening * self.softening;
         let p = &self.particles;
-        let mut acc = vec![DVec3::ZERO; p.len()];
+        let mut acc = vec![self.gravity; p.len()]; // uniform external gravity (0 for a rubble pile)
         for i in 0..p.len() {
             for j in 0..p.len() {
                 if i == j {

@@ -41,7 +41,7 @@ pub use app::{Engine, OrbitDemo};
 #[cfg(target_arch = "wasm32")]
 mod app {
     use crate::mesher::{self, Mesh, Vertex};
-    use crate::{body, emission, gravity, materials, matter, texture, world};
+    use crate::{aggregate, emission, gravity, materials, matter, texture, world};
     use glam::{Mat4, Vec3};
     use wasm_bindgen::prelude::*;
     use web_sys::HtmlCanvasElement;
@@ -117,15 +117,18 @@ mod app {
         pipeline: wgpu::RenderPipeline,
 
         world_gpu: GpuMesh,
-        sphere_gpu: GpuMesh,
         world_uni: UniformSlot,
-        sphere_uni: UniformSlot,
 
         // Simulation
         mats: Vec<materials::Material>,
         world: world::World,
         field: gravity::MassField,
-        sphere: body::Sphere,
+        /// The probe: a **cohesive iron ball of real matter** (`docs/23`) — falls under gravity, rests
+        /// on the terrain (its bonds settle to a ground state), and **shatters emergently** when an
+        /// impact breaks its bonds. No longer a rigid primitive; no special case can obliterate it.
+        probe: aggregate::Aggregate,
+        probe_acc: Vec<glam::DVec3>,
+        probe_instances: wgpu::Buffer, // GpuParticle instances, drawn with the particle pipeline
         matter: matter::MatterSim,
         spawn: Vec3,
         time_scale: f32,
@@ -207,30 +210,24 @@ mod app {
             let field = gravity::MassField::build(&world, &mats, GRAVITY_BLOCK);
 
             let world_mesh = mesher::build_surface_nets(&world, &mats);
-            let iron_idx = materials::index_of(&mats, "iron");
-            let sphere_mesh = mesher::build_uv_sphere(
-                SPHERE_RADIUS,
-                iron_idx as u32,
-                mats[iron_idx].albedo,
-                16,
-                24,
-            );
             let world_gpu = upload_mesh(&device, "world", &world_mesh);
-            let sphere_gpu = upload_mesh(&device, "sphere", &sphere_mesh);
-            log::info!(
-                "meshes: world {} tris, sphere {} tris",
-                world_mesh.indices.len() / 3,
-                sphere_mesh.indices.len() / 3
-            );
+            log::info!("meshes: world {} tris", world_mesh.indices.len() / 3);
 
-            // --- Spawn the probe above the center column ---
+            // --- Spawn the probe: a cohesive iron ball of real matter (docs/23) ---
             let c = world.center();
             let surf = world
                 .surface_top_voxel(c.x as i32, c.z as i32)
                 .map(|t| t as f32 - c.y)
                 .unwrap_or(0.0);
             let spawn = Vec3::new(0.0, surf + SPHERE_RADIUS + SPAWN_HEIGHT, 0.0);
-            let sphere = body::Sphere::new(spawn, SPHERE_MASS, SPHERE_RADIUS);
+            let probe = build_probe(&mats, spawn);
+            let probe_acc = probe.accelerations();
+            let probe_instances = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("probe-instances"),
+                size: (probe.particles.len() * std::mem::size_of::<GpuParticle>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
 
             log::info!(
                 "greenfield-engine: world mass = {:.3e} kg, surface g = {} m/s^2 (planetary)",
@@ -347,7 +344,6 @@ mod app {
 
             // --- Uniform buffers + bind groups ---
             let world_ubuf = make_uniform_buffer(&device);
-            let sphere_ubuf = make_uniform_buffer(&device);
             let world_uni = UniformSlot {
                 bind: make_world_bind(
                     &device,
@@ -358,17 +354,6 @@ mod app {
                     &matparams_buf,
                 ),
                 buf: world_ubuf,
-            };
-            let sphere_uni = UniformSlot {
-                bind: make_world_bind(
-                    &device,
-                    &world_bind_layout,
-                    &sphere_ubuf,
-                    &tex_view,
-                    &sampler,
-                    &matparams_buf,
-                ),
-                buf: sphere_ubuf,
             };
             let pipeline = build_pipeline(&device, &world_bind_layout, config.format);
 
@@ -425,13 +410,13 @@ mod app {
                 depth_view,
                 pipeline,
                 world_gpu,
-                sphere_gpu,
                 world_uni,
-                sphere_uni,
                 mats,
                 world,
                 field,
-                sphere,
+                probe,
+                probe_acc,
+                probe_instances,
                 matter,
                 spawn,
                 time_scale: DEFAULT_TIME_SCALE,
@@ -470,13 +455,38 @@ mod app {
             SURFACE_GRAVITY
         }
         pub fn sphere_altitude(&self) -> f32 {
-            self.sphere.altitude(self.ground_under_sphere())
+            // Lowest particle of the ball above the terrain directly under its centre of mass.
+            let com = self.probe.com();
+            let ground = self.ground_under(com.x as f32, com.z as f32);
+            let low = self
+                .probe
+                .particles
+                .iter()
+                .map(|p| p.pos.y as f32)
+                .fold(f32::MAX, f32::min);
+            low - ground
         }
         pub fn sphere_speed(&self) -> f32 {
-            self.sphere.vel.length()
+            // COM speed of the ball.
+            let m = self.probe.total_mass();
+            if m <= 0.0 {
+                return 0.0;
+            }
+            let v = self
+                .probe
+                .particles
+                .iter()
+                .fold(glam::DVec3::ZERO, |s, p| s + p.vel * p.mass)
+                / m;
+            v.length() as f32
         }
-        pub fn is_resting(&self) -> bool {
-            self.sphere.resting
+        /// Fraction of the probe's bonds still intact — 1.0 whole, 0.0 fully shattered (HUD).
+        pub fn probe_integrity(&self) -> f32 {
+            let total = self.probe.bonds.len();
+            if total == 0 {
+                return 0.0;
+            }
+            self.probe.active_bonds() as f32 / total as f32
         }
         pub fn time_scale(&self) -> f32 {
             self.time_scale
@@ -484,9 +494,10 @@ mod app {
         pub fn set_time_scale(&mut self, s: f32) {
             self.time_scale = s.clamp(1.0, 5000.0);
         }
-        /// Re-drop the probe from its spawn point.
+        /// Re-drop a fresh probe from its spawn point (re-forms a whole ball).
         pub fn reset_drop(&mut self) {
-            self.sphere = body::Sphere::new(self.spawn, SPHERE_MASS, SPHERE_RADIUS);
+            self.probe = build_probe(&self.mats, self.spawn);
+            self.probe_acc = self.probe.accelerations();
         }
 
         /// Number of airborne debris particles (HUD).
@@ -526,6 +537,23 @@ mod app {
                     .impact(&mut self.world, &self.mats, hit, dir, METEOR_ENERGY);
                 self.matter.collapse(&mut self.world, &self.mats);
                 self.flush_debris_to_gpu();
+
+                // The SAME impact reaches the probe — no special case. Energy delivered falls off with
+                // distance from ground zero; `deposit_impact` heats + kicks the ball's particles, and
+                // whether it merely dents or SHATTERS is decided by iron's own thresholds + its bonds
+                // (docs/23). A ball at ground zero absorbs ~all of it and comes apart on its own.
+                let com = self.probe.com();
+                let site = glam::DVec3::new(hit.x as f64, hit.y as f64, hit.z as f64);
+                let sigma =
+                    self.mats[materials::index_of(&self.mats, "granite")].fracture_strength as f64;
+                let reach = crate::damage::crater_radius(crate::damage::crater_volume(
+                    METEOR_ENERGY as f64,
+                    sigma,
+                ))
+                .max(1.0);
+                let energy = METEOR_ENERGY as f64 * (-(com - site).length() / reach).exp();
+                let dir_d = glam::DVec3::new(dir.x as f64, dir.y as f64, dir.z as f64);
+                self.probe.deposit_impact(&self.mats, site, dir_d, energy);
             }
         }
 
@@ -562,6 +590,32 @@ mod app {
 
         /// Re-upload the terrain heightfield (the GPU step collides debris against it) after the world
         /// changes (a dig/impact alters column tops).
+        /// Upload the probe's particles to its render instance buffer, glowing by temperature.
+        fn upload_probe_instances(&self) {
+            let albedo = self.mats[self.probe.material].albedo;
+            let mat = self.probe.material as f32;
+            let inst: Vec<GpuParticle> = self
+                .probe
+                .particles
+                .iter()
+                .zip(self.probe.temps.iter())
+                .map(|(p, &t)| GpuParticle {
+                    offset: [p.pos.x as f32, p.pos.y as f32, p.pos.z as f32],
+                    temp: t,
+                    vel: [0.0, 0.0, 0.0],
+                    resting: 0.0,
+                    color: albedo,
+                    material: mat,
+                    emission: emission::incandescence(t),
+                    _pad: 0.0,
+                })
+                .collect();
+            if !inst.is_empty() {
+                self.queue
+                    .write_buffer(&self.probe_instances, 0, bytemuck::cast_slice(&inst));
+            }
+        }
+
         fn upload_heightfield_to_gpu(&self) {
             let (w, d) = (self.world.w, self.world.d);
             let mut tops = Vec::with_capacity(w * d);
@@ -608,13 +662,7 @@ mod app {
             let (view_proj, eye) = self.view_proj();
             let light = Vec3::new(0.45, 0.9, 0.4).normalize();
             self.write_uniform(&self.world_uni, view_proj, Mat4::IDENTITY, eye, light);
-            self.write_uniform(
-                &self.sphere_uni,
-                view_proj,
-                Mat4::from_translation(self.sphere.pos),
-                eye,
-                light,
-            );
+            self.upload_probe_instances(); // the probe is drawn as its particles now
 
             let output = self
                 .surface
@@ -672,18 +720,21 @@ mod app {
                 });
                 pass.set_pipeline(&self.pipeline);
                 draw(&mut pass, &self.world_uni, &self.world_gpu);
-                draw(&mut pass, &self.sphere_uni, &self.sphere_gpu);
 
+                // Particle pipeline: the probe (cohesive ball, its particles) + the GPU debris.
+                pass.set_pipeline(&self.particle_pipeline);
+                pass.set_bind_group(0, &self.particle_bind, &[]);
+                pass.set_vertex_buffer(0, self.cube_gpu.vertex_buf.slice(..));
+                pass.set_index_buffer(self.cube_gpu.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+
+                let probe_count = self.probe.particles.len() as u32;
+                if probe_count > 0 {
+                    pass.set_vertex_buffer(1, self.probe_instances.slice(..));
+                    pass.draw_indexed(0..self.cube_gpu.index_count, 0, 0..probe_count);
+                }
                 if particle_count > 0 {
-                    // Draw instances straight from the GPU-computed particle buffer (docs/22).
-                    pass.set_pipeline(&self.particle_pipeline);
-                    pass.set_bind_group(0, &self.particle_bind, &[]);
-                    pass.set_vertex_buffer(0, self.cube_gpu.vertex_buf.slice(..));
+                    // Draw straight from the GPU-computed debris buffer (docs/22).
                     pass.set_vertex_buffer(1, self.gpu_particles.buf.slice(..));
-                    pass.set_index_buffer(
-                        self.cube_gpu.index_buf.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
                     pass.draw_indexed(0..self.cube_gpu.index_count, 0, 0..particle_count);
                 }
             }
@@ -696,24 +747,46 @@ mod app {
 
         fn step_physics(&mut self) {
             let sim_dt = self.time_scale / 60.0;
-            let dt = sim_dt / PHYS_SUBSTEPS as f32;
+            let dt = (sim_dt / PHYS_SUBSTEPS as f32) as f64;
             for _ in 0..PHYS_SUBSTEPS {
-                // The probe falls under the gravity field and rests on the terrain. Debris is now
-                // stepped on the GPU (docs/22), so it no longer runs here. TRADE-OFF (iteration 2): the
-                // probe↔debris momentum exchange (`couple_body`) and debris re-deposition into voxels
-                // are temporarily off for GPU debris — they return once the buffer is readable/hybrid.
-                let accel = Vec3::new(0.0, -SURFACE_GRAVITY, 0.0); // planetary surface gravity (docs/22)
-                self.sphere.integrate(accel, dt);
-                self.sphere.collide(&self.world, accel, dt);
+                // The probe is a cohesive iron ball of real matter (docs/23): step its bonds + gravity
+                // (settling to a ground state), then rest its particles on the terrain. Debris runs on
+                // the GPU (docs/22).
+                self.probe.step(&mut self.probe_acc, dt);
+                self.collide_probe_with_terrain();
             }
         }
 
-        /// Terrain surface height (centered coords) directly under the sphere; far below if it has
-        /// drifted off the world footprint.
-        fn ground_under_sphere(&self) -> f32 {
+        /// Rest each probe particle on the terrain surface under it (a fixed floor per column). The
+        /// bonds transmit the support up, so the ball rests as a ball; dig the surface away and its
+        /// support is really gone — it sags/falls emergently.
+        fn collide_probe_with_terrain(&mut self) {
             let c = self.world.center();
-            let xi = (self.sphere.pos.x + c.x).floor() as i32;
-            let zi = (self.sphere.pos.z + c.z).floor() as i32;
+            let half = matter::PARTICLE_HALF as f64;
+            for p in &mut self.probe.particles {
+                let xi = (p.pos.x as f32 + c.x).floor() as i32;
+                let zi = (p.pos.z as f32 + c.z).floor() as i32;
+                let ground = self
+                    .world
+                    .surface_top_voxel(xi, zi)
+                    .map(|t| t as f64 - c.y as f64)
+                    .unwrap_or(-1.0e9);
+                let floor = ground + half;
+                if p.pos.y < floor {
+                    p.pos.y = floor;
+                    if p.vel.y < 0.0 {
+                        p.vel.y = 0.0;
+                    }
+                    p.vel.x *= 0.5; // ground friction (crude; emergent friction is future, docs/23)
+                    p.vel.z *= 0.5;
+                }
+            }
+        }
+
+        /// Terrain surface height (centered coords) under a column; far below off the footprint.
+        fn ground_under(&self, x: f32, z: f32) -> f32 {
+            let c = self.world.center();
+            let (xi, zi) = ((x + c.x).floor() as i32, (z + c.z).floor() as i32);
             self.world
                 .surface_top_voxel(xi, zi)
                 .map(|t| t as f32 - c.y)
@@ -1161,6 +1234,37 @@ mod app {
         fn set_params(&self, queue: &wgpu::Queue, params: &GpuStepParams) {
             queue.write_buffer(&self.params, 0, bytemuck::bytes_of(params));
         }
+    }
+
+    /// Build the probe: a **cohesive iron ball** (bonded iron particles) centred at `spawn` — real
+    /// matter that falls, rests, and shatters emergently (`docs/23`). NOTE: the bond stiffness is
+    /// limited by the explicit 60 fps timestep — real iron is far stiffer (Young's modulus ~2e11 Pa)
+    /// and would explode without implicit integration / heavy substepping (a future refinement); this
+    /// value holds the ball's shape and stays stable.
+    fn build_probe(mats: &[materials::Material], spawn: Vec3) -> aggregate::Aggregate {
+        let iron = materials::index_of(mats, "iron");
+        let density = mats[iron].density as f64; // ~7870 kg/m³
+        let radius = SPHERE_RADIUS as f64;
+        let s = glam::DVec3::new(spawn.x as f64, spawn.y as f64, spawn.z as f64);
+        let ri = radius.ceil() as i32;
+        let mut particles = Vec::new();
+        for z in -ri..=ri {
+            for y in -ri..=ri {
+                for x in -ri..=ri {
+                    let off = glam::DVec3::new(x as f64, y as f64, z as f64);
+                    if off.length() <= radius {
+                        particles.push(crate::orbit::Body {
+                            pos: s + off,
+                            vel: glam::DVec3::ZERO,
+                            mass: density, // 1 m³ per particle ⇒ mass = density
+                        });
+                    }
+                }
+            }
+        }
+        // cutoff 1.75 → bond to face/edge/corner neighbours; stiffness/damping/break tuned stable.
+        aggregate::Aggregate::cohesive(particles, iron, 0.5, 1.75, 5.0e6, 1.0e5, 0.15)
+            .with_gravity(glam::DVec3::new(0.0, -SURFACE_GRAVITY as f64, 0.0))
     }
 
     fn upload_mesh(device: &wgpu::Device, label: &str, mesh: &Mesh) -> GpuMesh {
