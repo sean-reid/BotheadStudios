@@ -545,8 +545,13 @@ mod app {
         }
 
         /// Number of airborne debris particles (HUD).
+        /// The number of debris particles ACTUALLY in the scene — the GPU count (the CPU `matter`
+        /// buffer is cleared to ~0 right after each flush, so it was misreporting). This is the honest
+        /// conservation readout: it only ever rises on a dig/meteor and never per-frame, so if the
+        /// scene looks like it is "creating matter" while this number holds constant, the culprit is
+        /// recirculating energy, not new matter (docs/23).
         pub fn particle_count(&self) -> u32 {
-            self.matter.particle_count() as u32
+            self.gpu_particles.count
         }
 
         /// Dig at a screen point (normalized device coords, y up). `blast` uses a stronger tool that
@@ -1399,19 +1404,27 @@ mod app {
             if self.count == 0 {
                 return;
             }
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("particle-step-pass"),
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(0, &self.bind, &[]);
-            pass.set_pipeline(&self.clear);
-            pass.dispatch_workgroups(GRID_TABLE_SIZE.div_ceil(64), 1, 1);
-            pass.set_pipeline(&self.insert);
-            pass.dispatch_workgroups(self.count.div_ceil(64), 1, 1);
-            pass.set_pipeline(&self.force_pass);
-            pass.dispatch_workgroups(self.count.div_ceil(64), 1, 1);
-            pass.set_pipeline(&self.integrate);
-            pass.dispatch_workgroups(self.count.div_ceil(64), 1, 1);
+            // Each stage is its OWN compute pass. The stages have strict data dependencies (insert
+            // writes the grid that forces reads; forces writes the accelerations that integrate reads),
+            // and a memory barrier between dependent dispatches is only GUARANTEED at pass boundaries.
+            // Four dispatches in one pass happened to work on desktop Vulkan (the 2070) but can RACE on
+            // other backends (e.g. Metal / the M4) — reading a half-built grid or stale forces injects
+            // energy (a "matter fountain"). Separate passes force the barrier on every backend (docs/23).
+            let stages: [(&wgpu::ComputePipeline, u32); 4] = [
+                (&self.clear, GRID_TABLE_SIZE),
+                (&self.insert, self.count),
+                (&self.force_pass, self.count),
+                (&self.integrate, self.count),
+            ];
+            for (pipeline, threads) in stages {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("particle-stage"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &self.bind, &[]);
+                pass.dispatch_workgroups(threads.div_ceil(64), 1, 1);
+            }
         }
 
         fn set_params(&self, queue: &wgpu::Queue, params: &GpuStepParams) {

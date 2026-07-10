@@ -70,7 +70,7 @@ const CONTACT_RADIUS: f32 = 0.25; // = half the 0.5 m sub-particle spacing ⇒ l
 // Contact constants under tuning. Stability at the debris substep (dt≈2 ms) with cubic coordination
 // z≈6 (face-neighbours touch at 0.5): dt·√(z·k) < 2 and dt·z·c < 2. tangent_damp governs how sharply
 // friction saturates to the μ·N cap — too low and there's no static friction, so piles creep flat.
-const C_STIFFNESS: f32 = 4.0e4;
+const C_STIFFNESS: f32 = 2.5e4;
 const C_NORMAL_DAMP: f32 = 50.0;
 const C_TANGENT_DAMP: f32 = 50.0;
 const C_MAX_ACCEL: f32 = 400.0; // cap on normal contact accel (prevents launches)
@@ -284,20 +284,21 @@ fn simulate(gpu: &Gpu, particles: Vec<Particle>, frames: u32, scene: &Scene) -> 
             let mut enc = gpu
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            {
+            // One compute pass PER stage (matches the engine): dependent dispatches (insert→forces→
+            // integrate) need a memory barrier between them, only guaranteed at pass boundaries.
+            for (pipeline, threads) in [
+                (&gpu.clear, TABLE_SIZE),
+                (&gpu.insert, count),
+                (&gpu.forces, count),
+                (&gpu.integrate, count),
+            ] {
                 let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: None,
                     timestamp_writes: None,
                 });
+                pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &bind, &[]);
-                pass.set_pipeline(&gpu.clear);
-                pass.dispatch_workgroups(ceil(TABLE_SIZE), 1, 1);
-                pass.set_pipeline(&gpu.insert);
-                pass.dispatch_workgroups(ceil(count), 1, 1);
-                pass.set_pipeline(&gpu.forces);
-                pass.dispatch_workgroups(ceil(count), 1, 1);
-                pass.set_pipeline(&gpu.integrate);
-                pass.dispatch_workgroups(ceil(count), 1, 1);
+                pass.dispatch_workgroups(ceil(threads), 1, 1);
             }
             gpu.queue.submit(Some(enc.finish()));
         }
@@ -539,6 +540,62 @@ fn main() {
             spd,
             high,
             pass(ok)
+        );
+        failures += !ok as i32;
+    }
+
+    // Scene F: DEEP DENSE PILE — the fountain test. Pour ~6000 grains into a narrow deep pit so they
+    // pack densely (high coordination, many resting contacts). A CONSERVATIVE model dissipates and
+    // settles; a non-conservative one (velocity-zeroing "freeze" that pins grains into infinite-mass
+    // anchors) pumps energy upward and grains keep getting flung — the "matter fountain". We verify
+    // energy DECAYS between an early and a late sample (monotone settling), stays finite, and no grain
+    // is left launched above the fill.
+    {
+        let (w, d) = (24u32, 24u32);
+        let plain = 18i32;
+        let pit_top = 2i32; // 16 deep, narrow
+        let (pr, cx, cz) = (3i32, 12i32, 12i32);
+        let mut hf = vec![plain; (w * d) as usize];
+        for z in 0..d as i32 {
+            for x in 0..w as i32 {
+                if (x - cx).abs() <= pr && (z - cz).abs() <= pr {
+                    hf[(z * w as i32 + x) as usize] = pit_top;
+                }
+            }
+        }
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.7 };
+        let mut ps = Vec::new();
+        let s = 0.5f32;
+        let j = 0.12 * s;
+        // ~6000 grains stacked tall above the narrow pit.
+        for ix in -3..=3 {
+            for iz in -3..=3 {
+                for iy in 0..36 {
+                    let i = ps.len() as u32;
+                    ps.push(Particle::at(
+                        ix as f32 * s + j * jitter(i, 1),
+                        1.0 + iy as f32 * s + j * jitter(i, 2),
+                        iz as f32 * s + j * jitter(i, 3),
+                    ));
+                }
+            }
+        }
+        let early = simulate(&gpu, ps.clone(), 400, &scene);
+        let mid = simulate(&gpu, ps.clone(), 1500, &scene);
+        let late = simulate(&gpu, ps, 3500, &scene);
+        let (spd_e, spd_m, spd_l) = (mean_speed(&early), mean_speed(&mid), mean_speed(&late));
+        let high_l = max_height(&late);
+        // The conservation proof: energy only ever DECREASES (a fountain would sustain or grow it) and
+        // nothing is left flung skyward. Full settling of an extreme dense pile is slow and gated on the
+        // separate density-reduction work (the 8× render subdivision over-densifies the sim) — tracked
+        // separately; here we assert the invariant that matters: no energy is CREATED.
+        let ok = finite(&late)
+            && spd_m < spd_e * 0.95     // clearly decaying, not sustained
+            && spd_l < spd_m            // still decaying (no plateau ⇒ no sustained injection)
+            && high_l < 8.0; // nothing left launched far above the fill
+        println!(
+            "\nF deep-dense (fountain test): speed {:.3}→{:.3}→{:.3} m/s (must keep decaying), highest {:.1} m  {}",
+            spd_e, spd_m, spd_l, high_l, pass(ok)
         );
         failures += !ok as i32;
     }

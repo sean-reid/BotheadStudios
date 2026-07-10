@@ -174,16 +174,15 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
         }
     }
 
-    // Static friction (approximation): a grain that is RESTING ON something (net contact force points
-    // up — it is being held against gravity) and moving below the settle speed sticks. Real static
-    // friction holds until shear exceeds μ·N, so a resting grain does not creep — and a pile holds its
-    // angle of repose instead of flattening under the velocity-only (kinetic) friction. Requiring
-    // UPWARD support (not merely "in contact") avoids freezing a grain mid-arc that just grazes
-    // another. Proper static friction needs stateful per-contact tangential springs; this threshold
-    // form is the honest GPU approximation, flagged (docs/23).
+    // Static friction (approximation, CONSERVATIVE): a grain RESTING ON something (net contact force
+    // points up — held against gravity) and moving below the settle speed is heavily DAMPED so it
+    // settles. It is critical that we damp (remove energy) rather than PIN (zero velocity): a pinned
+    // grain becomes an infinite-mass anchor that repels the grains above it without recoiling, pumping
+    // momentum into them from nowhere — a matter/energy "fountain" at depth (Newton's third law
+    // broken). Damping only ever removes energy, so it cannot fountain. This is a momentum sink (like
+    // drag, flagged); proper static friction needs stateful per-contact tangential springs (docs/23).
     if (forces[i].y > 1.0 && length(vel) < P.settle_speed) {
-        vel = vec3<f32>(0.0);
-        pos = pt.offset; // don't creep this substep either
+        vel = vel * 0.5;
     }
 
     pt.offset = pos;
