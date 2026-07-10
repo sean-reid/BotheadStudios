@@ -10,6 +10,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **Bodies as particle aggregates** (`docs/21`) — the gravitational skeleton for making celestial
+  destruction a *simulation, not a mock*. `aggregate.rs`: a body is a cloud of particles bound by
+  softened N-body self-gravity; `binding_energy`, `kinetic_energy_com`, `rms_radius`, `com`. A cold
+  cloud holds together (emergent cohesion/roundness) and an energy kick above its binding energy
+  disrupts it (emergent shatter). Material/thermal per particle, impact coupling, and rendering staged.
+  Tests: `aggregate::a_self_gravitating_cloud_holds_together`, `energy_above_binding_disrupts_it`.
 - **Phase classes integrated into `matter::impact`** (`docs/20`) — each ejecta is classified via
   `damage::classify` (Fractured / Melted / Vaporized) from the thermodynamic thresholds; vaporized
   matter expands away fast (gas/plasma). Crater extent unchanged (LOD bridge intact). Test:

@@ -5,6 +5,34 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — Bodies as particle aggregates (emergent binding + disruption)
+
+**What.** Started making celestial destruction a *simulation, not a mock* (`docs/21`). A body becomes a
+**cloud of particles held together by its own gravity** (`aggregate.rs`): softened N-body self-gravity,
+`binding_energy` (Σ G·m·m/r), `kinetic_energy_com`, `rms_radius`, `com`. Verified that a cold cloud
+**holds together** (cohesion emerges from gravity — the `docs/15` roundness invariant) and that an
+energy kick **above the binding energy disrupts it** (emergent dispersal — the identity behind a
+shattered moon).
+
+**Why.** Robin asked, pointedly, whether the impact destruction is *inherent in the engine's model* or
+"just mocks to humor me." Honest audit: the terrain meteor IS real emergent simulation (per-voxel
+fracture/melt/vaporize from material + energy, glowing by computed temperature). But the **celestial**
+Moon-crash was NOT simulated destruction — the bodies were point masses drawn as spheres, so there was
+no matter to break, and I was about to build a scripted "fireball" — a **mock**. Stopped: that violates
+the honesty invariant. The honest path (Robin chose it) is bodies-as-aggregates, so the shatter is the
+same gravity that rounds them, run past their binding energy — no script.
+
+**Verified.** `aggregate::a_self_gravitating_cloud_holds_together`,
+`aggregate::energy_above_binding_disrupts_it`. `cargo test` 44/44; clippy `-D warnings` clean; fmt
+clean.
+
+**Honest scope.** This is the gravitational *skeleton*. Per-particle material + temperature, the impact
+coupling (deposit energy → `damage::classify` per particle → emergent debris/melt/vapor), and the
+rendering are the next slices (`docs/21`). Until they land, the *visible* Moon-crash still shows the
+momentum stick — and we will NOT fake the shatter in the meantime.
+
+---
+
 ## 2026-07-09 — Phase classes integrated into matter::impact; Moon-speed readout
 
 **What.** `matter::impact` now classifies each ejecta via `damage::classify` (the thermodynamic
