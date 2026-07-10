@@ -5,6 +5,33 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-09 — Visual: glowing molten ejecta + a Meteor you can fire
+
+**What.** The first visible slice of impact damage beyond text (`docs/20`): impact ejecta carry a
+temperature, and molten debris **glows by black-body emission from that temperature**. Added
+`Particle.temp_k`; `matter::impact` deposits heat that peaks at the contact and falls to cold at the
+crater rim (centre melts/vaporizes, rim is cold rubble — the honest radial gradient); `emission::
+incandescence(temp_k)` maps K → an added RGB glow (dull red → orange → yellow → white); the particle
+shader **adds** it, so hot debris self-illuminates even on the dark side (it *emits* because it's hot —
+the analogue of illumination × reflectance, `docs/17`). A **Meteor** control (`Engine::meteor`, the
+`☄`/`m` button in the terrain slice) fires a high-energy `impact` you can watch and orbit into.
+
+**Why.** Robin: "see the impact, then zoom in and see the crater" (with glowing melt). Delivered in the
+*terrain* renderer (which renders on-device) so it's verifiable now; the celestial→voxel auto-fly-in
+(materialising the Moon-crash crater from its summary) stays staged (`docs/19`).
+
+**Verified.** `emission::cold_matter_does_not_glow_and_hotter_glows_brighter_and_whiter` and
+`matter::a_big_impact_melts_the_centre_and_leaves_the_rim_cold`. `cargo test` 40/40; clippy
+`-D warnings` clean; fmt clean; wasm + `tsc` green; deployed. The *look* of the glow is for Robin's
+on-device check.
+
+**Honest caveat (`docs/20`).** The crater extent is physical (energy/σ), but the ejecta *temperature*
+distribution is a first visual model — the energy is not yet conserved through the phase change, and
+`incandescence` approximates the Planckian locus. Next (Robin's order): integrate the phase classes
+into `matter::impact` proper (voxels → gas/melt/ejecta, energy-conserving), then MLS-MPM.
+
+---
+
 ## 2026-07-09 — Impact thermodynamics: fracture → melt → vaporize (one rule)
 
 **What.** Modelled fragmentation, melting, and vaporization as **one data-driven response** (`docs/20`),

@@ -46,10 +46,13 @@ vaporizes rock, and a material with no thermal data never melts/vaporizes.
    vaporized voxels become gas/plasma (removed or a vapor field), melted voxels become a **molten**
    material (a hot liquid parcel that flows and cools), fractured voxels are ejecta (current), intact
    remain. Conserve mass; account energy through the transitions.
-2. **Display beyond text (`docs/19` zoom-in):** glowing incandescent melt (emission from temperature,
-   not a painted colour — the honest analogue of illumination × reflectance), a vapor plume, and the
-   materialised voxel crater you can fly down into. Emission colour comes from temperature
-   (black-body), staying honest all the way down.
+2. **Display beyond text — glowing melt: LANDED (terrain scene).** Impact ejecta carry a `temp_k`;
+   `emission::incandescence(temp_k)` gives a black-body glow (dull red → orange → yellow → white) that
+   is *added* in the particle shader, so molten debris **self-illuminates** even on the dark side — it
+   emits because it is hot, the honest analogue of illumination × reflectance. Fire it with the
+   **Meteor** button / `m` key in the terrain slice: a high-energy `impact` whose core melts and glows
+   while the rim is cold rubble. Still staged: a **vapor plume**, and the **celestial → voxel fly-in**
+   (materialising the Moon-crash crater to fly into, `docs/19`).
 3. **Cooling / solidification:** molten rock radiates and re-solidifies (magma → rock), closing the
    loop with the material model.
 

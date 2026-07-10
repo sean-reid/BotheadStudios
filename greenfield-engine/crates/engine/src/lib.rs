@@ -22,6 +22,7 @@
 
 mod body;
 mod damage;
+mod emission;
 mod gravity;
 #[cfg(test)]
 mod isotropy;
@@ -39,7 +40,7 @@ pub use app::{Engine, OrbitDemo};
 #[cfg(target_arch = "wasm32")]
 mod app {
     use crate::mesher::{self, Mesh, Vertex};
-    use crate::{body, gravity, materials, matter, texture, world};
+    use crate::{body, emission, gravity, materials, matter, texture, world};
     use glam::{Mat4, Vec3};
     use wasm_bindgen::prelude::*;
     use web_sys::HtmlCanvasElement;
@@ -63,6 +64,7 @@ mod app {
     const DIG_RADIUS: f32 = 3.0;
     const DIG_POWER: f32 = 1.5e6; // breaks soil/grass, not granite
     const BLAST_POWER: f32 = 3.0e7; // breaks granite too
+    const METEOR_ENERGY: f32 = 1.5e11; // J — a high-energy impact whose core melts + glows (docs/20)
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -78,6 +80,7 @@ mod app {
     struct InstanceRaw {
         offset: [f32; 3],
         color: [f32; 3],
+        emission: [f32; 3], // incandescent glow from temperature (docs/20); 0 for cold debris
     }
 
     struct Camera {
@@ -487,6 +490,22 @@ mod app {
             }
         }
 
+        /// Fire a **meteor** at a screen point: a high-energy `impact` that carves a crater and throws
+        /// incandescent ejecta — the centre melts and glows, the rim is cold rubble (`docs/20`). Same
+        /// operator as a bullet or a moon, just more energy.
+        pub fn meteor(&mut self, ndc_x: f32, ndc_y: f32) {
+            let (view_proj, eye) = self.view_proj();
+            let inv = view_proj.inverse();
+            let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
+            let far = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
+            let dir = (far - near).normalize_or_zero();
+            if let Some((_x, _y, _z, hit)) = self.world.raycast(eye, dir, 6000.0) {
+                self.matter
+                    .impact(&mut self.world, &self.mats, hit, dir, METEOR_ENERGY);
+                self.matter.collapse(&mut self.world, &self.mats);
+            }
+        }
+
         fn remesh_world(&mut self) {
             let mesh = mesher::build_surface_nets(&self.world, &self.mats);
             self.world_gpu = upload_mesh(&self.device, "world", &mesh);
@@ -500,6 +519,7 @@ mod app {
                 .map(|p| InstanceRaw {
                     offset: [p.pos.x, p.pos.y, p.pos.z],
                     color: self.mats[p.material].albedo,
+                    emission: emission::incandescence(p.temp_k), // molten debris glows (docs/20)
                 })
                 .collect();
             if !instances.is_empty() {
@@ -810,8 +830,8 @@ mod app {
         });
         const CUBE_ATTRS: [wgpu::VertexAttribute; 4] =
             wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Uint32];
-        const INST_ATTRS: [wgpu::VertexAttribute; 2] =
-            wgpu::vertex_attr_array![4 => Float32x3, 5 => Float32x3];
+        const INST_ATTRS: [wgpu::VertexAttribute; 3] =
+            wgpu::vertex_attr_array![4 => Float32x3, 5 => Float32x3, 6 => Float32x3];
         let buffers = [
             wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,

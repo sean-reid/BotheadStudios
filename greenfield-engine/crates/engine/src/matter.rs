@@ -32,6 +32,9 @@ const SETTLE_SPEED: f32 = 0.02; // below this, a grounded particle deposits into
 const SETTLE_FRAMES: u32 = 10; // ...or after this many consecutive grounded steps
 const MAX_EJECT: f32 = 0.045; // cap ejection speed below the world's ~7 cm/s escape velocity
 
+/// Ambient/reference temperature (K) — cold matter; impact ejecta heat above this (`docs/20`).
+pub const REF_TEMP_K: f32 = 300.0;
+
 /// A detached lump of matter in flight (one former voxel).
 #[derive(Clone, Copy)]
 pub struct Particle {
@@ -41,6 +44,9 @@ pub struct Particle {
     /// kg. Not read yet (gravity is mass-independent); kept for momentum/collision later.
     #[allow(dead_code)]
     pub mass: f32,
+    /// Kelvin. Impact ejecta carry the heat deposited in them (`docs/20`); drives the incandescent
+    /// glow of molten debris ([`crate::emission::incandescence`]). Cold matter sits at `REF_TEMP_K`.
+    pub temp_k: f32,
     resting_frames: u32,
 }
 
@@ -116,6 +122,7 @@ impl MatterSim {
                         vel: dir * speed,
                         material: mat,
                         mass: materials[mat].density,
+                        temp_k: REF_TEMP_K,
                         resting_frames: 0,
                     });
                     spawned += 1;
@@ -181,8 +188,8 @@ impl MatterSim {
         // detach. Too-strong voxels are skipped (left intact), so weak matter craters while strong
         // matter resists — bullet-in-rock vs pebble-in-pond falls out of the material, not a branch.
         let mut budget = energy;
-        let mut ejecta: Vec<usize> = Vec::new();
-        for (_d, x, y, z, mat) in candidates {
+        let mut ejecta: Vec<(usize, f32)> = Vec::new(); // (particle index, distance from the impact)
+        for (d, x, y, z, mat) in candidates {
             if self.particles.len() >= self.max_particles {
                 break;
             }
@@ -195,24 +202,37 @@ impl MatterSim {
             let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - center;
             let outward = (pos - site).normalize_or_zero();
             let ev = (dir * 0.5 + outward * 0.5).normalize_or_zero();
-            ejecta.push(self.particles.len());
+            ejecta.push((self.particles.len(), d));
             self.particles.push(Particle {
                 pos,
                 vel: ev, // unit direction now; speed assigned below from the energy share
                 material: mat,
                 mass: materials[mat].density,
+                temp_k: REF_TEMP_K, // set below from the deposited heat
                 resting_frames: 0,
             });
         }
 
-        // Share ~30% of the impact energy among the ejecta as kinetic energy (the rest went into
-        // breaking bonds and heat); v = sqrt(2·KE/m). Ejecta energetics are a first model (`docs/18`).
         if !ejecta.is_empty() {
+            // Kinetic: share ~30% of the impact energy among the ejecta; v = √(2·KE/m).
             let ke_each = 0.3 * energy / ejecta.len() as f32;
-            for &i in &ejecta {
+            // Thermal: deposited energy density peaks at the contact and falls to zero at the crater
+            // rim, so the centre melts/vaporizes (glows) while the rim stays cold rubble — the honest
+            // radial gradient (docs/20). e_peak concentrates ~30% of the energy into a small core
+            // volume; temperature rise = e_local / (ρ·c). NOTE: a first visual model — the energy is
+            // NOT yet conserved through the phase change (docs/20 caveat).
+            const V_CORE: f32 = 8.0; // m³, central concentration volume
+            let r_max = ejecta.iter().map(|&(_, d)| d).fold(1.0f32, f32::max);
+            let e_peak = 0.3 * energy / V_CORE; // J/m³ at the centre
+            for &(i, d) in &ejecta {
                 let m = self.particles[i].mass.max(1.0e-6);
-                let speed = (2.0 * ke_each / m).sqrt();
-                self.particles[i].vel *= speed;
+                self.particles[i].vel *= (2.0 * ke_each / m).sqrt();
+
+                let falloff = (1.0 - d / r_max).clamp(0.0, 1.0).powi(2);
+                let e_local = e_peak * falloff; // J/m³ deposited here
+                let mat = &materials[self.particles[i].material];
+                let c = mat.thermal.as_ref().map_or(1000.0, |t| t.specific_heat);
+                self.particles[i].temp_k = REF_TEMP_K + e_local / (mat.density.max(1.0) * c);
             }
             self.dirty = true;
         }
@@ -238,6 +258,7 @@ impl MatterSim {
                     vel: Vec3::ZERO,
                     material: mat,
                     mass: materials[mat].density,
+                    temp_k: REF_TEMP_K,
                     resting_frames: 0,
                 });
                 n += 1;
@@ -490,6 +511,7 @@ mod tests {
             vel: Vec3::new(-1.0, 0.0, 0.0),
             material: 0,
             mass: 5.0,
+            temp_k: REF_TEMP_K,
             resting_frames: 0,
         });
         let momentum_before = probe.mass * probe.vel + sim.particles[0].mass * sim.particles[0].vel;
@@ -538,6 +560,7 @@ mod tests {
             vel: Vec3::ZERO,
             material: 0,
             mass: 1.0,
+            temp_k: REF_TEMP_K,
             resting_frames: 0,
         });
         let solids_before = w.solid_count();
@@ -657,6 +680,45 @@ mod tests {
         assert!(
             (carved as f64 - predicted).abs() <= 2.0,
             "voxel crater {carved} ≈ summary volume {predicted} (same σ·V accounting)"
+        );
+    }
+
+    #[test]
+    fn a_big_impact_melts_the_centre_and_leaves_the_rim_cold() {
+        // Impact ejecta carry a temperature that peaks at the contact and falls to cold at the rim
+        // (docs/20): the centre glows molten, the rim is cold rubble — one event, a radial gradient.
+        let mats = materials::load();
+        let bi = materials::index_of(&mats, "basalt");
+        let melt = mats[bi].thermal.as_ref().unwrap().melt_point;
+        let n = 40usize;
+        let mut w = World {
+            w: n,
+            h: n,
+            d: n,
+            voxels: vec![bi as u16 + 1; n * n * n],
+            max_top: n,
+        };
+        let mut sim = MatterSim::new(500_000);
+        // Enough energy that the concentrated core exceeds basalt's melting point.
+        sim.impact(&mut w, &mats, Vec3::ZERO, Vec3::NEG_Y, 1.5e11);
+
+        let hottest = sim
+            .particles
+            .iter()
+            .map(|p| p.temp_k)
+            .fold(0.0f32, f32::max);
+        let coldest = sim
+            .particles
+            .iter()
+            .map(|p| p.temp_k)
+            .fold(f32::MAX, f32::min);
+        assert!(
+            hottest > melt,
+            "the centre melts (hottest {hottest} K > melt {melt} K)"
+        );
+        assert!(
+            (coldest - REF_TEMP_K).abs() < 1.0,
+            "the rim stays cold (coldest {coldest} K ≈ {REF_TEMP_K} K)"
         );
     }
 }

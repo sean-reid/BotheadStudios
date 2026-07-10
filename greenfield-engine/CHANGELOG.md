@@ -10,6 +10,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **Glowing molten ejecta + a Meteor control** (`docs/20`) — the first visual of impact damage. Impact
+  ejecta carry `temp_k`; heat peaks at the contact and falls to cold at the crater rim (centre melts,
+  rim is cold rubble). `emission::incandescence` maps temperature → a black-body glow (red→white) that
+  the particle shader *adds*, so molten debris self-illuminates even on the dark side. Fire it with the
+  `☄`/`m` **Meteor** button in the terrain slice (`Engine::meteor`). Tests:
+  `emission::cold_matter_does_not_glow_and_hotter_glows_brighter_and_whiter`,
+  `matter::a_big_impact_melts_the_centre_and_leaves_the_rim_cold`. (Crater extent is physical; ejecta
+  temperature is a first visual model, not yet energy-conserved — the celestial→voxel fly-in stays staged.)
 - **Impact thermodynamics — fracture/melt/vaporize** (`docs/20`). One data-driven response: an impact
   deposits energy density (J/m³), and `damage::classify` compares it to a material's own thresholds —
   fracture strength → melt energy `ρ(cΔT+L_f)` → vaporization energy — returning

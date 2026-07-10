@@ -90,6 +90,29 @@ async function main(): Promise<void> {
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;
     report("info", "engine created OK");
+
+    // Meteor button: fire a high-energy impact at screen centre — carves a crater and throws
+    // incandescent (glowing) molten ejecta from the hot core (docs/20). Same operator as dig, more
+    // energy. (Also bound to the "m" key.)
+    const meteorBtn = document.createElement("button");
+    meteorBtn.textContent = "☄ Meteor";
+    Object.assign(meteorBtn.style, {
+      position: "fixed",
+      right: "12px",
+      bottom: "12px",
+      zIndex: "10",
+      padding: "10px 14px",
+      font: "600 15px/1 system-ui, sans-serif",
+      color: "#fff",
+      background: "rgba(40,20,16,0.78)",
+      border: "1px solid rgba(255,180,120,0.4)",
+      borderRadius: "10px",
+      backdropFilter: "blur(6px)",
+      cursor: "pointer",
+      touchAction: "manipulation",
+    });
+    meteorBtn.addEventListener("click", () => engine.meteor(0, 0));
+    document.body.appendChild(meteorBtn);
     report(
       "info",
       `canvas ${canvas.width}x${canvas.height} client ${canvas.clientWidth}x${canvas.clientHeight} dpr ${window.devicePixelRatio}`,
@@ -200,6 +223,8 @@ async function main(): Promise<void> {
         engine.set_time_scale(engine.time_scale() / 1.5);
       } else if (e.code === "BracketRight") {
         engine.set_time_scale(engine.time_scale() * 1.5);
+      } else if (e.code === "KeyM") {
+        engine.meteor(0, 0); // fire a meteor at screen centre
       }
     });
 
@@ -214,7 +239,7 @@ async function main(): Promise<void> {
         `world mass <b>${fmt(engine.total_mass())}</b> kg · g <b>${fmt(engine.surface_gravity())}</b> m/s² (micro-g)<br>` +
         `probe: alt <b>${engine.sphere_altitude().toFixed(1)}</b> m · ${engine.is_resting() ? "at rest ✔" : "falling…"}<br>` +
         `debris <b>${engine.particle_count()}</b> · time ×<b>${engine.time_scale().toFixed(0)}</b> · <b>${fps}</b> fps<br>` +
-        `tap dig · long-press blast · drag orbit · pinch zoom`;
+        `tap dig · long-press blast · ☄/m meteor · drag orbit · pinch zoom`;
     };
 
     let firstFrame = true;
