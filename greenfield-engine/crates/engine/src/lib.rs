@@ -132,6 +132,10 @@ mod app {
         particle_instances: wgpu::Buffer,
         particle_bind: wgpu::BindGroup,
 
+        // GPU-compute debris (docs/22): constructed here so the compute shader/pipeline validate on the
+        // device; stepping/rendering are wired incrementally.
+        gpu_particles: GpuParticles,
+
         camera: Camera,
     }
 
@@ -366,6 +370,19 @@ mod app {
 
             // Debris: a unit cube instanced per particle, tinted by material albedo.
             let matter = matter::MatterSim::new(MAX_PARTICLES);
+
+            // GPU-compute debris (docs/22): construct the storage buffer + compute pipeline (this
+            // validates `particle_step.wgsl` on the device) and upload the terrain heightfield the step
+            // collides against.
+            let mut gpu_particles =
+                GpuParticles::new(&device, MAX_PARTICLES as u32, (world.w * world.d) as u32);
+            let mut tops: Vec<i32> = Vec::with_capacity(world.w * world.d);
+            for z in 0..world.d {
+                for x in 0..world.w {
+                    tops.push(world.surface_top_voxel(x as i32, z as i32).unwrap_or(-1));
+                }
+            }
+            gpu_particles.upload_heightfield(&queue, &tops);
             let cube_gpu = upload_mesh(
                 &device,
                 "cube",
@@ -418,6 +435,7 @@ mod app {
                 particle_pipeline,
                 particle_instances,
                 particle_bind,
+                gpu_particles,
                 camera,
             })
         }
@@ -888,6 +906,197 @@ mod app {
             multiview: None,
             cache: None,
         })
+    }
+
+    // ============================================================================================
+    // GPU-compute debris particles (docs/22). Particles live in a storage buffer stepped by a compute
+    // shader (one thread each) and rendered from the SAME buffer (zero-copy sim↔render). This is the
+    // engine's north-star architecture and the fix for the single-digit FPS after a big impact.
+    // ============================================================================================
+
+    /// One GPU particle — 64 bytes, four 16-byte rows. Layout matches `particle_step.wgsl`'s `Particle`
+    /// and is read directly by the renderer (offset @0, color @32, emission @48).
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct GpuParticle {
+        offset: [f32; 3], // position (centered coords) = the render instance offset
+        temp: f32,        // K
+        vel: [f32; 3],
+        resting: f32,       // 0 in flight, 1 settled
+        color: [f32; 3],    // material albedo (set on spawn)
+        material: f32,      // material index (informational)
+        emission: [f32; 3], // incandescent glow (written by the compute step)
+        _pad: f32,
+    }
+
+    /// Per-dispatch uniforms for the compute step — matches `particle_step.wgsl`'s `Params` (80 bytes).
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct GpuStepParams {
+        com: [f32; 3],
+        total_mass: f32,
+        center: [f32; 3],
+        dt: f32,
+        g: f32,
+        softening: f32,
+        drag: f32,
+        contact_damp: f32,
+        settle_speed: f32,
+        part_half: f32,
+        count: u32,
+        world_w: u32,
+        world_d: u32,
+        _p: [u32; 3],
+    }
+
+    /// GPU-resident debris: a storage+vertex buffer of `GpuParticle`, a compute pipeline that steps it,
+    /// and a heightfield the step collides against. The CPU only appends new particles (on fracture)
+    /// and updates the per-frame params; the physics runs entirely on the GPU.
+    struct GpuParticles {
+        buf: wgpu::Buffer,         // STORAGE | VERTEX | COPY_DST
+        params: wgpu::Buffer,      // UNIFORM | COPY_DST
+        heightfield: wgpu::Buffer, // STORAGE | COPY_DST
+        pipeline: wgpu::ComputePipeline,
+        bind: wgpu::BindGroup,
+        capacity: u32,
+        count: u32,
+    }
+
+    impl GpuParticles {
+        fn new(device: &wgpu::Device, capacity: u32, world_cells: u32) -> Self {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu-particles"),
+                size: (capacity as usize * std::mem::size_of::<GpuParticle>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let params = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu-particles-params"),
+                size: std::mem::size_of::<GpuStepParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let heightfield = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu-particles-heightfield"),
+                size: (world_cells as usize * std::mem::size_of::<i32>()).max(4) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("particle-step"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../../../shaders/particle_step.wgsl").into(),
+                ),
+            });
+
+            let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            };
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("gpu-particles-layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    storage(1, false),
+                    storage(2, true),
+                ],
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gpu-particles-pipeline-layout"),
+                bind_group_layouts: &[&layout],
+                push_constant_ranges: &[],
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("particle-step-pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("cs_step"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gpu-particles-bind"),
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: params.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: heightfield.as_entire_binding(),
+                    },
+                ],
+            });
+
+            GpuParticles {
+                buf,
+                params,
+                heightfield,
+                pipeline,
+                bind,
+                capacity,
+                count: 0,
+            }
+        }
+
+        /// Upload the terrain heightfield (per-column air-start Y) the step collides against.
+        fn upload_heightfield(&self, queue: &wgpu::Queue, tops: &[i32]) {
+            queue.write_buffer(&self.heightfield, 0, bytemuck::cast_slice(tops));
+        }
+
+        /// Append newly-spawned particles (from a fracture) to the GPU buffer. Silently caps at
+        /// capacity for now (no recycling yet — docs/22).
+        fn append(&mut self, queue: &wgpu::Queue, new: &[GpuParticle]) {
+            let room = (self.capacity - self.count) as usize;
+            let take = new.len().min(room);
+            if take == 0 {
+                return;
+            }
+            let offset = self.count as u64 * std::mem::size_of::<GpuParticle>() as u64;
+            queue.write_buffer(&self.buf, offset, bytemuck::cast_slice(&new[..take]));
+            self.count += take as u32;
+        }
+
+        /// Record the compute step for this substep into `encoder` (params already written this frame).
+        fn dispatch(&self, encoder: &mut wgpu::CommandEncoder) {
+            if self.count == 0 {
+                return;
+            }
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("particle-step-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind, &[]);
+            pass.dispatch_workgroups(self.count.div_ceil(64), 1, 1);
+        }
+
+        fn set_params(&self, queue: &wgpu::Queue, params: &GpuStepParams) {
+            queue.write_buffer(&self.params, 0, bytemuck::bytes_of(params));
+        }
     }
 
     fn upload_mesh(device: &wgpu::Device, label: &str, mesh: &Mesh) -> GpuMesh {
