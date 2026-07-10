@@ -216,7 +216,9 @@ impl MatterSim {
 
         if !ejecta.is_empty() {
             // Kinetic: share ~30% of the impact energy among the ejecta; v = √(2·KE/m).
-            let ke_each = 0.3 * energy / ejecta.len() as f32;
+            // ~5% of the impact energy goes to ejecta kinetic (most goes to fracture + heat). Under
+            // real planetary gravity this keeps ejecta arcing within the scene rather than off the top.
+            let ke_each = 0.05 * energy / ejecta.len() as f32;
             // Shock heat: deposited energy density peaks at the contact and falls to zero at the crater
             // rim, so the centre melts/vaporizes (glows) while the rim stays cold rubble — the honest
             // radial gradient (docs/20). e_peak concentrates ~30% of the energy into a small core.

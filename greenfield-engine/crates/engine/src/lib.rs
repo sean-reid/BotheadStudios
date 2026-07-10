@@ -55,9 +55,13 @@ mod app {
                                     // measured acceleration).
     const SPHERE_MASS: f32 = 5.0; // kg
     const GRAVITY_SOFTENING: f32 = 6.0; // ~ mass-aggregation block size
+                                        // The terrain slab is a patch of a planet, so it feels the planet's ~uniform surface gravity
+                                        // (down), not the slab's own micro-g self-gravity (docs/22). Self-gravity is demonstrated at
+                                        // planetary scale in the space band; here it is negligible vs the planet below.
+    const SURFACE_GRAVITY: f32 = 9.81; // m/s² (Earth-like)
     const GRAVITY_BLOCK: usize = 8; // voxel aggregation for the mass field (coarser = cheaper queries)
     const PHYS_SUBSTEPS: u32 = 8;
-    const DEFAULT_TIME_SCALE: f32 = 250.0; // sim-seconds per real-second (fast-forward)
+    const DEFAULT_TIME_SCALE: f32 = 1.0; // real-time: Earth-like surface gravity needs no fast-forward
 
     // Phase 3 dig/fracture.
     const MAX_PARTICLES: usize = 60_000;
@@ -229,9 +233,9 @@ mod app {
             let sphere = body::Sphere::new(spawn, SPHERE_MASS, SPHERE_RADIUS);
 
             log::info!(
-                "greenfield-engine: world mass = {:.3e} kg, surface g ~ {:.3e} m/s^2",
+                "greenfield-engine: world mass = {:.3e} kg, surface g = {} m/s^2 (planetary)",
                 field.total_mass,
-                field.acceleration_at(spawn, GRAVITY_SOFTENING).length()
+                SURFACE_GRAVITY
             );
 
             // --- Procedural material textures (Phase 4): a mip-mapped array, one layer per material.
@@ -461,11 +465,9 @@ mod app {
         pub fn total_mass(&self) -> f64 {
             self.field.total_mass as f64
         }
-        /// Gravitational field magnitude the probe currently feels (m/s²) — the "measured g".
+        /// The planetary surface gravity the probe feels (m/s²) — the "measured g".
         pub fn surface_gravity(&self) -> f32 {
-            self.field
-                .acceleration_at(self.sphere.pos, GRAVITY_SOFTENING)
-                .length()
+            SURFACE_GRAVITY
         }
         pub fn sphere_altitude(&self) -> f32 {
             self.sphere.altitude(self.ground_under_sphere())
@@ -580,21 +582,18 @@ mod app {
         fn gpu_step_params(&self, dt: f32) -> GpuStepParams {
             let c = self.world.center();
             GpuStepParams {
-                com: [self.field.com.x, self.field.com.y, self.field.com.z],
-                total_mass: self.field.total_mass,
-                center: [c.x, c.y, c.z],
+                gravity: [0.0, -SURFACE_GRAVITY, 0.0],
                 dt,
-                g: gravity::G,
-                softening: 6.0,
+                center: [c.x, c.y, c.z],
+                _c: 0.0,
                 drag: matter::DRAG,
                 contact_damp: matter::CONTACT_DAMP,
                 settle_speed: matter::SETTLE_SPEED,
                 part_half: matter::PARTICLE_HALF,
+                cool_rate: 0.4, // 1/s — molten debris fades over a few seconds (docs/20)
                 count: self.gpu_particles.count,
                 world_w: self.world.w as u32,
                 world_d: self.world.d as u32,
-                cool_rate: 0.02, // 1/s of sim time — molten debris fades over a few seconds (docs/20)
-                _p: [0, 0],
             }
         }
 
@@ -703,9 +702,7 @@ mod app {
                 // stepped on the GPU (docs/22), so it no longer runs here. TRADE-OFF (iteration 2): the
                 // probe↔debris momentum exchange (`couple_body`) and debris re-deposition into voxels
                 // are temporarily off for GPU debris — they return once the buffer is readable/hybrid.
-                let accel = self
-                    .field
-                    .acceleration_at(self.sphere.pos, GRAVITY_SOFTENING);
+                let accel = Vec3::new(0.0, -SURFACE_GRAVITY, 0.0); // planetary surface gravity (docs/22)
                 self.sphere.integrate(accel, dt);
                 self.sphere.collide(&self.world, accel, dt);
             }
@@ -1002,21 +999,18 @@ mod app {
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct GpuStepParams {
-        com: [f32; 3],
-        total_mass: f32,
-        center: [f32; 3],
+        gravity: [f32; 3], // uniform planetary surface gravity (m/s²)
         dt: f32,
-        g: f32,
-        softening: f32,
+        center: [f32; 3],
+        _c: f32,
         drag: f32,
         contact_damp: f32,
         settle_speed: f32,
         part_half: f32,
+        cool_rate: f32,
         count: u32,
         world_w: u32,
         world_d: u32,
-        cool_rate: f32,
-        _p: [u32; 2],
     }
 
     /// GPU-resident debris: a storage+vertex buffer of `GpuParticle`, a compute pipeline that steps it,

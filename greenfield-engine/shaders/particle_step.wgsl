@@ -4,21 +4,18 @@
 // live in a storage buffer that is ALSO the render instance buffer (zero-copy sim↔render).
 
 struct Params {
-    com          : vec3<f32>, // world centre of mass (centered coords)
-    total_mass   : f32,
-    center       : vec3<f32>, // world.center() offset (centered→voxel coords)
+    gravity      : vec3<f32>, // uniform planetary surface gravity (m/s²), e.g. (0,-9.81,0) — docs/22
     dt           : f32,
-    g            : f32,
-    softening    : f32,
+    center       : vec3<f32>, // world.center() offset (centered→voxel coords)
+    _c           : f32,
     drag         : f32,
     contact_damp : f32,
     settle_speed : f32,
     part_half    : f32,
+    cool_rate    : f32, // 1/s — hot debris cools toward ambient (radiative/conductive), docs/20
     count        : u32,
     world_w      : u32,
     world_d      : u32,
-    cool_rate    : f32, // 1/s — hot debris cools toward ambient (radiative/conductive), docs/20
-    _p0 : u32, _p1 : u32,
 };
 
 // One particle. Laid out so the renderer reads `offset` (loc4), `color` (loc5), `emission` (loc6)
@@ -64,12 +61,10 @@ fn cs_step(@builtin(global_invocation_id) gid : vec3<u32>) {
     // "resting" particles was a bug (they never cooled, never fell).
     pt.temp = 300.0 + (pt.temp - 300.0) * exp(-P.cool_rate * P.dt);
 
-    // Gravity (O(1) COM approximation — the GPU could afford the full field; parity with the CPU
-    // stopgap for now, docs/22).
-    let d = P.com - pt.offset;
-    let r2 = dot(d, d) + P.softening * P.softening;
-    var vel = pt.vel + d * (P.g * P.total_mass * pow(r2, -1.5)) * P.dt;
-    vel = vel * P.drag;
+    // Uniform planetary surface gravity — the slab is a patch of a planet, so it feels the planet's
+    // ~uniform field (down), not its own micro-g self-gravity (which pulled all debris toward the world
+    // centre — docs/22). Semi-implicit Euler + mild drag.
+    var vel = (pt.vel + P.gravity * P.dt) * P.drag;
     var pos = pt.offset + vel * P.dt;
 
     // Collision against the terrain heightfield (the column's air-start Y).
