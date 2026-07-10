@@ -65,8 +65,11 @@ struct Params {
     c_tangent_damp: f32,
 }
 
-const PART_HALF: f32 = 0.21; // render/ground-collision half-extent
-const CONTACT_RADIUS: f32 = 0.25; // = half the 0.5 m sub-particle spacing ⇒ lattice neighbours TOUCH
+// DECOUPLED SCALE (docs/23): the PHYSICS particle is one per 1 m voxel (spacing 1.0, radius 0.5); the
+// 8× finer look is a render-only subdivision (drawn as 8 sub-cubes), not stepped. 8× fewer stepped
+// grains ⇒ FPS + lower packing density.
+const PART_HALF: f32 = 0.5; // ground-collision half-extent (a 1 m grain)
+const CONTACT_RADIUS: f32 = 0.5; // = half the 1 m spacing ⇒ lattice neighbours just touch at rest
 // Contact constants under tuning. Stability at the debris substep (dt≈2 ms) with cubic coordination
 // z≈6 (face-neighbours touch at 0.5): dt·√(z·k) < 2 and dt·z·c < 2. tangent_damp governs how sharply
 // friction saturates to the μ·N cap — too low and there's no static friction, so piles creep flat.
@@ -76,7 +79,7 @@ const C_TANGENT_DAMP: f32 = 50.0;
 const C_MAX_ACCEL: f32 = 400.0; // cap on normal contact accel (prevents launches)
 const TABLE_SIZE: u32 = 1 << 15; // 32768 cells — ample for these scenes
 const BUCKET_K: u32 = 16;
-const SUBSTEPS: u32 = 8;
+const SUBSTEPS: u32 = 16;
 
 /// Deterministic pseudo-random in [−1,1) from an index (no rand crate; must be reproducible). Real
 /// debris is scattered ejecta, not a crystal lattice — jitter emulates that disorder so grains pack
@@ -388,7 +391,7 @@ fn repose_angle(ps: &[Particle]) -> f32 {
 
 /// A solid cylinder of grains (0.5 m lattice) of radius `rad`, height `h`, resting base at `y0`.
 fn column(rad: f32, h: f32, y0: f32) -> Vec<Particle> {
-    let s = 0.5f32;
+    let s = 1.0f32;
     let ri = (rad / s).ceil() as i32;
     let ny = (h / s).ceil() as i32;
     let mut v = Vec::new();
@@ -418,11 +421,11 @@ fn main() {
     // Scene A: an overlapping pair must push apart (contact repels).
     {
         let scene = Scene::flat(8, 8, 0, 0.6);
-        let ps = vec![Particle::at(-0.15, 5.0, 0.0), Particle::at(0.15, 5.0, 0.0)];
+        let ps = vec![Particle::at(-0.3, 5.0, 0.0), Particle::at(0.3, 5.0, 0.0)];
         let out = simulate(&gpu, ps, 30, &scene);
         let sep = (out[1].offset[0] - out[0].offset[0]).abs();
-        let ok = finite(&out) && sep >= 0.40;
-        println!("A pair-repels: separation {:.3} (≥0.40)  {}", sep, pass(ok));
+        let ok = finite(&out) && sep >= 0.9; // pushed apart to ≥ the 1 m diameter
+        println!("A pair-repels: separation {:.3} (≥0.9)  {}", sep, pass(ok));
         failures += !ok as i32;
     }
 
@@ -509,11 +512,12 @@ fn main() {
         };
         // Pour a block above the pit centre.
         let mut ps = Vec::new();
-        let s = 0.5f32;
+        let s = 1.0f32;
         let j = 0.12 * s;
-        for ix in -8..=8 {
-            for iz in -8..=8 {
-                for iy in 0..14 {
+        // A block that fits inside the 10 m-wide pit (so it fills rather than overflowing the world).
+        for ix in -4..=4 {
+            for iz in -4..=4 {
+                for iy in 0..10 {
                     let i = ps.len() as u32;
                     ps.push(Particle::at(
                         ix as f32 * s + j * jitter(i, 1),
@@ -571,7 +575,7 @@ fn main() {
         }
         let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.7 };
         let mut ps = Vec::new();
-        let s = 0.5f32;
+        let s = 1.0f32;
         let j = 0.12 * s;
         // ~6000 grains stacked tall above the narrow pit.
         for ix in -3..=3 {
@@ -631,14 +635,14 @@ fn main() {
         let mut ps = Vec::new();
         for kx in 0..6 {
             for kz in -3..=3 {
-                let mut p = Particle::at(-1.0 - kx as f32 * 0.5, PART_HALF, kz as f32 * 0.5);
+                let mut p = Particle::at(-1.5 - kx as f32 * 1.0, PART_HALF, kz as f32 * 1.0);
                 p.vel = [6.0, 0.0, 0.0]; // ramming the wall
                 ps.push(p);
             }
         }
         let out = simulate(&gpu, ps, 400, &scene);
         let climbed = max_height(&out);
-        let ok = finite(&out) && climbed < 1.0; // must NOT climb the 12 m wall (start y≈0.21)
+        let ok = finite(&out) && climbed < 1.5; // must NOT climb the 12 m wall (rests near y≈0)
         println!(
             "\nG wall-climb (rim convection): highest grain {:.1} m (wall is 12 m; must stay <2)  {}",
             climbed,

@@ -77,12 +77,14 @@ mod app {
 
     /// Granular debris contact (`docs/23`) — the DEM model in `granular.rs`, run on the GPU and TUNED +
     /// verified on real hardware by `tools/gpu-verify`. Grains push apart, stack, settle, and flow to a
-    /// slope. Values chosen for explicit stability at the debris substep (dt≈2 ms) with grain
-    /// coordination z≈6: soft contacts + a normal-force cap (no launches) + sub-critical damping.
-    const GRID_TABLE_SIZE: u32 = 1 << 20; // spatial-hash cells (≥ ~2× particle capacity → few collisions)
+    /// slope. The PHYSICS is one grain per 1 m voxel (radius 0.5 ⇒ neighbours touch at rest); the finer
+    /// look is a render-only 8× subdivision (`cs_expand`). Values chosen for explicit stability at the
+    /// debris substep with coordination z≈6: soft contacts + a normal-force cap + sub-critical damping.
+    const GRID_TABLE_SIZE: u32 = 1 << 18; // spatial-hash cells (≥ ~2× particle capacity → few collisions)
     const GRID_BUCKET_K: u32 = 16; // max particles recorded per cell (overflow is dropped — flagged)
-    const CONTACT_RADIUS: f32 = SUB_Q; // = ½ the 0.5 m sub-particle spacing ⇒ grains just touch at rest
-    const CONTACT_STIFFNESS: f32 = 4.0e4; // normal repulsion (1/s²) per metre of overlap
+    const CONTACT_RADIUS: f32 = 0.5; // = ½ the 1 m grain spacing ⇒ grains just touch at rest
+    const DEBRIS_PART_HALF: f32 = 0.5; // a debris grain's collision half-extent (rests on the ground)
+    const CONTACT_STIFFNESS: f32 = 2.5e4; // normal repulsion (1/s²) per metre of overlap
     const CONTACT_MAX_ACCEL: f32 = 400.0; // cap on normal accel — deep overlaps relax, never launch
     const CONTACT_NORMAL_DAMP: f32 = 50.0; // inelastic (removes bounce) yet stable
     const CONTACT_TANGENT_DAMP: f32 = 50.0; // friction ramp with slip speed
@@ -409,7 +411,7 @@ mod app {
             // collides against.
             let mut gpu_particles = GpuParticles::new(
                 &device,
-                (MAX_PARTICLES * 8) as u32,
+                MAX_PARTICLES as u32, // physics grains (1 per voxel); render_buf is ×8 internally
                 (world.w * world.d) as u32,
             );
             let mut tops: Vec<i32> = Vec::with_capacity(world.w * world.d);
@@ -694,23 +696,20 @@ mod app {
             if self.matter.particles.is_empty() {
                 return;
             }
+            // ONE physics grain per voxel (the finer look is a render-only expansion, cs_expand).
             let gpu: Vec<GpuParticle> = self
                 .matter
                 .particles
                 .iter()
-                .flat_map(|p| {
-                    let albedo = self.mats[p.material].albedo;
-                    let emission = emission::incandescence(p.temp_k);
-                    SUB8.map(|o| GpuParticle {
-                        offset: [p.pos.x + o[0], p.pos.y + o[1], p.pos.z + o[2]],
-                        temp: p.temp_k,
-                        vel: [p.vel.x, p.vel.y, p.vel.z],
-                        resting: 0.0,
-                        color: albedo,
-                        material: p.material as f32,
-                        emission,
-                        _pad: 0.0,
-                    })
+                .map(|p| GpuParticle {
+                    offset: [p.pos.x, p.pos.y, p.pos.z],
+                    temp: p.temp_k,
+                    vel: [p.vel.x, p.vel.y, p.vel.z],
+                    resting: 0.0,
+                    color: self.mats[p.material].albedo,
+                    material: p.material as f32,
+                    emission: emission::incandescence(p.temp_k),
+                    _pad: 0.0,
                 })
                 .collect();
             self.gpu_particles.append(&self.queue, &gpu);
@@ -781,7 +780,7 @@ mod app {
                 drag: matter::DRAG,
                 contact_damp: matter::CONTACT_DAMP,
                 settle_speed: GRANULAR_SETTLE_SPEED, // static-friction freeze threshold (docs/23)
-                part_half: PARTICLE_CUBE_HALF, // sub-cubes rest at the terrain top + their (half) size
+                part_half: DEBRIS_PART_HALF, // the 1 m physics grain's collision half-extent
                 cool_rate: 0.4, // 1/s — molten debris fades over a few seconds (docs/20)
                 count: self.gpu_particles.count,
                 world_w: self.world.w as u32,
@@ -837,6 +836,8 @@ mod app {
                 for _ in 0..DEBRIS_SUBSTEPS {
                     self.gpu_particles.dispatch(&mut encoder);
                 }
+                // Expand the settled physics grains into the 8× render sub-cubes (once, after stepping).
+                self.gpu_particles.expand(&mut encoder);
             }
 
             {
@@ -881,9 +882,9 @@ mod app {
                     pass.draw_indexed(0..self.cube_gpu.index_count, 0, 0..probe_count);
                 }
                 if particle_count > 0 {
-                    // Draw straight from the GPU-computed debris buffer (docs/22).
-                    pass.set_vertex_buffer(1, self.gpu_particles.buf.slice(..));
-                    pass.draw_indexed(0..self.cube_gpu.index_count, 0, 0..particle_count);
+                    // Draw the 8× render sub-cubes (cs_expand filled them from the physics grains).
+                    pass.set_vertex_buffer(1, self.gpu_particles.render_buf.slice(..));
+                    pass.draw_indexed(0..self.cube_gpu.index_count, 0, 0..particle_count * 8);
                 }
             }
             self.queue.submit(std::iter::once(encoder.finish()));
@@ -1251,16 +1252,18 @@ mod app {
     /// and a heightfield the step collides against. The CPU only appends new particles (on fracture)
     /// and updates the per-frame params; the physics runs entirely on the GPU.
     struct GpuParticles {
-        buf: wgpu::Buffer,         // STORAGE | VERTEX | COPY_DST
-        params: wgpu::Buffer,      // UNIFORM | COPY_DST
+        buf: wgpu::Buffer,         // STORAGE — the PHYSICS grains (1 per voxel), stepped
+        render_buf: wgpu::Buffer, // STORAGE | VERTEX — 8× render sub-cubes (cs_expand fills it), drawn
+        params: wgpu::Buffer,     // UNIFORM | COPY_DST
         heightfield: wgpu::Buffer, // STORAGE | COPY_DST
-        grid_count: wgpu::Buffer,  // STORAGE — atomic per-cell particle count (spatial hash)
+        grid_count: wgpu::Buffer, // STORAGE — atomic per-cell particle count (spatial hash)
         grid_bucket: wgpu::Buffer, // STORAGE — per-cell particle indices
-        forces: wgpu::Buffer,      // STORAGE — accumulated contact acceleration per particle
+        forces: wgpu::Buffer,     // STORAGE — accumulated contact acceleration per particle
         clear: wgpu::ComputePipeline,
         insert: wgpu::ComputePipeline,
         force_pass: wgpu::ComputePipeline,
         integrate: wgpu::ComputePipeline,
+        expand: wgpu::ComputePipeline, // 1 grain → 8 render sub-cubes
         bind: wgpu::BindGroup,
         capacity: u32,
         count: u32,
@@ -1269,11 +1272,16 @@ mod app {
     impl GpuParticles {
         fn new(device: &wgpu::Device, capacity: u32, world_cells: u32) -> Self {
             let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("gpu-particles"),
+                label: Some("gpu-particles-physics"),
                 size: (capacity as usize * std::mem::size_of::<GpuParticle>()) as u64,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::VERTEX
-                    | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            // 8× render sub-cubes, filled each frame by cs_expand and drawn as instances.
+            let render_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("gpu-particles-render"),
+                size: (capacity as usize * 8 * std::mem::size_of::<GpuParticle>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
                 mapped_at_creation: false,
             });
             let params = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1340,11 +1348,12 @@ mod app {
                         },
                         count: None,
                     },
-                    storage(1, false), // particles
+                    storage(1, false), // particles (physics)
                     storage(2, true),  // heightfield
                     storage(3, false), // grid_count
                     storage(4, false), // grid_bucket
                     storage(5, false), // forces
+                    storage(6, false), // render_out (8× render sub-cubes)
                 ],
             });
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1366,6 +1375,7 @@ mod app {
             let insert = mk("cs_grid_insert");
             let force_pass = mk("cs_forces");
             let integrate = mk("cs_integrate");
+            let expand = mk("cs_expand");
             let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gpu-particles-bind"),
                 layout: &layout,
@@ -1394,11 +1404,16 @@ mod app {
                         binding: 5,
                         resource: forces.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: render_buf.as_entire_binding(),
+                    },
                 ],
             });
 
             GpuParticles {
                 buf,
+                render_buf,
                 params,
                 heightfield,
                 grid_count,
@@ -1408,6 +1423,7 @@ mod app {
                 insert,
                 force_pass,
                 integrate,
+                expand,
                 bind,
                 capacity,
                 count: 0,
@@ -1460,6 +1476,21 @@ mod app {
                 pass.set_bind_group(0, &self.bind, &[]);
                 pass.dispatch_workgroups(threads.div_ceil(64), 1, 1);
             }
+        }
+
+        /// Fill `render_buf` with 8 sub-cubes per physics grain. Run ONCE per frame after the substeps
+        /// (the sub-cubes only need the settled positions) — a render-only subdivision.
+        fn expand(&self, encoder: &mut wgpu::CommandEncoder) {
+            if self.count == 0 {
+                return;
+            }
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("particle-expand"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.expand);
+            pass.set_bind_group(0, &self.bind, &[]);
+            pass.dispatch_workgroups(self.count.div_ceil(64), 1, 1);
         }
 
         fn set_params(&self, queue: &wgpu::Queue, params: &GpuStepParams) {

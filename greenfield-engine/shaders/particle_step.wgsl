@@ -54,6 +54,7 @@ struct Particle {
 @group(0) @binding(3) var<storage, read_write> grid_count : array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> grid_bucket : array<u32>;
 @group(0) @binding(5) var<storage, read_write> forces : array<vec3<f32>>;
+@group(0) @binding(6) var<storage, read_write> render_out : array<Particle>; // 8× render sub-cubes
 
 fn incandescence(t : f32) -> vec3<f32> {
     if (t <= 800.0) { return vec3<f32>(0.0); }
@@ -141,6 +142,26 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
         }
     }
     forces[i] = acc;
+}
+
+// --- render expansion: 1 physics grain → 8 sub-cubes (docs/23) ------------------------------------
+// The sim steps ONE particle per 1 m voxel (8× cheaper, lower packing density), but we DRAW 8 half-size
+// sub-cubes at the octant centres for a finer look — a render-only subdivision, run once per frame into
+// a separate instance buffer, never stepped.
+@compute @workgroup_size(64)
+fn cs_expand(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= P.count) { return; }
+    let src = particles[i];
+    let q = 0.25;
+    for (var k = 0u; k < 8u; k = k + 1u) {
+        var o = src;
+        let ox = select(-q, q, (k & 1u) != 0u);
+        let oy = select(-q, q, (k & 2u) != 0u);
+        let oz = select(-q, q, (k & 4u) != 0u);
+        o.offset = src.offset + vec3<f32>(ox, oy, oz);
+        render_out[i * 8u + k] = o;
+    }
 }
 
 // --- pass 4: integrate (gravity + contact + drag + terrain + cooling) -----------------------------
