@@ -8,9 +8,15 @@
 //! shattered moon is the same N-body gravity that made it round, run past its binding energy.
 //!
 //! The particles reuse `orbit::Body` (pos, vel, mass). Gravity is **softened** (unlike the clean
-//! two-body `orbit.rs`) because a dense cloud has close pairs whose bare 1/r² would explode. Material
-//! and temperature per particle (for melt/vaporize glow via `damage`/`emission`) arrive when this is
-//! wired into an impact — this module is the gravitational skeleton.
+//! two-body `orbit.rs`) because a dense cloud has close pairs whose bare 1/r² would explode.
+//!
+//! It also models a **cohesive solid** (`Aggregate::cohesive`, `docs/23`): particles held by material
+//! **bonds** (Hookean spring + damper) rather than gravity — the honest way to make a metal ball *real
+//! matter*. The damper dissipates energy, so a struck solid **settles to a ground state** instead of
+//! ringing forever (a deterministic model reaches equilibrium); bonds **fracture** past a break strain,
+//! so it **shatters emergently** under a hard impact — no scripted destroy. (The same contact-bond
+//! mechanics, applied *between* surfaces, is where static-vs-kinetic friction would emerge from first
+//! principles instead of two tabulated constants — a future subsystem.)
 
 #![allow(dead_code)] // consumed by the space-band integration (staged) and native tests
 
@@ -18,6 +24,19 @@ use crate::materials::Material;
 use crate::matter::REF_TEMP_K;
 use crate::orbit::{Body, G};
 use glam::DVec3;
+
+/// A **material bond** between two particles — how a *solid* holds itself together (cohesion), as
+/// opposed to a rubble pile held by gravity. A Hookean spring at its rest length; it **fractures**
+/// (goes inactive) when stretched past the material's break strain. This is what makes the metal ball
+/// real matter: it keeps its shape under load and *shatters emergently* under a hard enough impact —
+/// no scripted "destroy" (`docs/23`).
+#[derive(Clone, Copy)]
+pub struct Bond {
+    pub a: usize,
+    pub b: usize,
+    pub rest: f64,    // rest length (m)
+    pub active: bool, // false once fractured
+}
 
 pub struct Aggregate {
     pub particles: Vec<Body>,
@@ -29,6 +48,16 @@ pub struct Aggregate {
     /// Softening length (m): removes the 1/r² singularity between close particles. ~half the mean
     /// spacing keeps the cloud stable without erasing its self-gravity.
     pub softening: f64,
+    /// Material cohesion bonds (empty for a pure gravitational rubble pile; populated for a solid).
+    pub bonds: Vec<Bond>,
+    /// Bond spring constant (N/m).
+    pub stiffness: f64,
+    /// Bond damping (N·s/m) — internal friction that dissipates energy, so the solid **settles to a
+    /// ground state** rather than ringing forever (Robin's point: a deterministic model reaches
+    /// equilibrium). This is why "vibrate forever" was a bug: we were missing dissipation.
+    pub damping: f64,
+    /// Fractional stretch at which a bond fractures.
+    pub break_strain: f64,
 }
 
 impl Aggregate {
@@ -39,6 +68,69 @@ impl Aggregate {
             temps: vec![REF_TEMP_K; n],
             material: 0,
             softening,
+            bonds: Vec::new(),
+            stiffness: 0.0,
+            damping: 0.0,
+            break_strain: f64::INFINITY,
+        }
+    }
+
+    /// A **cohesive solid**: bond every pair of particles within `cutoff` at their current separation,
+    /// so material strength (not gravity) holds it together. `stiffness` is the bond spring constant;
+    /// `break_strain` is the fractional stretch at which a bond fractures.
+    #[allow(clippy::too_many_arguments)]
+    pub fn cohesive(
+        particles: Vec<Body>,
+        material: usize,
+        softening: f64,
+        cutoff: f64,
+        stiffness: f64,
+        damping: f64,
+        break_strain: f64,
+    ) -> Self {
+        let mut bonds = Vec::new();
+        for i in 0..particles.len() {
+            for j in (i + 1)..particles.len() {
+                let rest = (particles[j].pos - particles[i].pos).length();
+                if rest <= cutoff {
+                    bonds.push(Bond {
+                        a: i,
+                        b: j,
+                        rest,
+                        active: true,
+                    });
+                }
+            }
+        }
+        let n = particles.len();
+        Aggregate {
+            particles,
+            temps: vec![REF_TEMP_K; n],
+            material,
+            softening,
+            bonds,
+            stiffness,
+            damping,
+            break_strain,
+        }
+    }
+
+    /// Number of intact (unfractured) bonds — a measure of structural integrity.
+    pub fn active_bonds(&self) -> usize {
+        self.bonds.iter().filter(|b| b.active).count()
+    }
+
+    /// Fracture any bond stretched past `break_strain` (called each step after the drift).
+    fn break_overstrained_bonds(&mut self) {
+        let bs = self.break_strain;
+        for bond in &mut self.bonds {
+            if !bond.active {
+                continue;
+            }
+            let dist = (self.particles[bond.b].pos - self.particles[bond.a].pos).length();
+            if (dist - bond.rest) / bond.rest > bs {
+                bond.active = false; // fractured
+            }
         }
     }
 
@@ -115,6 +207,25 @@ impl Aggregate {
                 acc[i] += d * (G * p[j].mass * r2.powf(-1.5));
             }
         }
+        // Material cohesion: each intact bond is a Hookean spring toward its rest length, plus a damper
+        // that dissipates along-bond motion — so a struck solid settles to a ground state (docs/23).
+        for bond in &self.bonds {
+            if !bond.active {
+                continue;
+            }
+            let (pa, pb) = (&p[bond.a], &p[bond.b]);
+            let d = pb.pos - pa.pos;
+            let dist = d.length();
+            if dist < 1e-9 {
+                continue;
+            }
+            let n = d / dist;
+            // Spring along the bond toward rest length; damper on the FULL relative velocity (internal
+            // friction resists all relative motion — longitudinal AND shear — so every mode settles).
+            let f = n * (self.stiffness * (dist - bond.rest)) + (pb.vel - pa.vel) * self.damping;
+            acc[bond.a] += f / pa.mass;
+            acc[bond.b] -= f / pb.mass;
+        }
         acc
     }
 
@@ -125,6 +236,7 @@ impl Aggregate {
             b.vel += *a * (0.5 * dt);
             b.pos += b.vel * dt;
         }
+        self.break_overstrained_bonds(); // fracture: bonds stretched past break_strain fail
         let new_acc = self.accelerations();
         for (b, a) in self.particles.iter_mut().zip(new_acc.iter()) {
             b.vel += *a * (0.5 * dt);
@@ -305,5 +417,53 @@ mod tests {
             agg.rms_radius(),
             r0
         );
+    }
+
+    #[test]
+    fn a_cohesive_solid_settles_to_a_ground_state_but_shatters_under_a_hard_impact() {
+        // Robin's point: a deterministic model with real dissipation reaches a GROUND STATE. A struck
+        // solid rings, then the bond damping bleeds the vibration away and it settles. A hard enough
+        // blow instead fractures the bonds and it shatters — both emergent, no scripted settle/destroy.
+        let mk = || Aggregate::cohesive(cloud(3, 1.0, 1.0), 0, 0.5, 1.5, 1.0e4, 1.0e2, 0.1);
+
+        // Gentle strike: nudge one particle; the internal vibration damps to ~0 (ground state), and no
+        // bond is over-stretched, so the solid stays whole.
+        let mut solid = mk();
+        let bonds0 = solid.active_bonds();
+        assert!(bonds0 > 0, "the solid is bonded");
+        solid.particles[0].vel = DVec3::new(2.0, 0.0, 0.0);
+        let ke0 = solid.kinetic_energy_com();
+        let mut acc = solid.accelerations();
+        for _ in 0..3000 {
+            solid.step(&mut acc, 5.0e-4);
+        }
+        assert!(
+            solid.kinetic_energy_com() < 0.02 * ke0,
+            "it settles to a ground state (internal KE {:.3e} → ~0 from {:.3e})",
+            solid.kinetic_energy_com(),
+            ke0
+        );
+        assert_eq!(
+            solid.active_bonds(),
+            bonds0,
+            "a gentle strike breaks no bonds"
+        );
+
+        // Hard strike: a violent outward kick over-strains the bonds → they fracture → it shatters.
+        let mut hit = mk();
+        let r0 = hit.rms_radius();
+        let com = hit.com();
+        for p in &mut hit.particles {
+            p.vel = (p.pos - com).normalize_or_zero() * 500.0;
+        }
+        let mut acc2 = hit.accelerations();
+        for _ in 0..500 {
+            hit.step(&mut acc2, 5.0e-4);
+        }
+        assert!(
+            hit.active_bonds() < bonds0 / 2,
+            "the impact fractures most bonds"
+        );
+        assert!(hit.rms_radius() > 3.0 * r0, "it shatters and disperses");
     }
 }

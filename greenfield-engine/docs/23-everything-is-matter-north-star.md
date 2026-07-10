@@ -50,10 +50,23 @@ Every layer is already built and tested in isolation: material thresholds (`dama
 is what happens when the **probe stops being special** and these compose across scales. No fireball,
 no scripted delete — just matter, energy, and the same laws, observed at whatever zoom you choose.
 
+## Emergent friction (a consequence we noticed)
+
+Static vs. kinetic friction — which hand-tuned engines fake with two constants μ_s, μ_k — falls out of
+the **same** bond mechanics, applied at the **contact** between surfaces. At rest, contact asperities
+**settle into their ground state** (bonds fully form) → more force to break them → higher static
+friction. Sliding never lets them settle (continuous stick-slip) → lower kinetic friction. So μ_s > μ_k
+is a *consequence* of bond formation + dissipation, not a tabulated fact. (`materials.json` carries
+`friction_coefficient`/`restitution` as placeholder summaries today — like `albedo` — that this would
+derive.) One more special case that dissolves once the contact is real matter.
+
 ## Roadmap
 
 1. **Probe as real matter** (cohesive aggregate / voxel body) — impacts, gravity, contact, damage all
-   emergent; kills the last special case.
+   emergent; kills the last special case. **Landed (native, tested):** `Aggregate::cohesive` — a
+   bonded solid that settles to a ground state (bond spring + damper) and shatters under a hard impact
+   (bonds fracture). Next: wire it as the probe (falls, rests on terrain, rendered), so a meteor
+   destroys it on its own.
 2. **`impact` affects the awake set** (bodies + voxels) through one operator.
 3. **Celestial → local materialization** (the zoom-in), carrying the impact energy down.
 4. **The demo:** ball at ground zero → Moon de-orbit → zoom in → emergent destruction.
