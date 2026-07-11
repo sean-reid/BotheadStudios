@@ -7,6 +7,7 @@ struct U {
     model     : mat4x4<f32>,
     light_dir : vec4<f32>, // xyz = direction TO the sun, normalized
     tint      : vec4<f32>, // body color
+    emissive  : vec4<f32>, // rgb = incandescent glow colour, w = intensity (self-lit, e.g. hot ejecta)
 };
 
 @group(0) @binding(0) var<uniform> u : U;
@@ -40,7 +41,10 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // mass/distance) becomes the illuminant when the heliocentric view lands (docs/17).
     let SUN_GAIN = 22.0;
     let AMBIENT = 0.02; // faint starlight fill so the night side isn't pure black
-    let radiance = u.tint.rgb * (AMBIENT + ndl * SUN_GAIN);
+    // Reflected sunlight + self-emission. Incandescence is added BEFORE the sun term so hot ejecta glows
+    // on its own — visible on the night side, exactly like real shock-heated rock. The colour/intensity
+    // are a blackbody ramp of the fragment's actual temperature (matter physics → light, nothing scripted).
+    let radiance = u.emissive.rgb * u.emissive.w + u.tint.rgb * (AMBIENT + ndl * SUN_GAIN);
     let mapped = radiance / (vec3<f32>(1.0) + radiance); // Reinhard tone-map
     return vec4<f32>(mapped, 1.0);
 }

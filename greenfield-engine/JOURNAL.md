@@ -5,6 +5,121 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — Gauss interior gravity, emergent incandescence, and Earth rendered as matter
+
+**What.** Three fixes, each traced from an on-device observation to missing physics (never a visual patch):
+1. **Interior gravity obeys Gauss's law.** Debris that ploughed beneath the surface was sucked into the
+   core ("the balls absorb into the centre") because the point-mass 1/r² is only valid OUTSIDE a planet.
+   Inside, only the enclosed mass pulls: g(r) = GM·r/R³, linear to ZERO at the centre. The gravity source
+   is now an extended body (1/r² outside its radius, Gauss interior inside) — no singular attractor.
+2. **Incandescence is emergent — the hand-deposit pipeline is GONE from the planetary impact.** The
+   impactor's fragments now simply CARRY the true contact velocity (they are the arriving body); the one
+   contact law transfers momentum into the target's materialized matter, and the contact DISSIPATION
+   (damping + friction) is routed into temperature (`granular::contact_dissipation` — energy is conserved,
+   not destroyed, docs/20). A hard impact glows because the matter genuinely got hot. Measured: the cloud
+   goes 83% → **100% gravitationally bound** through the collision, hottest fragment ~41,600 K (flagged:
+   melt/vaporization energy sinks are not yet modelled at this scale, so the peak overshoots — the glow
+   is real physics, the exact peak is not yet).
+3. **Earth renders as its matter.** A smooth sphere is a representation lie once matter can be excavated —
+   it hides the damage. Earth now draws as a shell of ~512 coarse grains (the honest low-res look);
+   grains inside the materialized impact region are hidden, so the excavated void IS the crater and the
+   glowing cap particles are the matter that used to fill it. Reset now un-shatters properly. Cosmetic
+   skinning (an elastic surface over the blocks) is deferred until after the physics visuals are right.
+
+Also: descent-follow camera (pure camera work — reads `moon_distance_km` from the N-body state, starts on
+the whole-orbit framing, glides to a close-up at 25% of lunar distance as the Moon falls; manual zoom
+overrides, Drop/Reset re-engage).
+
+**Why.** Robin: "Do not bandaid visuals — fix the physics and then visualize them." Each visual wrongness
+was a physics gap: no interior Gauss law, dissipation not becoming heat, a summary representation
+(the sphere) hiding real state.
+
+**Verified.** `interior_gravity_follows_gauss_law_not_a_point_singularity` (half depth ⇒ half g; centre
+pulls ~nothing; exterior unchanged); `a_dropped_moon_impact_leaves_most_debris_gravitationally_bound`
+(100% bound, hottest ≫ visible-glow threshold — incandescence emergent); 72/72 native, wasm builds.
+On-device: Robin confirms the impact now reads correctly ("Much better!").
+
+---
+
+## 2026-07-11 — ONE collision law for all matter + the mutual impact + conservation-law contact state
+
+**What.** Three connected pieces, closing out Robin's "this must define ALL collisions of ALL matter":
+1. **The canonical contact law now governs aggregates too.** `granular::contact_accel` (spring + damping +
+   Coulomb friction + cohesion — the physics of record for terrain grains and GPU debris) is now the
+   contact force inside `Aggregate` as well; the new `granular::contact_from_material` is the ONE mapping
+   from a real material (Young's modulus → stiffness, restitution → damping, friction, cohesion) to
+   contact behaviour, used everywhere. Aggregate particles previously had gravity and bonds but NO
+   contact — they interpenetrated freely, which is why the shattered Moon was an "exploding sphere in a
+   vacuum". A surface velocity rule I'd added to compensate ("cancel the inward component") was a fudge
+   (Robin caught it) — deleted; the bulk planet is now a conservative penalty boundary (a force, −∇U).
+2. **The mutual impact (`impact.rs`).** At the strike we materialize BOTH bodies at the interface — the
+   Moon as a rubble ball on the surface AND Earth's impact region as a cap of crust (same grain mass) —
+   and deposit the Moon's real momentum + energy into the *combined* cloud via the same
+   momentum/shock-heat/vapor pipeline as the terrestrial meteor. Earth's matter absorbs most of the
+   momentum; crater, ejecta, fallback all emerge from the one contact law. Measured natively: **93% of
+   the cloud stays gravitationally bound** — as the declared energetics demand (≈2e7 J/kg deposited vs
+   ≈6.3e7 J/kg to unbind).
+3. **Conservation-law contact state.** Robin observed "a large percentage of debris escapes" on-device,
+   yet the model said 93% bound — the discrepancy was the INPUT: in fast-forward, the deposit used the
+   Moon's velocity *after* a ~2000 s step that had carried it far past the surface — a garbage sample
+   (**21,822 m/s vs the true 9,870 m/s → ~4.9× the honest energy**). New `orbit::contact_velocity`
+   recovers the true state at the surface from the two-body conservation laws (vis-viva energy + angular
+   momentum), dt-independent. The simulation FORECASTS the collision; it never samples garbage.
+   Also: the frame now STOPS at a detected collision (the render can never show a body sailing past its
+   own impact — the simulation drives the visualization and interrupts it).
+
+**Why.** "Get the small stuff right, apply everywhere": one contact law, derived from declared material
+parameters, at every scale — and dt-independence as a principle: what the physics concludes must not
+depend on how coarsely we stepped or how fast the visualization runs.
+
+**Verified.** `aggregate_particles_collide_via_the_canonical_law_and_conserve_momentum` (no pass-through,
+momentum conserved, real rebound); `a_dropped_moon_impact_leaves_most_debris_gravitationally_bound`
+(93% bound after the contact plays out); `contact_velocity_recovers_the_true_impact_speed_regardless_of_
+step_size` (recovery within 2% at the browser's coarsest step vs +121% for the post-step sample);
+71/71 native, wasm builds. Visual verdict pending on-device.
+
+---
+
+## 2026-07-11 — Materialize the Moon at impact: honest momentum, real 1/r² fall-back, incandescence for free
+
+**What.** With tunneling fixed, the Moon reached Earth but "dinked on top and fell out the bottom, intact,
+no ejecta" (Robin, on-device). Three honesty bugs in the shatter, all now fixed:
+1. **Momentum was being dropped/mis-deposited.** First cut drove the debris with the Moon's full *incoming*
+   momentum → the whole clump shot DOWN through Earth. I then tried zeroing the momentum — Robin caught it:
+   *"drop the momentum sounds like fudge again."* Right. The honest model (Robin's framing): from orbit the
+   Earth/Moon are *"really big single particles, an average of physical material properties"*; at impact we
+   **materialize** the Moon into its constituent matter, and the fragments carry the Moon's REAL incoming
+   velocity (Σmᵢv = m_moon·v — momentum conserved across the promotion, not dropped). The impact ENERGY
+   disperses them symmetrically (net-zero momentum). **Earth's surface then transfers the inward momentum by
+   CONTACT** — the same swept CCD primitive, now applied per-fragment (inward fragments stop on the ground →
+   momentum to Earth; outward ones eject). "Get the small stuff right, apply everywhere."
+2. **Fall-back/escape was faked by a uniform gravity field.** A baked uniform "down" wrongly forces even
+   >escape-velocity fragments to fall back. Robin: *"Model parameters declare REAL physics… we MUST be
+   faithful."* Replaced with a real **point-source 1/r² pull toward Earth's actual centre** (G·M_earth,
+   from the masses the model already declares), softening kept tiny (2% R⊕) so the field is faithful where
+   fragments live (r ≥ R⊕, contact-enforced). The escape/fall-back split is now EMERGENT, not imposed.
+3. **Incandescence now comes free from the thermal state.** `deposit_impact` already computes each
+   fragment's temperature; the space shader gained a self-emissive term and the debris is tinted by a
+   blackbody ramp of its REAL temperature (dark→red→orange→white). Hot ejecta glows on the night side —
+   nothing scripted.
+
+Also added **📷 Earth / 📷 Moon** camera buttons (explicit frame-of-reference switch; "Camera on Moon"
+frames the impact site once it shatters) toward Robin's zooming-FoR / "fixed camera 1000 m above the site"
+goal.
+
+**Why.** The vision, sharpened by Robin across this session: *all* Newtonian-scale laws should EMERGE from
+faithfully-modelled matter — the engine answers "what if the Moon deorbited?" by tracking real materials,
+so a child (and, ultimately, an embodied AGI) could *re-derive physics* from playing in it. Every fudge is
+a false lesson. So the escape boundary must come from √(2GM/r), not a tuned knob.
+
+**Verified.** New native test `aggregate::point_source_gravity_splits_escape_from_fallback`: a fragment
+launched at 1.4×escape leaves for good (>10 R⊕); at 0.6×escape it arcs back and lands (apoapsis <2 R⊕) —
+the threshold read straight from the declared M and G, with surface contact mirrored as in the render.
+`cargo test -p engine` 66/66; wasm builds + deployed. The shatter VISUAL (scatter + glow) needs on-device
+eyes. FLAGGED next: apply the swept CCD to the GPU granular contact (retire the `V_MAX` cap) — same primitive.
+
+---
+
 ## 2026-07-11 — Swept collision (forecast the path): the dropped Moon no longer TUNNELS through Earth
 
 **What.** The dropped Moon was shooting straight through the Earth and never colliding. Root cause (Robin

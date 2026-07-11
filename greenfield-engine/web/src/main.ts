@@ -83,7 +83,12 @@ async function main(): Promise<void> {
 
   try {
     setStatus("Loading engine… (compiling WASM)");
-    await init();
+    // DEV wasm has a stable url Safari caches forever; bust it with the build stamp. BUILD is hashed.
+    await init(
+      import.meta.env.DEV
+        ? new URL(`./wasm/engine_bg.wasm?v=${__BUILD_ID__}`, import.meta.url)
+        : undefined,
+    );
     setStatus("Requesting GPU device…");
     const engine = await Engine.create(canvas);
     hideStatus();

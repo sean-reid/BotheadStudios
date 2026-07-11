@@ -58,8 +58,13 @@ function sizeCanvas(canvas: HTMLCanvasElement): void {
 }
 
 async function main(): Promise<void> {
+  report("info", `build ${__BUILD_ID__}`);
   report("info", `UA: ${navigator.userAgent}`);
   report("info", `secureContext=${window.isSecureContext} · gpu in navigator=${"gpu" in navigator}`);
+  // Stamp the build into the HUD immediately — before WASM even loads — so a stale Safari cache is
+  // obvious at a glance (the number won't match the one I report on deploy).
+  const hudEl = document.getElementById("hud");
+  if (hudEl) hudEl.textContent = `orbit · build ${__BUILD_ID__}`;
 
   const canvas = document.getElementById("gpu-canvas") as HTMLCanvasElement | null;
   if (!canvas) {
@@ -81,7 +86,14 @@ async function main(): Promise<void> {
 
   try {
     setStatus("Loading engine… (compiling WASM)");
-    await init();
+    // In DEV the wasm has a STABLE url (src/wasm/engine_bg.wasm) that Safari caches indefinitely, so a
+    // rebuild's new bytes never load. Append the build stamp to force a fresh fetch. In BUILD the wasm is
+    // content-hashed already, so let the glue use its default (hashed) url — a ?query there would 404.
+    await init(
+      import.meta.env.DEV
+        ? new URL(`./wasm/engine_bg.wasm?v=${__BUILD_ID__}`, import.meta.url)
+        : undefined,
+    );
     setStatus("Requesting GPU device…");
     // Moon count comes from the page (<body data-moons="2">) so orbit.html and twomoons.html share
     // this one script. Default 1.
@@ -125,17 +137,23 @@ async function main(): Promise<void> {
       return b;
     };
 
-    // The viewport is a physical frame of reference (docs/17): re-centre on Earth or Moon.
-    const focusBtn = mkBtn("", () => {
-      demo.cycle_focus();
-      focusBtn.textContent = `Focus: ${demo.focus_label()}`;
-    });
-    focusBtn.textContent = `Focus: ${demo.focus_label()}`;
+    // The viewport is a physical frame of reference (docs/17): the camera rides a body, so we can watch
+    // the encounter from either standpoint. "Camera on Moon" frames the impact site once it shatters.
+    const camEarth = mkBtn("📷 Earth", () => demo.focus_earth());
+    const camMoon = mkBtn("📷 Moon", () => demo.focus_moon());
+    void camEarth;
+    void camMoon;
 
     // Orbital decay: brake the Moon until its orbit crashes into the planet.
     mkBtn("Brake Moon ½×", () => demo.brake_moon());
-    mkBtn("Drop Moon", () => demo.drop_moon());
-    mkBtn("Reset", () => demo.reset_moon());
+    mkBtn("Drop Moon", () => {
+      demo.drop_moon();
+      followMoon = true; // ride the descent down
+    });
+    mkBtn("Reset", () => {
+      demo.reset_moon();
+      followMoon = true;
+    });
 
     // Variable time multiplier.
     let timeScale = demo.time_scale_value();
@@ -157,7 +175,15 @@ async function main(): Promise<void> {
     });
 
     // --- Camera-only input (pointer events cover mouse + touch) ---
-    const cam = { yaw: 0.6, pitch: 0.5, zoom: 1.0 };
+    // Descent-follow camera (pure camera work — it only READS the physics): start wide enough to watch
+    // the Moon orbit/deorbit (zoom 1 = 1.7× lunar distance, the whole-orbit framing), then track the
+    // Moon's real separation as it falls, flooring at 25% of lunar distance for the impact close-up.
+    // Manual zoom (wheel/pinch) takes over; Drop/Reset re-engage the follow.
+    const LUNAR_KM = 384_400;
+    const followZoom = (): number =>
+      Math.max(0.25 / 1.7, Math.min(1, demo.moon_distance_km() / LUNAR_KM));
+    let followMoon = true;
+    const cam = { yaw: 0.6, pitch: 0.5, zoom: followZoom() };
     let userInteracted = false;
     let dragging = false;
     let lastX = 0;
@@ -193,7 +219,8 @@ async function main(): Promise<void> {
         const d = twoFingerDist();
         if (pinchDist > 0 && d > 0) {
           cam.zoom *= pinchDist / d;
-          cam.zoom = Math.max(0.25, Math.min(6, cam.zoom));
+          cam.zoom = Math.max(0.05, Math.min(6, cam.zoom));
+          followMoon = false; // manual zoom takes the camera over
         }
         pinchDist = d;
         userInteracted = true;
@@ -212,7 +239,8 @@ async function main(): Promise<void> {
       (e) => {
         e.preventDefault();
         cam.zoom *= Math.exp(e.deltaY * 0.001);
-        cam.zoom = Math.max(0.25, Math.min(6, cam.zoom));
+        cam.zoom = Math.max(0.05, Math.min(6, cam.zoom));
+        followMoon = false; // manual zoom takes the camera over
         userInteracted = true;
       },
       { passive: false },
@@ -250,7 +278,11 @@ async function main(): Promise<void> {
         `v <b>${demo.moon_speed_kms().toFixed(2)}</b> km/s<br>` +
         `${line2}<br>` +
         `time <b>${Math.round(demo.time_scale_value()).toLocaleString()}×</b> · ` +
-        `<b>${fps}</b> fps · drag / pinch`;
+        `<b>${fps}</b> fps · build <b>${__BUILD_ID__}</b> · drag / pinch` +
+        (demo.has_impacted()
+          ? `<br><b style="color:#ffd08a">IMPACT</b> · ${demo.debris_count()} fragments · ` +
+            `${(demo.impact_energy_j() / 1e30).toFixed(2)}e30 J`
+          : "");
     };
 
     let firstFrame = true;
@@ -263,6 +295,10 @@ async function main(): Promise<void> {
         lastFpsTime = nowT;
       }
       if (!userInteracted) cam.yaw += 0.0015; // gentle idle drift
+      if (followMoon) {
+        // Ease toward the follow target so re-engaging (Drop/Reset) glides instead of jump-cutting.
+        cam.zoom += (followZoom() - cam.zoom) * 0.08;
+      }
       demo.set_orbit(cam.yaw, cam.pitch, cam.zoom);
       try {
         demo.render();

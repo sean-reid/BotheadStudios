@@ -67,6 +67,25 @@ pub struct Aggregate {
     /// `powf(-1.5)` per substep dominates the frame — skipping it is honest (a real but ~0 effect) and
     /// turns the per-substep cost O(n²)→O(bonds).
     pub self_gravity: bool,
+    /// Optional external POINT-mass gravity source (position, mass, softening radius) — e.g. the planet a
+    /// debris cloud is falling back onto. Unlike `gravity` (a uniform field), this pulls each particle
+    /// toward the source's actual centre with a real 1/r² law, so fragments launched above escape velocity
+    /// genuinely escape and slower ones arc back — the honest fall-back/escape balance. Softened at the
+    /// source radius so a fragment crossing the surface doesn't see a singularity (contact handles it).
+    pub gravity_source: Option<(DVec3, f64, f64)>,
+    /// Particle–particle CONTACT law (the canonical `granular::Contact`) — when set, non-coincident
+    /// particles that overlap push apart via `granular::contact_accel`, the SAME force law the granular
+    /// terrain/debris uses. This is what makes matter collide instead of interpenetrate; without it a
+    /// cloud is just ballistic points. Derived from the material via `granular::contact_from_material`.
+    pub contact: Option<crate::granular::Contact>,
+    /// Specific heat (J/(kg·K)) used to convert contact-dissipated energy into temperature rise — energy
+    /// is conserved, not destroyed (docs/20): friction/damping heat the matter (→ incandescence).
+    pub specific_heat: f64,
+    /// A rigid CONVERVATIVE boundary sphere (centre, radius, per-mass stiffness) — e.g. the un-materialised
+    /// bulk of a planet the debris rests on / rains back onto. A particle inside it feels an outward
+    /// penalty spring `stiffness·(radius−dist)` (a FORCE, −∇U — never a velocity reset). The far-field
+    /// summary of matter we don't resolve, contacted honestly (docs/24).
+    pub boundary: Option<(DVec3, f64, f64)>,
 }
 
 impl Aggregate {
@@ -83,6 +102,36 @@ impl Aggregate {
             break_strain: f64::INFINITY,
             gravity: DVec3::ZERO,
             self_gravity: true, // a bare aggregate is a self-gravitating pile
+            gravity_source: None,
+            contact: None,
+            specific_heat: 1000.0, // generic rock-ish default; set from the material via with_specific_heat
+            boundary: None,
+        }
+    }
+
+    /// Give the aggregate the canonical particle–particle contact law (built from a material). This is
+    /// the one collision law the whole engine uses — see `granular::contact_from_material`.
+    pub fn with_contact(mut self, contact: crate::granular::Contact) -> Self {
+        self.contact = Some(contact);
+        self
+    }
+
+    /// Set the material's specific heat (J/(kg·K)) — converts contact dissipation into temperature.
+    pub fn with_specific_heat(mut self, c: f64) -> Self {
+        self.specific_heat = c.max(1.0);
+        self
+    }
+
+    /// Rest the aggregate on / let it rain back onto a rigid boundary sphere (conservative penalty).
+    pub fn with_boundary(mut self, center: DVec3, radius: f64, stiffness: f64) -> Self {
+        self.boundary = Some((center, radius, stiffness));
+        self
+    }
+
+    /// Move the boundary sphere's centre (the planet orbits while its debris settles).
+    pub fn set_boundary_center(&mut self, center: DVec3) {
+        if let Some(b) = self.boundary.as_mut() {
+            b.0 = center;
         }
     }
 
@@ -90,6 +139,22 @@ impl Aggregate {
     pub fn with_gravity(mut self, gravity: DVec3) -> Self {
         self.gravity = gravity;
         self
+    }
+
+    /// Set an external extended-body gravity source (position, mass, PHYSICAL radius). 1/r² outside the
+    /// radius, Gauss's-law linear interior inside it (see `accelerations`). Use this instead of
+    /// `with_gravity` when the field varies over the cloud (e.g. debris flung far from a planet), so the
+    /// escape/fall-back split is real. Update the position each frame with `set_gravity_source_pos`.
+    pub fn with_gravity_source(mut self, pos: DVec3, mass: f64, body_radius: f64) -> Self {
+        self.gravity_source = Some((pos, mass, body_radius));
+        self
+    }
+
+    /// Update the moving source's position (the planet orbits while the debris falls back).
+    pub fn set_gravity_source_pos(&mut self, pos: DVec3) {
+        if let Some(src) = self.gravity_source.as_mut() {
+            src.0 = pos;
+        }
     }
 
     /// A **cohesive solid**: bond every pair of particles within `cutoff` at their current separation,
@@ -133,6 +198,10 @@ impl Aggregate {
             // A cohesive solid is held by its BONDS; its self-gravity is negligible. Skip the O(n²)
             // N-body loop — it would otherwise dominate the frame (the probe's ~135 substeps × n²).
             self_gravity: false,
+            gravity_source: None,
+            contact: None,
+            specific_heat: 1000.0, // generic rock-ish default; set from the material via with_specific_heat
+            boundary: None,
         }
     }
 
@@ -259,6 +328,29 @@ impl Aggregate {
         let s2 = self.softening * self.softening;
         let p = &self.particles;
         let mut acc = vec![self.gravity; p.len()]; // uniform external gravity (0 for a rubble pile)
+        // External extended-body gravity source (e.g. the planet the debris falls back to). OUTSIDE the
+        // body: real 1/r² toward its centre — escape vs. fall-back emerges. INSIDE it: Gauss's law — only
+        // the mass interior to r pulls, so for a (uniform-density) planet g(r) = G·M·r/R³, decreasing
+        // LINEARLY to zero at the centre. A point-mass 1/r² inside is WRONG physics: it grows without
+        // bound inward and turns the core into an attractor that swallows anything that ploughs beneath
+        // the surface. `body_r` is the source's physical radius (the crossover), doubling as the scale
+        // that keeps the force finite everywhere.
+        if let Some((src_pos, src_mass, body_r)) = self.gravity_source {
+            let r3 = body_r * body_r * body_r;
+            for (i, body) in p.iter().enumerate() {
+                let d = src_pos - body.pos;
+                let dist = d.length();
+                if dist < 1.0e-9 {
+                    continue;
+                }
+                let g_mag = if dist >= body_r {
+                    G * src_mass / (dist * dist) // exterior: the full mass, 1/r²
+                } else {
+                    G * src_mass * dist / r3 // interior: Gauss — only the enclosed mass pulls
+                };
+                acc[i] += (d / dist) * g_mag;
+            }
+        }
                                                    // O(n²) N-body self-gravity — only for a self-gravitating pile. A cohesive solid skips it (its
                                                    // own gravity is ~0 and this `powf(-1.5)` loop would dominate the frame; see `self_gravity`).
         if self.self_gravity {
@@ -273,6 +365,32 @@ impl Aggregate {
                 }
             }
         }
+        // Particle–particle CONTACT — the canonical granular law (`contact_accel`), the SAME force that
+        // governs the terrain/debris grains, now applied to any aggregate of matter. This is what stops
+        // particles passing through each other; sticking, ploughing and cratering all emerge from it.
+        // O(n²) — fine for the coarse clouds here; a neighbour grid is the scaling refinement.
+        if let Some(c) = self.contact {
+            for i in 0..p.len() {
+                for j in (i + 1)..p.len() {
+                    let a = crate::granular::contact_accel(p[i].pos, p[i].vel, p[j].pos, p[j].vel, &c);
+                    acc[i] += a;
+                    acc[j] -= a; // equal & opposite ⇒ momentum conserved
+                }
+            }
+        }
+        // Conservative boundary sphere (the un-materialised bulk planet): an outward penalty spring for any
+        // particle that has pushed inside it. A FORCE (−∇U of ½k·penetration²), not a velocity reset — so
+        // debris rests on it and rains back without the "cancel the inward component" fudge.
+        if let Some((center, radius, stiffness)) = self.boundary {
+            for (i, body) in p.iter().enumerate() {
+                let d = body.pos - center;
+                let dist = d.length();
+                if dist < radius && dist > 1.0e-9 {
+                    acc[i] += (d / dist) * (stiffness * (radius - dist));
+                }
+            }
+        }
+
         // Material cohesion: each intact bond is a Hookean spring toward its rest length, plus a damper
         // that dissipates along-bond motion — so a struck solid settles to a ground state (docs/23).
         for bond in &self.bonds {
@@ -344,6 +462,29 @@ impl Aggregate {
             b.vel += *a * (0.5 * dt);
         }
         *acc = new_acc;
+        // Energy conservation (docs/20): the mechanical energy the contact damping/friction removed this
+        // step becomes HEAT, split evenly across each dissipating pair — the source of the emergent
+        // incandescence (a hard impact glows because the matter genuinely got hot).
+        if let Some(c) = self.contact {
+            let heat_per_k = self.specific_heat; // J/(kg·K); dissipation is already per-kg (W/kg)
+            let p = &self.particles;
+            let mut d_temp = vec![0.0f64; p.len()];
+            for i in 0..p.len() {
+                for j in (i + 1)..p.len() {
+                    let pw = crate::granular::contact_dissipation(
+                        p[i].pos, p[i].vel, p[j].pos, p[j].vel, &c,
+                    );
+                    if pw > 0.0 {
+                        let dt_k = pw * dt / (2.0 * heat_per_k);
+                        d_temp[i] += dt_k;
+                        d_temp[j] += dt_k;
+                    }
+                }
+            }
+            for (t, d) in self.temps.iter_mut().zip(d_temp.iter()) {
+                *t += *d as f32;
+            }
+        }
     }
 
     pub fn total_mass(&self) -> f64 {
@@ -659,5 +800,124 @@ mod tests {
             "the impact fractures most bonds"
         );
         assert!(hit.rms_radius() > 3.0 * r0, "it shatters and disperses");
+    }
+
+    #[test]
+    fn point_source_gravity_splits_escape_from_fallback() {
+        // The escape/fall-back boundary is not a tuned parameter — it is DECLARED by the source mass and G.
+        // A fragment launched above the real escape velocity must leave; below it, it must arc back. We
+        // read the threshold straight from the physics the model already declares (faithfulness, not eye).
+        let r0 = 6.371e6_f64; // Earth radius (m)
+        let m = 5.972e24_f64; // Earth mass (kg)
+        let v_esc = (2.0 * G * m / r0).sqrt(); // ≈ 11.2 km/s, from the declared M and G — nothing tuned
+
+        // A single free fragment (no self-gravity, no bonds) launched radially outward from the surface.
+        let max_radius = |v: f64| -> f64 {
+            let mut agg = Aggregate::new(
+                vec![Body {
+                    pos: DVec3::new(r0, 0.0, 0.0),
+                    vel: DVec3::new(v, 0.0, 0.0),
+                    mass: 1.0,
+                }],
+                1.0,
+            )
+            .with_gravity_source(DVec3::ZERO, m, r0); // 1/r² outside the planet; Gauss interior inside
+            agg.self_gravity = false;
+            let mut acc = agg.accelerations();
+            let mut rmax = r0;
+            for _ in 0..40_000 {
+                agg.step(&mut acc, 2.0); // ~22 h of flight — long enough to fall back or clearly escape
+                // Surface contact — exactly as the render does it: a fragment can't sink below the surface,
+                // so a bound one arcs back UP to apoapsis and returns to rest on the ground (it never falls
+                // through the singular core). This is the faithful setup; the split is read from it.
+                let p = &mut agg.particles[0];
+                let r = p.pos.length();
+                if r < r0 {
+                    let n = p.pos / r;
+                    p.pos = n * r0;
+                    let vn = p.vel.dot(n);
+                    if vn < 0.0 {
+                        p.vel -= n * vn;
+                    }
+                }
+                rmax = rmax.max(agg.particles[0].pos.length());
+            }
+            rmax
+        };
+
+        // 1.4× escape → gone (climbs past many Earth radii and keeps going).
+        assert!(
+            max_radius(1.4 * v_esc) > 10.0 * r0,
+            "above escape velocity the fragment leaves for good"
+        );
+        // 0.6× escape → bound: analytic apoapsis r0/(1−f²) = r0/0.64 ≈ 1.56 r0 (softening shifts it a hair).
+        let bound = max_radius(0.6 * v_esc);
+        assert!(
+            bound < 2.0 * r0,
+            "below escape velocity it arcs back — apoapsis stays near the surface, got {bound:.3e} m"
+        );
+    }
+
+    #[test]
+    fn interior_gravity_follows_gauss_law_not_a_point_singularity() {
+        // Inside a planet only the enclosed mass pulls (Gauss): g(r) = GM·r/R³, linear to ZERO at the
+        // centre. The point-mass 1/r² inside was wrong physics — it made the core an attractor that
+        // swallowed any debris that ploughed beneath the surface ("the balls absorb into the centre").
+        let (m, r0) = (5.972e24_f64, 6.371e6_f64);
+        let g_at = |r: f64| -> f64 {
+            let mut agg = Aggregate::new(
+                vec![Body { pos: DVec3::new(r, 0.0, 0.0), vel: DVec3::ZERO, mass: 1.0 }],
+                1.0,
+            )
+            .with_gravity_source(DVec3::ZERO, m, r0);
+            agg.self_gravity = false;
+            agg.accelerations()[0].length()
+        };
+        let g_surface = G * m / (r0 * r0); // ≈ 9.82 m/s²
+        assert!((g_at(r0) - g_surface).abs() / g_surface < 1e-6, "surface: full 1/r²");
+        assert!((g_at(0.5 * r0) - 0.5 * g_surface).abs() / g_surface < 1e-6, "half depth: HALF g, not 4×");
+        assert!(g_at(1.0e3) < 1.0e-2, "the centre pulls ~nothing — no singular attractor");
+        assert!((g_at(2.0 * r0) - 0.25 * g_surface).abs() / g_surface < 1e-6, "exterior unchanged: 1/r²");
+    }
+
+    #[test]
+    fn aggregate_particles_collide_via_the_canonical_law_and_conserve_momentum() {
+        // The whole point: an aggregate of matter now COLLIDES through the same `granular::contact_accel`
+        // law as everything else. Two equal-mass particles thrown head-on must push apart (not pass
+        // through) with momentum conserved — the missing physics behind the "exploding sphere in a vacuum".
+        let r = 1.0;
+        let contact = crate::granular::Contact {
+            radius: r,
+            stiffness: 1.0e3,
+            normal_damp: 0.0, // elastic ⇒ momentum AND (mechanical) energy conserved
+            friction: 0.0,
+            tangent_damp: 0.0,
+            cohesion: 0.0,
+            coh_range: 0.1,
+        };
+        let mut agg = Aggregate::new(
+            vec![
+                Body { pos: DVec3::new(-1.5, 0.0, 0.0), vel: DVec3::new(2.0, 0.0, 0.0), mass: 1.0 },
+                Body { pos: DVec3::new(1.5, 0.0, 0.0), vel: DVec3::new(-2.0, 0.0, 0.0), mass: 1.0 },
+            ],
+            0.1,
+        )
+        .with_contact(contact);
+        agg.self_gravity = false;
+
+        let p0: DVec3 = agg.particles.iter().map(|b| b.vel * b.mass).sum();
+        let mut acc = agg.accelerations();
+        let mut min_sep = f64::MAX;
+        for _ in 0..2000 {
+            agg.step(&mut acc, 1.0e-3);
+            min_sep = min_sep.min((agg.particles[0].pos - agg.particles[1].pos).length());
+        }
+        let p1: DVec3 = agg.particles.iter().map(|b| b.vel * b.mass).sum();
+
+        let final_sep = (agg.particles[0].pos - agg.particles[1].pos).length();
+        assert!(min_sep < 2.0 * r, "they actually made contact (min_sep {min_sep:.3})");
+        assert!(min_sep > 0.5 * r, "they did NOT pass through each other (min_sep {min_sep:.3})");
+        assert!((p1 - p0).length() < 1.0e-9, "momentum conserved through the collision");
+        assert!(final_sep > 2.0 * r, "they rebounded and separated");
     }
 }

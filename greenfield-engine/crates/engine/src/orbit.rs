@@ -162,6 +162,31 @@ pub fn swept_first_contact(rel_old: DVec3, rel_new: DVec3, r_sum: f64) -> Option
     }
 }
 
+/// The relative velocity of a body at FIRST CONTACT, recovered from the two-body conservation laws —
+/// specific orbital energy (`v² = v₀² + 2μ(1/r_c − 1/r₀)`, vis-viva) and angular momentum
+/// (`v_t = |r₀×v₀|/r_c`, direction `L̂×n̂`) — using the PRE-step state. This is dt-INDEPENDENT: in
+/// fast-forward, the integrator's post-step velocity near the 1/r² singularity is garbage (the body has
+/// been stepped far past the surface), and depositing an impact from it inflates the energy several-fold.
+/// The conservation laws know the true state at the surface no matter how coarsely we stepped — the
+/// simulation FORECASTS the collision, it doesn't sample it (docs/13). `n_hat` = outward surface normal
+/// at the contact point; the returned velocity has its radial part inward (it is arriving).
+pub fn contact_velocity(rel_old: DVec3, vel_old: DVec3, n_hat: DVec3, r_contact: f64, mu: f64) -> DVec3 {
+    let r0 = rel_old.length().max(1.0e-9);
+    // Energy conservation: speed² at the contact radius.
+    let v2 = (vel_old.length_squared() + 2.0 * mu * (1.0 / r_contact - 1.0 / r0)).max(0.0);
+    // Angular-momentum conservation: the tangential component at contact, in the orbit plane.
+    let l = rel_old.cross(vel_old);
+    let vt = (l.length() / r_contact).min(v2.sqrt()); // cannot exceed the total speed
+    let t_dir = l.cross(n_hat);
+    let t_hat = if t_dir.length_squared() > 1.0e-18 {
+        t_dir / t_dir.length()
+    } else {
+        DVec3::ZERO // pure radial plunge — no tangential direction (and vt ≈ 0)
+    };
+    let vr = (v2 - vt * vt).max(0.0).sqrt();
+    t_hat * vt - n_hat * vr
+}
+
 /// Kinetic energy (J) a perfectly-inelastic collision between two bodies would dissipate: ½·μ·|Δv|²
 /// with reduced mass μ = m_a·m_b/(m_a+m_b). This is the energy that *must* go somewhere real — heat,
 /// fracture, melt, ejecta. Our contact resolution currently removes it without modelling where it
@@ -397,6 +422,153 @@ mod tests {
             sep >= r_sum - 1.0 && sep < r_sum + 5.0e5,
             "it rests at the surface, not inside the planet (sep {sep:.3e}, r_sum {r_sum:.3e})"
         );
+    }
+
+    #[test]
+    fn swept_ccd_catches_a_dropped_moon_in_browser_fastforward_but_a_braked_one_ricochets() {
+        // Reproduces the browser EXACTLY: a huge fast-forward step (the Moon jumps many Earth-radii per
+        // substep, so the discrete test would tunnel), driven through the same substep+swept-CCD loop the
+        // renderer uses. Two scenarios, one physics: a DROP must register a hit; a single ½× BRAKE must
+        // NOT (its perigee is ~55,000 km — a gravitational slingshot / "ricochet", the correct outcome).
+        let m_earth = 5.972e24;
+        let m_moon = 7.342e22;
+        let r_sum = 6.371e6 + 1.737e6;
+        let d = 3.844e8;
+        let mu = G * (m_earth + m_moon);
+        let vc = (mu / d).sqrt(); // circular speed at the Moon's distance
+
+        // Browser step: time_scale 2e6 → sim_dt = 2e6/60 ≈ 33 333 s, over ORBIT_SUBSTEPS = 16 → ~2083 s.
+        let dt = 2.0e6 / 60.0 / 16.0;
+
+        let ran = |moon_vel: DVec3| -> bool {
+            let mut bodies = vec![
+                Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: m_earth },
+                Body { pos: DVec3::new(d, 0.0, 0.0), vel: moon_vel, mass: m_moon },
+            ];
+            let mut acc = accelerations(&bodies);
+            for _ in 0..4000 {
+                let earth_before = bodies[0].pos;
+                let rel_old = bodies[1].pos - earth_before;
+                verlet_step(&mut bodies, &mut acc, dt);
+                let rel_new = bodies[1].pos - bodies[0].pos;
+                if swept_first_contact(rel_old, rel_new, r_sum).is_some() {
+                    return true;
+                }
+            }
+            false
+        };
+
+        // Dropped (velocity cancelled) → radial plunge → the swept CCD forecasts the hit despite tunnelling.
+        assert!(ran(DVec3::ZERO), "a DROPPED moon is caught by the swept CCD in fast-forward");
+        // Braked to half circular speed → perigee ~0.143 d ≈ 55,000 km → never reaches the surface.
+        assert!(
+            !ran(DVec3::new(0.0, 0.5 * vc, 0.0)),
+            "a single ½× BRAKE ricochets (perigee above the surface) — correctly NO impact"
+        );
+    }
+
+    #[test]
+    fn dropped_moon_in_the_full_three_body_system_registers_an_impact() {
+        // Faithful replay of OrbitDemo::render for a DROPPED moon in the real Sun–Earth–Moon system
+        // (this is what the browser runs). Robin reports "no visible impact" — so reproduce it natively.
+        let (sun_m, earth_m, moon_m) = (1.989e30, 5.972e24, 7.342e22);
+        let (au, moon_dist) = (1.496e11, 3.844e8);
+        let (earth_helio, moon_speed) = (29_780.0, 1022.0);
+        let contact = 6.371e6 + 1.737e6;
+        let substeps = 16u32;
+
+        for &time_scale in &[118_000.0_f64, 2_000_000.0] {
+            let mut bodies = vec![
+                Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: sun_m },
+                Body { pos: DVec3::new(au, 0.0, 0.0), vel: DVec3::new(0.0, earth_helio, 0.0), mass: earth_m },
+                Body {
+                    pos: DVec3::new(au + moon_dist, 0.0, 0.0),
+                    vel: DVec3::new(0.0, earth_helio + moon_speed, 0.0),
+                    mass: moon_m,
+                },
+            ];
+            bodies[2].vel = bodies[1].vel; // drop_moon: cancel velocity RELATIVE to Earth
+
+            let mut acc = accelerations(&bodies);
+            let mut impacted = false;
+            let mut min_sep = f64::MAX;
+            let sim_dt = time_scale / 60.0;
+            let dt = sim_dt / substeps as f64;
+            let frames = (12.0 * 86_400.0 / sim_dt) as usize; // ~12 days of fall
+            'outer: for _ in 0..frames.max(1) {
+                for _ in 0..substeps {
+                    let earth_before = bodies[1].pos;
+                    let rel_old = bodies[2].pos - earth_before;
+                    verlet_step(&mut bodies, &mut acc, dt);
+                    let rel_new = bodies[2].pos - bodies[1].pos;
+                    min_sep = min_sep.min(rel_new.length());
+                    if swept_first_contact(rel_old, rel_new, contact).is_some() {
+                        impacted = true;
+                        break 'outer;
+                    }
+                    let (h, t) = bodies.split_at_mut(2);
+                    resolve_contact(&mut h[1], &mut t[0], contact);
+                }
+            }
+            println!(
+                "time_scale {time_scale}: impacted={impacted}, min_sep={:.4e} m = {:.3}× contact (frames={frames}, dt={dt:.0}s)",
+                min_sep,
+                min_sep / contact
+            );
+            assert!(impacted, "dropped moon must impact at time_scale {time_scale}; closest was {:.3}× contact", min_sep / contact);
+        }
+    }
+
+    #[test]
+    fn contact_velocity_recovers_the_true_impact_speed_regardless_of_step_size() {
+        // A dropped Moon's true contact speed follows from energy conservation alone:
+        // v² = 2μ(1/r_c − 1/d). In browser fast-forward (dt ≈ 2083 s) the integrator steps the point
+        // mass far past the surface, so its post-step velocity is WRONG — depositing an impact from it
+        // inflates the energy (the "large percentage of debris escapes" bug). `contact_velocity` must
+        // recover the true speed from the conservation laws, no matter the step size.
+        let m_earth = 5.972e24;
+        let m_moon = 7.342e22;
+        let contact = 6.371e6 + 1.737e6;
+        let d = 3.844e8;
+        let mu = G * (m_earth + m_moon);
+        let v_true = (2.0 * mu * (1.0 / contact - 1.0 / d)).sqrt();
+
+        let mut bodies = vec![
+            Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: m_earth },
+            Body { pos: DVec3::new(d, 0.0, 0.0), vel: DVec3::ZERO, mass: m_moon },
+        ];
+        let mut acc = accelerations(&bodies);
+        let dt = 2.0e6 / 60.0 / 16.0; // the browser's max fast-forward substep
+        for _ in 0..4000 {
+            let rel_old = bodies[1].pos - bodies[0].pos;
+            let vel_old = bodies[1].vel - bodies[0].vel;
+            verlet_step(&mut bodies, &mut acc, dt);
+            let rel_new = bodies[1].pos - bodies[0].pos;
+            if let Some(t) = swept_first_contact(rel_old, rel_new, contact) {
+                let n_hat = (rel_old + (rel_new - rel_old) * t).normalize();
+                let recovered = contact_velocity(rel_old, vel_old, n_hat, contact, mu);
+                let sampled = (bodies[1].vel - bodies[0].vel).length(); // the garbage post-step speed
+                println!(
+                    "true {v_true:.0} m/s · recovered {:.0} m/s · post-step sample {sampled:.0} m/s",
+                    recovered.length()
+                );
+                // 2% tolerance: the residual is the coarse integrator's drift in the PRE-step state
+                // (verlet at dt≈2083 s accumulates ~1% energy error over the fall), not the recovery —
+                // vs the ~120% error of the post-step sample this replaces.
+                assert!(
+                    (recovered.length() - v_true).abs() / v_true < 0.02,
+                    "conservation-law recovery matches the analytic contact speed \
+                     (got {:.0} vs {v_true:.0} m/s)",
+                    recovered.length()
+                );
+                assert!(
+                    recovered.dot(n_hat) < 0.0,
+                    "the recovered velocity points INTO the surface (it is arriving)"
+                );
+                return;
+            }
+        }
+        panic!("the dropped moon never contacted");
     }
 
     #[test]

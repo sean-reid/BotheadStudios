@@ -26,7 +26,35 @@
 //! heightfield terrain contact (min-translation normal flips at voxel edges) — the motivation for
 //! terrain-as-matter (`docs/24`), not a granular-contact bug.
 
+use crate::materials::Material;
 use glam::DVec3;
+
+/// Build the canonical contact parameters for a grain of the given `material`, `radius`, and mass — the
+/// ONE place where "what the matter IS" becomes "how it collides". Stiffness from the real Young's
+/// modulus, normal damping from the coefficient of restitution, friction + cohesion straight from the
+/// material. The SAME `Contact`/`contact_accel` law then governs grains, debris, and planets — only the
+/// material and the scale change, never the law (docs/23, docs/24; "get the small stuff right, apply
+/// everywhere"). Per-mass form (the mass-agnostic model), so pass the grain's actual mass.
+pub fn contact_from_material(mat: &Material, radius: f64, particle_mass: f64) -> Contact {
+    let m = particle_mass.max(1.0e-30);
+    // Linear soft-sphere stiffness from the elastic modulus: force k_f = E·r (N/m); as a per-mass
+    // acceleration, k_f/m. Stiffer material or heavier grain ⇒ firmer contact — no tuned constant.
+    let stiffness = (mat.youngs_modulus as f64 * radius) / m;
+    let normal_damp = damping_for_restitution(mat.restitution as f64, stiffness);
+    // Cohesion as per-mass adhesion σ·A/m (A = grain cross-section), capped for already-fractured debris.
+    const GRANULAR_COHESION_CEIL: f64 = 5.0e4; // Pa — clay-level; loose-debris adhesion ceiling
+    let area = std::f64::consts::PI * radius * radius;
+    let cohesion = (mat.cohesion as f64).min(GRANULAR_COHESION_CEIL) * area / m;
+    Contact {
+        radius,
+        stiffness,
+        normal_damp,
+        friction: mat.friction_coefficient as f64,
+        tangent_damp: normal_damp, // regularise friction at the same scale as normal damping
+        cohesion,
+        coh_range: 0.15 * radius, // adhesion reaches a small fraction of a grain beyond touch
+    }
+}
 
 /// Contact parameters for equal-radius grains. All "stiffness/damping" are per-mass (accelerations),
 /// so the model is mass-agnostic (see the module note).
@@ -81,7 +109,13 @@ pub fn contact_accel(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) ->
         0.0
     };
     let sep = (-overlap).max(0.0); // separation beyond touch (0 while overlapping)
-    let f_coh = c.cohesion * (1.0 - sep / c.coh_range).clamp(0.0, 1.0); // adhesion, tapered over the range
+    // Adhesion, tapered over the range. Guard coh_range>0 so a cohesionless contact (coh_range=0) can't
+    // divide 0/0 → NaN while overlapping.
+    let f_coh = if c.cohesion > 0.0 && c.coh_range > 0.0 {
+        c.cohesion * (1.0 - sep / c.coh_range).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let a_n = n * (f_rep - f_coh); // net: repulsion − attraction
 
     // Tangential (Coulomb friction): oppose the slip, never exceed μ·N where N is the real contact LOAD —
@@ -98,6 +132,40 @@ pub fn contact_accel(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) ->
     };
 
     a_n + a_t
+}
+
+/// Specific DISSIPATED POWER (W/kg) of a contact pair — the mechanical energy the damping and friction
+/// terms of `contact_accel` remove per second, per unit particle mass. Energy is conserved, not
+/// destroyed (docs/20): what contact dissipation removes from motion MUST reappear as heat, and this is
+/// the accounting for it — route it into the particles' temperatures (→ emergent incandescence: matter
+/// struck hard glows because the impact heated it, not because anyone painted it orange).
+/// Mirrors `contact_accel` exactly: normal term = (spring − realised force)·v_n (covers both the damper
+/// and the push-only clamp, each ≥ 0), tangential term = |friction accel|·|slip|.
+pub fn contact_dissipation(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) -> f64 {
+    let d = pi - pj;
+    let dist = d.length();
+    let touch = 2.0 * c.radius;
+    if dist >= touch || dist < 1.0e-9 {
+        return 0.0; // dissipation only in compression contact (cohesion is conservative)
+    }
+    let n = d / dist;
+    let overlap = touch - dist;
+    let v_rel = vi - vj;
+    let v_n = v_rel.dot(n);
+    let f_rep = (c.stiffness * overlap - c.normal_damp * v_n).max(0.0);
+    // Normal: the damping (or the push-only clamp) removes (k·overlap − f_rep)·v_n ≥ 0.
+    let p_n = ((c.stiffness * overlap - f_rep) * v_n).max(0.0);
+    // Tangential: Coulomb friction opposes the slip exactly — same load (repulsion + adhesion) as the
+    // force law.
+    let f_coh = if c.cohesion > 0.0 && c.coh_range > 0.0 { c.cohesion } else { 0.0 };
+    let v_t = v_rel - n * v_n;
+    let vt_mag = v_t.length();
+    let p_t = if vt_mag > 1.0e-9 {
+        (c.tangent_damp * vt_mag).min(c.friction * (f_rep + f_coh)) * vt_mag
+    } else {
+        0.0
+    };
+    p_n + p_t
 }
 
 /// Normal damping (1/s, per unit mass) that yields coefficient of restitution `e` for a linear

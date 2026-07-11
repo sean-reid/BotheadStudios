@@ -2,83 +2,250 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
-    />
-    <title>greenfield-engine</title>
-    <!-- Critical CSS inlined so styling can't fail (e.g. via a MIME quirk) and the canvas always fills. -->
+    <!-- Discourage Safari from serving a stale document (hashed JS/wasm are cache-safe on their own). -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Integrity — an honest physics engine</title>
     <style>
+      :root {
+        --bg: #05060a;
+        --panel: rgba(12, 16, 28, 0.72);
+        --ink: #c7d6ef;
+        --ink-bright: #eaf2ff;
+        --dim: #8194b8;
+        --accent: #ffd08a;
+        --line: rgba(120, 150, 200, 0.22);
+      }
+      * {
+        box-sizing: border-box;
+      }
       html,
       body {
         margin: 0;
-        height: 100%;
-        background: #05060a;
-        overflow: hidden;
+        background: var(--bg);
+        color: var(--ink);
         font-family: ui-monospace, "SF Mono", Menlo, monospace;
         -webkit-text-size-adjust: 100%;
+        line-height: 1.65;
       }
-      #gpu-canvas {
-        display: block;
-        width: 100vw;
-        height: 100vh;
-        touch-action: none;
+      a {
+        color: var(--accent);
       }
-      #hud {
-        position: fixed;
-        top: 10px;
-        left: 12px;
-        font-size: 12px;
-        color: #9fb4d6;
-        pointer-events: none;
+      .wrap {
+        max-width: 880px;
+        margin: 0 auto;
+        padding: 0 20px 96px;
       }
-      #stats {
-        position: fixed;
-        left: 12px;
-        bottom: 12px;
-        padding: 8px 12px;
-        border-radius: 6px;
-        background: rgba(6, 10, 18, 0.72);
-        border: 1px solid rgba(120, 150, 200, 0.25);
-        font-size: 12px;
-        line-height: 1.6;
-        color: #c7d6ef;
-        pointer-events: none;
-      }
-      #stats b {
-        color: #eaf2ff;
-      }
-      #status {
-        position: fixed;
-        inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 2rem;
+      /* Hero */
+      header.hero {
+        position: relative;
+        padding: 76px 20px 56px;
         text-align: center;
-        color: #dfe8f5;
-        font-size: 16px;
-        line-height: 1.7;
+        overflow: hidden;
+        border-bottom: 1px solid var(--line);
+        background:
+          radial-gradient(1200px 420px at 50% -120px, rgba(90, 120, 220, 0.22), transparent 70%),
+          radial-gradient(600px 300px at 80% 0, rgba(255, 180, 120, 0.1), transparent 70%);
       }
-      #status.err {
-        color: #ffd7d7;
-        background: #1a0d10;
+      .brand {
+        font-size: clamp(40px, 9vw, 76px);
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        color: var(--ink-bright);
+        margin: 0;
       }
-      [hidden] {
-        display: none !important;
+      .tagline {
+        font-size: clamp(15px, 2.6vw, 19px);
+        color: var(--dim);
+        margin: 10px 0 0;
       }
-      kbd {
-        padding: 0 4px;
-        border: 1px solid rgba(160, 180, 220, 0.4);
-        border-radius: 3px;
+      .cta {
+        display: inline-block;
+        margin-top: 30px;
+        padding: 14px 26px;
+        font: 700 17px/1 ui-monospace, monospace;
+        color: #0b0e18;
+        background: var(--accent);
+        border-radius: 12px;
+        text-decoration: none;
+        box-shadow: 0 6px 30px rgba(255, 208, 138, 0.28);
+        transition: transform 0.1s ease;
+      }
+      .cta:active {
+        transform: translateY(1px);
+      }
+      .scenes {
+        margin-top: 18px;
+        font-size: 14px;
+        color: var(--dim);
+      }
+      .scenes a {
+        color: var(--ink);
+        text-decoration: none;
+        padding: 6px 12px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        display: inline-block;
+        margin: 4px 3px;
+      }
+      /* Prose */
+      section.intro {
+        padding: 44px 0 8px;
+      }
+      section.intro h2 {
+        color: var(--ink-bright);
+        font-size: 22px;
+        margin: 34px 0 10px;
+      }
+      section.intro p {
+        margin: 12px 0;
+      }
+      .lede {
+        font-size: 18px;
+        color: var(--ink-bright);
+      }
+      .principles {
+        list-style: none;
+        padding: 0;
+        margin: 16px 0;
+        display: grid;
+        gap: 12px;
+      }
+      .principles li {
+        padding: 14px 16px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+      .principles b {
+        color: var(--accent);
+      }
+      /* Journal */
+      section.journal {
+        margin-top: 40px;
+        border-top: 1px solid var(--line);
+        padding-top: 28px;
+      }
+      section.journal > h2 {
+        color: var(--ink-bright);
+        font-size: 22px;
+      }
+      #journal-body h1 {
+        display: none;
+      }
+      #journal-body h2 {
+        color: var(--ink-bright);
+        font-size: 18px;
+        margin: 30px 0 6px;
+        padding-top: 18px;
+        border-top: 1px solid var(--line);
+      }
+      #journal-body h3 {
+        color: var(--ink-bright);
+        font-size: 15px;
+        margin: 18px 0 4px;
+      }
+      #journal-body b,
+      #journal-body strong {
+        color: var(--ink-bright);
+      }
+      #journal-body code {
+        background: rgba(120, 150, 200, 0.14);
+        padding: 1px 5px;
+        border-radius: 5px;
+        font-size: 0.92em;
+      }
+      #journal-body hr {
+        display: none;
+      }
+      #journal-body ul {
+        padding-left: 20px;
+      }
+      #journal-body table {
+        border-collapse: collapse;
+        margin: 12px 0;
+        font-size: 0.92em;
+        display: block;
+        overflow-x: auto;
+      }
+      #journal-body td,
+      #journal-body th {
+        border: 1px solid var(--line);
+        padding: 6px 10px;
+        text-align: left;
+      }
+      .foot {
+        margin-top: 48px;
+        padding-top: 20px;
+        border-top: 1px solid var(--line);
+        color: var(--dim);
+        font-size: 13px;
+        display: flex;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 8px;
       }
     </style>
   </head>
   <body>
-    <canvas id="gpu-canvas"></canvas>
-    <div id="hud">greenfield-engine · phase 5 · tap dig · long-press blast</div>
-    <div id="stats" hidden></div>
-    <div id="status">Loading greenfield-engine…</div>
-    <script type="module" src="/src/main.ts"></script>
+    <header class="hero">
+      <h1 class="brand">Integrity</h1>
+      <p class="tagline">A physics engine where the physics is <em>real</em> — no fudge, at any level.</p>
+      <a class="cta" href="/orbit.html">🚀 Launch WIP demo</a>
+      <div class="scenes">
+        or pick a scene: <a href="/orbit.html">Space (Earth + Moon)</a>
+        <a href="/terrain.html">Terrain</a> <a href="/twomoons.html">Two Moons</a>
+      </div>
+    </header>
+
+    <div class="wrap">
+      <section class="intro">
+        <p class="lede">
+          Integrity is an experiment: build a browser physics engine from the matter up, model real
+          materials faithfully, and let the laws of physics <em>emerge</em> — never script them.
+        </p>
+        <p>
+          Most engines fake it. A crate falls because someone wrote "make crates fall"; a wall shatters
+          because a designer authored the pieces. Integrity refuses that. There is one rule — real matter
+          with real properties, integrated honestly through time — and everything else is a
+          <em>consequence</em>: an object falls because it is unsupported; rock breaks only when stress
+          exceeds its strength; a dropped Moon shatters because the impact energy dwarfs its binding energy.
+        </p>
+        <ul class="principles">
+          <li>
+            <b>Emergent, not scripted.</b> Kepler orbits, escape velocity, the angle a pile of sand
+            holds, crater scaling — all fall out of particle physics, none are coded as rules.
+          </li>
+          <li>
+            <b>Faithful to declared physics.</b> The parameters (G, a planet's mass, a material's
+            density and strength) declare <em>real</em> physics. The engine's job is to honour them
+            exactly — not to approximate for convenience.
+          </li>
+          <li>
+            <b>A learning tool, not just a game engine.</b> If the physics is honest, you can
+            <em>re-derive</em> it by playing — a child (and, one day, an embodied AI) could discover the
+            laws of nature from inside the simulation. A fudged engine teaches wrong physics.
+          </li>
+        </ul>
+        <p>
+          It's early and rough — this is a work in progress, built in the open. The log below is the real
+          engineering journal: what changed, why, and how it was verified.
+        </p>
+      </section>
+
+      <section class="journal">
+        <h2>Development journal</h2>
+        <div id="journal-body">Loading journal…</div>
+      </section>
+
+      <div class="foot">
+        <span>Integrity Game Engine · Bothead Studios</span>
+        <span id="build-stamp"></span>
+      </div>
+    </div>
+
+    <script type="module" src="/src/landing.ts"></script>
   </body>
 </html>

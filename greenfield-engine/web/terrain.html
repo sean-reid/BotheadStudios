@@ -10,8 +10,8 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
     />
-    <title>greenfield-engine · space band (Earth + Moon)</title>
-    <!-- Critical CSS inlined so styling can't fail and the canvas always fills. Mirrors index.html. -->
+    <title>Integrity · Terrain</title>
+    <!-- Critical CSS inlined so styling can't fail (e.g. via a MIME quirk) and the canvas always fills. -->
     <style>
       html,
       body {
@@ -71,13 +71,18 @@
       [hidden] {
         display: none !important;
       }
+      kbd {
+        padding: 0 4px;
+        border: 1px solid rgba(160, 180, 220, 0.4);
+        border-radius: 3px;
+      }
     </style>
   </head>
   <body>
     <canvas id="gpu-canvas"></canvas>
-    <div id="hud">greenfield-engine · space band · real Earth + Moon · drag orbit · pinch zoom</div>
+    <div id="hud">greenfield-engine · phase 5 · tap dig · long-press blast</div>
     <div id="stats" hidden></div>
     <div id="status">Loading greenfield-engine…</div>
-    <script type="module" src="/src/orbit.ts"></script>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

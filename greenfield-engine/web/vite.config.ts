@@ -88,13 +88,32 @@ function logRelay(): Plugin {
 // Default (no LAN): plain http on 127.0.0.1 only — reach it via an SSH tunnel.
 const lan = process.env.LAN === "1";
 
+// A human-readable build stamp, computed once when this config is loaded (i.e. per `npm run build` and
+// per dev-server start). Injected as the global `__BUILD_ID__` and shown in the HUD, so we can tell at a
+// glance whether the browser is running the code we just shipped — the antidote to Safari serving a stale
+// cache. Format: YYYYMMDD.HHMMSS (sortable). (Node context here, so `new Date()` is fine.)
+const pad = (n: number): string => String(n).padStart(2, "0");
+const now = new Date();
+const BUILD_ID =
+  `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+  `.${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+// Belt-and-suspenders cache defeat for Safari: the built JS/CSS/wasm are content-hashed (safe to cache
+// forever), but a stale HTML or a stable-URL dev wasm will pin old code. Tell the dev AND preview servers
+// to never store anything, so every refresh re-fetches. (A static host still needs no-cache on *.html;
+// the hashed assets take care of themselves.)
+const NO_STORE = { "Cache-Control": "no-store, max-age=0" };
+
 export default defineConfig({
   assetsInclude: ["**/*.wasm"],
+  define: { __BUILD_ID__: JSON.stringify(BUILD_ID) },
   plugins: [logRelay(), shotSink(), ...(lan ? [basicSsl()] : [])],
+  preview: { headers: NO_STORE },
   server: {
     host: lan ? true : "127.0.0.1",
     port: 5173,
     strictPort: true,
+    headers: NO_STORE,
     // Don't hot-reload when a screenshot is written into web/shots — that was reloading (and
     // "crashing") the app every time the 📷 button fired.
     watch: { ignored: ["**/shots/**"] },
@@ -108,9 +127,10 @@ export default defineConfig({
   },
   build: {
     rollupOptions: {
-      // Multi-page: the terrain slice (index), the space band (orbit), the two-moon stress test.
+      // Multi-page: the landing page (index), the terrain slice, the space band (orbit), the two-moon test.
       input: {
         main: resolve(root, "index.html"),
+        terrain: resolve(root, "terrain.html"),
         orbit: resolve(root, "orbit.html"),
         twomoons: resolve(root, "twomoons.html"),
       },
