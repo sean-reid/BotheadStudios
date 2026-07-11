@@ -5,6 +5,35 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — Swept collision (forecast the path): the dropped Moon no longer TUNNELS through Earth
+
+**What.** The dropped Moon was shooting straight through the Earth and never colliding. Root cause (Robin
+diagnosed it exactly): in fast-forward the Moon moves > an Earth-diameter per step, so the DISCRETE
+contact test (are the surfaces overlapping *this* sample?) sees it outside at both samples and misses the
+collision entirely — the trajectory was effectively faked, riding on a detection that never fires.
+Fixed with **swept continuous collision detection**: `orbit::swept_first_contact(rel_old, rel_new, r_sum)`
+solves for the fraction `t∈[0,1]` at which the body's straight path FIRST enters the contact sphere —
+*when* it hits — regardless of step size. `OrbitDemo::render` now captures each moon's pre-step position,
+runs the swept test after the step, and intervenes at the first-contact point (parking the point mass
+there and, for moon 0, triggering the Stage-A shatter at the true impact site/energy).
+
+**Why.** Robin: *"forecast with the simulation (know what will happen in real physics), model it with the
+visuals"* and *"there is a difference between what we can render and what we can simulate."* The
+simulation must KNOW the continuous path intersects the planet even when we sample/render it coarsely —
+what we simulate must not depend on how coarsely we look. And: *"get the small stuff right, APPLY
+EVERYWHERE"* — `swept_first_contact` is a pure-geometry primitive (segment vs. sphere), not orbit-specific.
+The SAME tunneling is why the grain sim caps the vapor front at `V_MAX` (a workaround); CCD is the honest
+general fix there too — flagged as the next application of this primitive to the granular contact.
+
+**Verified.** `orbit::swept_contact_catches_a_body_that_tunnels_through_the_planet` (a −5→+5 pass through
+the centre — both endpoints outside — is caught at t=0.4; a clearing path is `None`; already-inside is
+t=0). `cargo test -p engine` 65/65; wasm builds. The Moon-collides VISUAL still needs on-device eyes.
+
+**Open.** Apply CCD to the GPU granular contact (replace the `V_MAX` ejecta-speed cap) — the same
+primitive, the "everywhere". And the Stage-A shatter visual + Stage B zoom-in remain to verify/build.
+
+---
+
 ## 2026-07-11 — Moon-shot Stage A: the dropped Moon SHATTERS (emergent), instead of merging
 
 **What.** In the space band (`OrbitDemo`), the de-orbited Moon now **shatters into a debris cloud** on

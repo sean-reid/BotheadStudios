@@ -2061,30 +2061,50 @@ mod app {
             let dt = sim_dt / ORBIT_SUBSTEPS as f64;
             let contact = EARTH_RADIUS_M + MOON_RADIUS_M; // Earth + Moon radii: surfaces touch here
             let mut shatter: Option<(glam::DVec3, glam::DVec3, f64)> = None; // (site, momentum, energy)
+            let n_moons = self.bodies.len() - 2;
             for _ in 0..ORBIT_SUBSTEPS {
+                // Positions RELATIVE to Earth BEFORE the step, for swept CCD (below).
+                let earth_before = self.bodies[1].pos;
+                let rel_old: Vec<glam::DVec3> =
+                    (0..n_moons).map(|k| self.bodies[2 + k].pos - earth_before).collect();
+
                 crate::orbit::verlet_step(&mut self.bodies, &mut self.acc, dt);
-                // Earth (index 1) vs each moon (index 2..): solid bodies collide at their surfaces —
-                // they don't tunnel through each other as point masses into a 1/r² singularity. Each
-                // moon's impact energy is counted once (the two-moon scene sums both).
+
+                // SWEPT continuous collision (the general "forecast the path" primitive): in fast-forward a
+                // moon moves > an Earth-diameter per step and would TUNNEL straight through — the discrete
+                // overlap test misses it entirely. Detect the crossing on the continuous path and intervene
+                // at the first-contact point. (docs/13: what we simulate ≠ how coarsely we sample/render.)
+                let (earth_pos, earth_vel) = (self.bodies[1].pos, self.bodies[1].vel);
+                for k in 0..n_moons {
+                    if self.moon_hit[k] {
+                        continue;
+                    }
+                    let moon = self.bodies[2 + k];
+                    let rel_new = moon.pos - earth_pos;
+                    if let Some(t) = crate::orbit::swept_first_contact(rel_old[k], rel_new, contact) {
+                        self.moon_hit[k] = true;
+                        self.impacted = true;
+                        let rel_vel = moon.vel - earth_vel; // incoming velocity relative to Earth
+                        let energy = crate::orbit::inelastic_dissipation(&self.bodies[1], &moon);
+                        self.impact_energy_j += energy;
+                        // First-contact point on Earth's surface (world coords), from the path fraction t.
+                        let site = earth_pos + rel_old[k] + (rel_new - rel_old[k]) * t;
+                        if k == 0 && shatter.is_none() {
+                            shatter = Some((site, rel_vel * moon.mass, energy)); // shatter this moon
+                        }
+                        // Park the point mass AT the impact point, co-moving with Earth, so it stops here
+                        // (it has hit) instead of tunnelling on to the far side.
+                        self.bodies[2 + k].pos = site;
+                        self.bodies[2 + k].vel = earth_vel;
+                    }
+                }
+
+                // Keep already-hit / overlapping bodies parked at the surface (the slow-approach case and
+                // the ongoing merge — the heavier Earth barely moves; momentum conserved).
                 let (head, tail) = self.bodies.split_at_mut(2);
                 let earth = &mut head[1];
-                for (k, moon) in tail.iter_mut().enumerate() {
-                    // Measure the impact energy BEFORE the (energy-removing) contact resolution — honest
-                    // damage reporting (docs/17).
-                    let dissipated = crate::orbit::inelastic_dissipation(earth, moon);
-                    let rel_vel = moon.vel - earth.vel; // incoming velocity, before contact resolution
-                    if crate::orbit::resolve_contact(earth, moon, contact) {
-                        if !self.moon_hit[k] {
-                            self.moon_hit[k] = true;
-                            self.impact_energy_j += dissipated;
-                            // Stage A (docs/23): shatter the first moon to strike — capture its impact
-                            // site, incoming momentum, and energy to disperse it as real matter.
-                            if k == 0 && shatter.is_none() {
-                                shatter = Some((moon.pos, rel_vel * moon.mass, dissipated));
-                            }
-                        }
-                        self.impacted = true;
-                    }
+                for moon in tail.iter_mut() {
+                    crate::orbit::resolve_contact(earth, moon, contact);
                 }
             }
 

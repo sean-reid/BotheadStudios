@@ -130,6 +130,38 @@ pub fn resolve_contact(a: &mut Body, b: &mut Body, r_sum: f64) -> bool {
     true
 }
 
+/// **Swept (continuous) first-contact** — the honest fix for a FAST body TUNNELLING through the planet
+/// in one big step (fast-forward), which the discrete `resolve_contact` (are-surfaces-overlapping-*this*-
+/// -sample?) misses entirely: the body jumps from outside to outside and the collision is never seen.
+/// Given a body's position RELATIVE to the planet centre before (`rel_old`) and after (`rel_new`) a step,
+/// this returns the fraction `t ∈ [0,1]` of the step at which its straight path FIRST enters the contact
+/// sphere of radius `r_sum` — i.e. *when* it hits — or `None` if the path never reaches the planet. The
+/// simulation FORECASTS the collision on the continuous trajectory; what we simulate must not depend on
+/// how coarsely we sample or render it (Robin; docs/13's "render ≠ simulate", docs/24 hard-problem #1).
+pub fn swept_first_contact(rel_old: DVec3, rel_new: DVec3, r_sum: f64) -> Option<f64> {
+    // Solve |rel_old + t·(rel_new − rel_old)|² = r_sum² for the first t ∈ [0,1].
+    let delta = rel_new - rel_old;
+    let a = delta.length_squared();
+    let c = rel_old.length_squared() - r_sum * r_sum;
+    if c <= 0.0 {
+        return Some(0.0); // already inside the planet at the start of the step
+    }
+    if a < 1.0e-6 {
+        return None; // not moving and not already inside ⇒ no contact
+    }
+    let b = 2.0 * rel_old.dot(delta);
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return None; // the straight path never reaches the sphere
+    }
+    let t = (-b - disc.sqrt()) / (2.0 * a); // smaller root = first entry
+    if (0.0..=1.0).contains(&t) {
+        Some(t)
+    } else {
+        None // the path's closest approach is outside this step's [0,1] window
+    }
+}
+
 /// Kinetic energy (J) a perfectly-inelastic collision between two bodies would dissipate: ½·μ·|Δv|²
 /// with reduced mass μ = m_a·m_b/(m_a+m_b). This is the energy that *must* go somewhere real — heat,
 /// fracture, melt, ejecta. Our contact resolution currently removes it without modelling where it
@@ -430,6 +462,28 @@ mod tests {
         assert!(
             ke > 10.0 * bind,
             "impact energy dwarfs the Moon's binding energy (ke {ke:.3e}, bind {bind:.3e})"
+        );
+    }
+
+    #[test]
+    fn swept_contact_catches_a_body_that_tunnels_through_the_planet() {
+        // The fast-forward bug: a body leaps from one side of the planet to the other in ONE step. The
+        // discrete overlap test sees it outside at both samples and MISSES the collision; the swept test
+        // finds the crossing on the continuous path — forecast, not sample.
+        let r_sum = 1.0;
+        // Straight through the centre, −5 → +5: both endpoints are outside (dist 5), yet it clearly hits.
+        let t = swept_first_contact(DVec3::new(-5.0, 0.0, 0.0), DVec3::new(5.0, 0.0, 0.0), r_sum)
+            .expect("a body tunnelling through the planet must be caught");
+        assert!((t - 0.4).abs() < 1.0e-6, "first contact at the near surface (x=−1 ⇒ t=0.4), got {t}");
+        // A genuine miss: passes to the side (y = 3, never within r_sum = 1) ⇒ None.
+        assert!(
+            swept_first_contact(DVec3::new(-5.0, 3.0, 0.0), DVec3::new(5.0, 3.0, 0.0), r_sum).is_none(),
+            "a path that clears the planet is not a collision"
+        );
+        // Already inside at the start ⇒ t = 0.
+        assert_eq!(
+            swept_first_contact(DVec3::new(0.5, 0.0, 0.0), DVec3::new(0.6, 0.0, 0.0), r_sum),
+            Some(0.0)
         );
     }
 }
