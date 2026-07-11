@@ -168,48 +168,89 @@ impl Aggregate {
     /// Whether the aggregate then **survives or shatters is emergent** — it falls out of the kick vs the
     /// self-gravity that binds it (run `step` and watch `rms_radius`). Energy-conserving deposit
     /// (`Σ eᵢ·Vᵢ = energy`).
-    pub fn deposit_impact(&mut self, materials: &[Material], site: DVec3, dir: DVec3, energy: f64) {
+    /// Couple an impact into the aggregate **honestly** — the SAME physics as the terrain (`docs/24`),
+    /// no scripted ejecta kick. The impactor delivers `momentum` (kg·m/s) and `energy` (J) at `site`:
+    ///   1. **Momentum impulse** on the coupling core (particles within λ of the contact): the real
+    ///      momentum, spread so `Σ mᵢ·Δv = momentum`. Only the near particles are shoved, so the core
+    ///      tears away from the rest — spall/fracture emerges from the differential motion over-straining
+    ///      bonds, not a magic speed.
+    ///   2. **Shock heat** (the energy the impulse didn't turn into motion) with a radial gradient — core
+    ///      hot (glows), rim cold.
+    ///   3. **Vapor expansion**: matter heated past full vaporization flashes to gas and expands, throwing
+    ///      ejecta radially (thermal → kinetic, conserved). This is the dominant destroyer at
+    ///      hypervelocity — and it does nothing when the energy can't vaporize (an 890-t ball vs a pebble
+    ///      just recoils and scars), which is the honest outcome.
+    /// Whether the aggregate dents, spalls, or shatters then falls out of its own bond strengths.
+    pub fn deposit_impact(&mut self, materials: &[Material], site: DVec3, momentum: DVec3, energy: f64) {
         if self.particles.is_empty() {
             return;
         }
-        let dir = dir.normalize_or_zero();
         let mat = &materials[self.material];
         let density = (mat.density as f64).max(1.0);
-        let c = mat
-            .thermal
-            .as_ref()
-            .map_or(1000.0, |t| t.specific_heat as f64);
+        let c = mat.thermal.as_ref().map_or(1000.0, |t| t.specific_heat as f64);
         let vapor = crate::damage::vapor_energy_density(mat);
-
-        // Coupling length ~ half the cloud's spread, so the energy concentrates near the contact.
+        // Coupling length ~ half the cloud's spread, so the impact concentrates near the contact.
         let lambda = (self.rms_radius() * 0.5).max(1.0);
-        // Energy-conserving peak density: Σ eᵢ·Vᵢ = energy, with eᵢ = e0·exp(−dᵢ/λ), Vᵢ = mᵢ/ρ.
+
+        // 1. MOMENTUM impulse on the coupling core — the mechanical shock, momentum-conserving.
+        let core: Vec<usize> = (0..self.particles.len())
+            .filter(|&i| (self.particles[i].pos - site).length() <= lambda)
+            .collect();
+        let mut bulk_ke = 0.0;
+        if !core.is_empty() {
+            let m_total: f64 = core.iter().map(|&i| self.particles[i].mass.max(1.0e-6)).sum();
+            let dv = momentum / m_total; // Σ mᵢ·Δv = momentum
+            for &i in &core {
+                self.particles[i].vel += dv;
+            }
+            bulk_ke = 0.5 * m_total * dv.length_squared();
+        }
+
+        // 2. SHOCK HEAT — the rest of the energy, radial gradient (Σ eᵢ·Vᵢ = heat, eᵢ = e0·exp(−dᵢ/λ)).
+        let heat = (energy - bulk_ke).max(0.0);
         let wsum: f64 = self
             .particles
             .iter()
             .map(|p| (-(p.pos - site).length() / lambda).exp() * (p.mass / density))
             .sum();
-        if wsum <= 0.0 {
-            return;
+        if wsum > 0.0 {
+            let e0 = heat / wsum;
+            for (p, temp) in self.particles.iter_mut().zip(self.temps.iter_mut()) {
+                let e_i = e0 * (-(p.pos - site).length() / lambda).exp();
+                *temp += (e_i / (density * c)) as f32;
+            }
         }
-        let e0 = energy / wsum;
 
-        for (p, temp) in self.particles.iter_mut().zip(self.temps.iter_mut()) {
-            let off = p.pos - site;
-            let d = off.length();
-            let e_i = e0 * (-d / lambda).exp(); // J/m³ deposited in this particle
-            *temp += (e_i / (density * c)) as f32; // temperature rise
-
-            // Velocity kick from the deposited energy density (shock): v ~ √(2·frac·e/ρ), outward from
-            // the contact and along the impactor. Vaporized parcels are gas/plasma → they expand faster.
-            let mut speed = (2.0 * 0.3 * e_i / density).sqrt();
-            if let Some(ev) = vapor {
-                if e_i >= ev {
-                    speed *= 3.0;
+        // 3. VAPOR EXPANSION — superheat past vaporization → radial ejecta KE (thermal → kinetic).
+        if let Some(ev) = vapor {
+            let mut e_expand = 0.0;
+            for (p, temp) in self.particles.iter_mut().zip(self.temps.iter_mut()) {
+                let e_th = density * c * (*temp as f64 - REF_TEMP_K as f64); // J/m³
+                let excess = e_th - ev;
+                if excess > 0.0 {
+                    e_expand += excess * (p.mass / density); // × volume ⇒ J
+                    *temp -= (excess / (density * c)) as f32; // adiabatic cooling of the vapor
                 }
             }
-            let kick = (off.normalize_or_zero() * 0.6 + dir * 0.4).normalize_or_zero();
-            p.vel += kick * speed;
+            if e_expand > 0.0 {
+                let shell_r = lambda * 0.25;
+                let m_shell: f64 = self
+                    .particles
+                    .iter()
+                    .filter(|p| (p.pos - site).length() > shell_r)
+                    .map(|p| p.mass.max(1.0e-6))
+                    .sum();
+                if m_shell > 0.0 {
+                    let v0 = (2.0 * e_expand / m_shell).sqrt(); // Σ½mv₀² over shell = E_expand
+                    for p in &mut self.particles {
+                        let radial = p.pos - site;
+                        let r = radial.length();
+                        if r > shell_r {
+                            p.vel += (radial / r) * v0;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -535,7 +576,18 @@ mod tests {
         let bind = agg.binding_energy();
         let site = agg.com(); // strike the centre
 
-        agg.deposit_impact(&mats, site, DVec3::NEG_Y, 100.0 * bind);
+        // Momentum sized so the core's mechanical KE ≈ 10× binding (it unbinds) while most of the energy
+        // still lands as heat (so the radial gradient shows). Honest coupling — the same momentum + heat
+        // + vapor pipeline as the terrain; the shatter is emergent (core tears loose from self-gravity).
+        let lambda = agg.rms_radius() * 0.5;
+        let m_core: f64 = agg
+            .particles
+            .iter()
+            .filter(|p| (p.pos - site).length() <= lambda)
+            .map(|p| p.mass)
+            .sum();
+        let p_mag = (20.0 * m_core * bind).sqrt(); // ½·p²/m_core = 10·bind
+        agg.deposit_impact(&mats, site, DVec3::NEG_Y * p_mag, 100.0 * bind);
 
         let hottest = agg.temps.iter().cloned().fold(0.0f32, f32::max);
         let coldest = agg.temps.iter().cloned().fold(f32::MAX, f32::min);

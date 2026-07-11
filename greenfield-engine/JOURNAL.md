@@ -5,6 +5,62 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — Emergent impact end-to-end: momentum-conserving contact, terrain-as-matter, drag fudge deleted
+
+**What.** A long arc turning the impact from scripted fudges into emergent particle physics (`docs/24`),
+capped by a foundational test suite that caught a core-model bug and a fix that scaled the whole thing.
+
+- **Terrain-as-matter (Path B).** The meteor no longer carves a crater and scripts ejecta velocity. It
+  MATERIALIZES the impact region into grains at rest (`matter::materialize_region`), deposits the
+  meteor's real momentum as an impulse (`deposit_impulse`), and the rest of ½mv² as radial-gradient
+  **shock heat** (`deposit_shock_heat`, filled core-first so a sub-grain impactor's energy actually
+  vaporizes a plasma core instead of smearing below threshold). Vaporized matter **expands** and throws
+  the ejecta (`deposit_vapor_expansion`) — Robin's insight that at 17 km/s the crater is driven by phase
+  transition (gas pressure), not elastic rebound; the KE was already in the sim as shock heat we were
+  radiating away. Added estimated thermal data for the granular soils (they couldn't vaporize before).
+- **Momentum-conserving contact solve (the core fix).** A two-particle test (`gpu-verify` F5) exposed
+  that the directional-implicit solver damped each grain's ABSOLUTE velocity, so a 20 m/s head-on
+  collision lost ~74% of its momentum — hidden by every pile/crater scene (slow ⇒ ~0 COM velocity).
+  Fixed by a derived neighbor-coupling term `Sv_nbr = Σ S·v_neighbor` in the RHS; the pair's COM velocity
+  now telescopes to conserved. This alone made stepped terrain conserve energy and DEEPENED the emergent
+  crater ~5× (3 m → 14.7 m) — ejecta finally keep their momentum.
+- **Conservative terrain + steep materialization.** Replaced the min-translation terrain penalty (whose
+  normal FLIPPED at voxel edges, injecting energy) with a smooth bilinear surface and the exact −∇U
+  penalty. Vertical walls a heightfield still can't represent become grains
+  (`materialize_steep_terrain`) — but only where the material is too weak to hold a cliff (critical
+  height ≈ σ/ρg): dirt slumps to talus, **granite holds as a real cliff** (Robin's antithesis, emergent
+  from strength).
+- **DRAG FUDGE DELETED** (`matter::DRAG` 0.9995 → 1.0). It bled 62%/s of a vacuum particle's speed
+  (foundational test) and was masking the non-conservative terrain; with the three fixes above the core
+  no longer needs it — a vacuum particle keeps its momentum.
+- **Everything couples honestly.** `aggregate::deposit_impact` (probe/bodies) rewritten to the SAME
+  pipeline (momentum + heat + vapor) — the last scripted `√(2·0.3·e/ρ)` kick is gone; the meteor couples
+  into EVERY body via `couple_impact_to_bodies`, not a hardcoded probe. Removed the cosmetic
+  `spawn_vaporized_meteor` (a scripted 22 m/s clump that looked like an intact meteor and double-counted
+  momentum). Restitution is now derived from `Material::restitution` via a θ-method contact integrator.
+
+**Why.** Robin's directives drove it: *"trust physics; hunt for what we're missing, don't fudge"*;
+*"crater size should be emergent and observable, not imposed"*; *"a meteor is an exaggerated test of the
+same physics as a footfall or a feather"*; *"no fudge in the core models"*; and the clincher — *"test
+every aspect of the fundamental interactions of particles; get the small stuff right and the universe
+scales."* The foundational suite proved it: a two-particle collision plus a derivation beat the solver
+that "looked stable and passed every scene."
+
+**Verified (RTX 2070 headless + native).** New `gpu-verify` foundational block F1–F7 (Newton's 1st/2nd/
+3rd, momentum-conserving collision, friction≈μg, touching↔separated sweep) all PASS in true vacuum;
+grain-grain energy conservation (I-flat), stepped-terrain conservation (I), emergent crater (M, 14.7 m
+deep). `cargo test -p engine` 63/63; wasm builds. New native tests: materialize/impulse/shock-heat/vapor
+conservation, steep-terrain materialization + the granite-cliff antithesis, restitution→damping.
+
+**Open (honest, flagged).** (1) A granite cliff a heightfield still can't contact conservatively should
+become a COHESIVE aggregate (grains + bonds) — rigid AND conservative. (2) Friction runs ~35% strong
+(F6 ratio 1.35 vs μg) — the same over-sticky friction behind the repose under-/over-prediction (scene
+D). (3) Crater size is LOD-capped (materialize cap) below the physical scale. (4) Dissipated energy →
+heat → radiation still dropped (flagged in-shader). (5) Soil thermal values are composition estimates,
+not cited.
+
+---
+
 ## 2026-07-09 — North star + a reverted fudge; the engine's name: "Integrity"
 
 **What.** While bringing GPU debris up (docs/22), a play-test exposed that a meteor doesn't destroy the

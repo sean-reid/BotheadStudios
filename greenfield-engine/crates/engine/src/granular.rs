@@ -13,8 +13,18 @@
 //! the GPU step has no per-particle mass, so we model all debris as equal-mass grains — a documented
 //! approximation, honest as long as it is flagged. Per-material mass is a later refinement.
 //!
-//! This module is the *physics of record*, verified natively; `shaders/particle_step.wgsl` mirrors
-//! `contact_accel` exactly on the GPU (kept in sync by construction).
+//! This module is the *physics of record* — the continuous contact **force law** (spring + damper +
+//! Coulomb friction), verified natively. `shaders/particle_step.wgsl` integrates this *same* force law
+//! on the GPU, but reorganizes it for stable integration (`docs/24` Stage 0): the normal DAMPING and the
+//! spring are moved into a directional **implicit** solve — a per-grain stiffness/damping tensor
+//! `S = Σ(dt²k + dt·c)(n⊗n)` — so stiff contacts at high coordination can't inject energy (explicit
+//! damping overshoots and pumps energy once `Z·c·dt` nears 2). The GPU also clamps the friction impulse
+//! at `|v_t|/dt` so friction can only halt a slip, never reverse it (another discrete anti-injection
+//! guard). Both are integrator-level and agree with this force law as `dt → 0`; they are NOT new physics.
+//! Net result, verified on real hardware (`tools/gpu-verify` scene I-flat): grain-grain contact
+//! **conserves energy** (mechanical energy only falls). The one remaining energy injector is the lossy
+//! heightfield terrain contact (min-translation normal flips at voxel edges) — the motivation for
+//! terrain-as-matter (`docs/24`), not a granular-contact bug.
 
 use glam::DVec3;
 
@@ -73,9 +83,39 @@ pub fn contact_accel(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) ->
     a_n + a_t
 }
 
+/// Normal damping (1/s, per unit mass) that yields coefficient of restitution `e` for a linear
+/// spring–dashpot contact of stiffness `k` (`docs/24` Stage 1). Invert the textbook relation
+/// `e = exp(−ζπ/√(1−ζ²))` to `ζ = −ln e / √(π² + ln²e)` (ζ = fraction of critical damping), then
+/// `c = 2ζ√k` (critical damping is `2√(km)`, m = 1 in the mass-agnostic model). So `e = 1` → `c = 0`
+/// (perfectly elastic), and less-bouncy matter gets more damping. This makes how bouncy a contact is a
+/// **material property**, not a dial — the source of truth is `Material::restitution`. NOTE: the stable
+/// θ-solver in the shader adds a little numerical dissipation on top, so the realized restitution is
+/// somewhat below `e` (a documented approximation, verified by the bounce test in `tools/gpu-verify`).
+pub fn damping_for_restitution(e: f64, stiffness: f64) -> f64 {
+    let e = e.clamp(1.0e-3, 0.999);
+    let l = -e.ln();
+    let zeta = l / (std::f64::consts::PI.powi(2) + l * l).sqrt();
+    2.0 * zeta * stiffness.sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restitution_damping_is_monotone_and_matches_the_calibration() {
+        let k = 5.0e5;
+        // Bouncier material ⇒ less damping. Perfectly elastic ⇒ zero damping.
+        let c_bouncy = damping_for_restitution(0.8, k);
+        let c_dead = damping_for_restitution(0.2, k);
+        assert!(c_dead > c_bouncy, "less-bouncy matter is damped harder");
+        assert!(damping_for_restitution(0.999, k) < 5.0, "≈elastic ⇒ ≈no damping");
+        // Granite (e=0.80) reproduces the hand-calibrated c≈100 the contact was using — a sanity anchor.
+        assert!(
+            (c_bouncy - 100.0).abs() < 6.0,
+            "granite e=0.80 ⇒ c≈100 (got {c_bouncy:.1})"
+        );
+    }
 
     fn params() -> Contact {
         Contact {

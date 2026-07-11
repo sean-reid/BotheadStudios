@@ -52,6 +52,10 @@ struct RawMechanical {
     /// friction, from which the angle of repose emerges (`docs/23`).
     #[serde(default)]
     friction_coefficient: Option<f32>,
+    /// Coefficient of restitution e (0 = perfectly inelastic, 1 = perfectly elastic). Drives the
+    /// contact normal damping — how much of a collision's energy rebounds vs. dissipates (`docs/24`).
+    #[serde(default)]
+    restitution: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -112,6 +116,12 @@ pub struct Material {
     /// but the goal is to DERIVE it from contact-bond mechanics at finer scale (`docs/23`'s emergent
     /// static-vs-kinetic friction), never to tabulate or tune it. 0.6 default where not characterized.
     pub friction_coefficient: f32,
+    /// Coefficient of restitution e (0..1): the fraction of collision *speed* returned on rebound (so
+    /// energy returns as e²). The granular contact derives its normal damping from this, so how bouncy
+    /// debris is — and how strongly an impact rebounds into ejecta — is a material property, not a dial
+    /// (`docs/24` Stage 1). Like [`friction_coefficient`], a constitutive summary of sub-parcel physics.
+    /// 0.5 default where not characterized.
+    pub restitution: f32,
     /// 0 (mirror) .. 1 (matte). Drives specular highlight width (Phase 4).
     pub roughness: f32,
     /// 0 (dielectric) .. 1 (metal). Metals get a tinted, tighter highlight (sparkle).
@@ -149,6 +159,7 @@ pub fn load() -> Vec<Material> {
                 fracture_strength,
                 youngs_modulus: m.mechanical.youngs_modulus.unwrap_or(0.0),
                 friction_coefficient: m.mechanical.friction_coefficient.unwrap_or(0.6),
+                restitution: m.mechanical.restitution.unwrap_or(0.5),
                 roughness: m.optical.roughness,
                 metallic: m.optical.metallic,
                 color_variance: m.optical.color_variance,

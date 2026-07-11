@@ -183,9 +183,11 @@ mod tests {
         // rock-vapour atmosphere).
         assert_eq!(classify(1.0e12, basalt), PhaseChange::Vaporized);
 
-        // Honesty: with no thermal data we only claim fracture, never melt/vaporize.
-        let dirt = &mats[crate::materials::index_of(&mats, "dirt")];
-        assert!(dirt.thermal.is_none());
-        assert_eq!(classify(1.0e12, dirt), PhaseChange::Fractured);
+        // Honesty: with no thermal data we only claim fracture, never melt/vaporize. (Oak has none;
+        // the granular soils DID gain estimated thermal — flagged in the data — so impacts can vaporize
+        // them, docs/24. We only refuse to guess where we have nothing at all.)
+        let oak = &mats[crate::materials::index_of(&mats, "oak")];
+        assert!(oak.thermal.is_none());
+        assert_eq!(classify(1.0e12, oak), PhaseChange::Fractured);
     }
 }

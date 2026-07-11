@@ -89,7 +89,8 @@ mod app {
                                        // (tools/gpu-verify scene I: total mechanical energy only ever decreases). A real angle of repose
                                        // emerges from the friction (docs/23).
     const CONTACT_STIFFNESS: f32 = 5.0e5; // normal repulsion (1/s²) per metre of overlap
-    const CONTACT_NORMAL_DAMP: f32 = 100.0; // inelastic (removes bounce)
+    // Normal damping is no longer a constant — it's DERIVED per-material from restitution (docs/24
+    // Stage 1), see `granular::damping_for_restitution` in `gpu_step_params`.
     const CONTACT_TANGENT_DAMP: f32 = 100.0; // friction ramp with slip speed
 
     // Phase 3 dig/fracture.
@@ -592,98 +593,125 @@ mod app {
                 // The meteor is a real Fe-Ni body: its impact energy is its kinetic energy, ½·m·v².
                 let energy = 0.5 * METEOR_MASS * METEOR_SPEED * METEOR_SPEED;
 
+                // TERRAIN-AS-MATTER (docs/24 Stage 3): instead of carving a crater and handing every
+                // ejecta grain a scripted outward velocity (the old `impact` fudge), we MATERIALIZE the
+                // impact region into real grains and drive them with the meteor's real momentum. The
+                // crater, the ejecta curtain, and the fallback all EMERGE from the same conservative
+                // grain contact the debris already uses — no assigned ejecta speed anywhere.
+                //   1. size the disturbed region from the σ·V crater relation (docs/19), LOD-capped;
+                //   2. materialize its solid voxels into grains at rest (mass + PE conserved);
+                //   3. deposit the meteor's momentum p = m·v as an impulse on the coupling core (exact
+                //      momentum conservation) — ejection emerges from the compression/rebound;
+                //   4. the energy the impulse did NOT turn into motion is shock HEAT (radial gradient).
+                let hitv = hit + self.world.center();
+                let strength = self
+                    .world
+                    .material_at(hitv.x as i32, hitv.y as i32, hitv.z as i32)
+                    .map_or(1.2e7, |m| self.mats[m].fracture_strength);
+                let crater_r = crate::damage::crater_radius(crate::damage::crater_volume(
+                    energy as f64,
+                    strength as f64,
+                ));
+                const MATERIALIZE_CAP: f32 = 14.0; // LOD guard: bound the materialized grain count
+                let mat_r = (crater_r as f32).min(MATERIALIZE_CAP);
+                let start = self.matter.particle_count();
                 self.matter
-                    .impact(&mut self.world, &self.mats, hit, dir, energy);
+                    .materialize_region(&mut self.world, &self.mats, hit, mat_r);
+                // Path B (docs/24): turn any STEEP terrain the ejecta will hit (old crater walls, cliffs)
+                // into grains too — a heightfield can't represent a vertical wall conservatively, and that
+                // was the last energy injector the drag fudge masked. Now the terrain the debris touches
+                // is either grains or a gentle bilinear surface — both conservative.
+                self.matter
+                    .materialize_steep_terrain(&mut self.world, &self.mats, hit, mat_r * 2.0, 3);
+                let momentum = dir * (METEOR_MASS * METEOR_SPEED);
+                let core_r = (mat_r * 0.35).max(2.0); // the impactor's coupling footprint
+                self.matter.deposit_impulse(start, hit, momentum, core_r);
+                // Heat = impact energy minus the bulk KE the impulse just added (a small % — most of a
+                // fast impactor's ½mv² is heat, which falls out of momentum-vs-energy, not a magic 5%).
+                let bulk_ke: f32 = self.matter.particles[start..]
+                    .iter()
+                    .map(|p| 0.5 * p.mass * p.vel.length_squared())
+                    .sum();
+                self.matter.deposit_shock_heat(
+                    start,
+                    hit,
+                    (energy - bulk_ke).max(0.0),
+                    &self.mats,
+                );
+                // Vapor-driven ejection (docs/24, Robin's model): the shock heat that pushed matter past
+                // vaporization flashes to gas; its expansion throws the ejecta curtain and carves the
+                // bowl. Routes the heat we just deposited into radial ejecta KE (thermal → kinetic,
+                // conserved) — the honest engine of the crater, replacing any scripted ejecta speed.
+                self.matter.deposit_vapor_expansion(start, hit, &self.mats);
                 self.matter.collapse(&mut self.world, &self.mats);
                 self.flush_debris_to_gpu();
 
-                // The meteor's own matter vaporizes on impact (docs/23) — its ~1000 kg of Fe-Ni is far
-                // hotter than iron's boil point, so it becomes an expanding cloud of incandescent vapor
-                // rather than surviving as a body. This is the meteor *being matter*, not a fireball mock.
-                self.spawn_vaporized_meteor(hit, dir);
+                // The meteor is NOT assumed to vaporize — at 1 m resolution its 1000 kg of Fe-Ni is ~0.13 m³,
+                // SUB-GRAIN, so we don't model its body at all; we couple its ENERGY and MOMENTUM into the
+                // ground (materialize + impulse + shock heat + vapor expansion) and let the outcome emerge.
+                // (Whether that energy density vaporizes anything is decided by the target material's own
+                // threshold — for this 17 km/s strike into soil it does, and the incandescent plume is the
+                // real vaporized GROUND core (~9800 K), not a scripted Fe-Ni cloud. Removed the old
+                // `spawn_vaporized_meteor`: a cosmetic 64-particle burst with a SCRIPTED 22 m/s expansion
+                // that stayed an intact-looking clump AND double-counted the meteor's momentum.)
 
-                // The meteor hits whatever is FIRST in its path — the probe too, not only the terrain
-                // (everything is matter, docs/23). If the ray passes through the ball before reaching
-                // the ground, the ball takes a DIRECT hit: full impact energy at the entry point, so it
-                // is destroyed head-on (a real meteor is not stopped by a small ball, but the ball does
-                // not survive being where it strikes). Otherwise only the blast wave reaches it, falling
-                // off with distance from the crater — `deposit_impact` + iron's own thresholds then
-                // decide dent vs shatter, emergently.
+                // Couple the meteor into every body in its path — NOT just the probe (docs/23: everything
+                // is matter; the impact doesn't special-case any object). One body today, N later; the
+                // loop is the same.
                 let eye_d = glam::DVec3::new(eye.x as f64, eye.y as f64, eye.z as f64);
                 let dir_d =
                     glam::DVec3::new(dir.x as f64, dir.y as f64, dir.z as f64).normalize_or_zero();
                 let hit_d = glam::DVec3::new(hit.x as f64, hit.y as f64, hit.z as f64);
-                let terrain_t = (hit_d - eye_d).dot(dir_d); // along-ray distance to the ground
-                const RAY_CAPTURE: f64 = 0.6; // ~ the probe's particle spacing
-                let mut probe_hit: Option<glam::DVec3> = None;
-                let mut best_t = terrain_t;
-                for p in &self.probe.particles {
-                    let rel = p.pos - eye_d;
-                    let t = rel.dot(dir_d);
-                    if t <= 0.0 || t >= best_t {
-                        continue;
-                    }
-                    if (rel - dir_d * t).length() < RAY_CAPTURE {
-                        best_t = t;
-                        probe_hit = Some(p.pos);
-                    }
-                }
-                let (site, energy_at_probe) = match probe_hit {
-                    Some(pos) => (pos, energy as f64), // direct hit — full energy at the entry point
-                    None => {
-                        let com = self.probe.com();
-                        let sigma = self.mats[materials::index_of(&self.mats, "granite")]
-                            .fracture_strength as f64;
-                        let reach = crate::damage::crater_radius(crate::damage::crater_volume(
-                            energy as f64,
-                            sigma,
-                        ))
-                        .max(1.0);
-                        (
-                            hit_d,
-                            energy as f64 * (-(com - hit_d).length() / reach).exp(),
-                        )
-                    }
-                };
-                self.probe
-                    .deposit_impact(&self.mats, site, dir_d, energy_at_probe);
+                self.couple_impact_to_bodies(eye_d, dir_d, hit_d, energy as f64);
             }
         }
 
-        /// The vaporized meteor: ~1 tonne of Fe-Ni turned to incandescent vapor, spawned as a burst of
-        /// white-hot particles at ground zero that expand outward and carry the meteor's downward
-        /// momentum. Composition is ~91% iron / ~8% nickel — the real make-up of an iron meteorite.
-        fn spawn_vaporized_meteor(&mut self, hit: Vec3, dir: Vec3) {
-            let iron = materials::index_of(&self.mats, "iron");
-            let nickel = materials::index_of(&self.mats, "nickel");
-            const N: usize = 64;
-            // Vapor temperature: well above iron's boil point (3134 K) — a hot impact plume.
-            const VAPOR_TEMP: f32 = 6000.0;
-            let mut burst = Vec::with_capacity(N);
-            for i in 0..N {
-                // Fibonacci hemisphere: even outward directions, biased downward along the impactor.
-                let t = (i as f32 + 0.5) / N as f32;
-                let phi = t * std::f32::consts::TAU * 12.0;
-                let y = 1.0 - 2.0 * t; // −1..1
-                let r = (1.0 - y * y).max(0.0).sqrt();
-                let out = Vec3::new(r * phi.cos(), y.abs(), r * phi.sin()).normalize_or_zero();
-                // Expansion outward + a share of the meteor's incoming momentum.
-                let vel = out * 22.0 + dir * 8.0;
-                let pos = hit + out * 1.5 + Vec3::Y * 0.5;
-                // ~1 in 12 parcels is nickel (≈8%), the rest iron — an Fe-Ni alloy by count.
-                let mat = if i % 12 == 0 { nickel } else { iron };
-                burst.push(GpuParticle {
-                    offset: [pos.x, pos.y, pos.z],
-                    temp: VAPOR_TEMP,
-                    vel: [vel.x, vel.y, vel.z],
-                    resting: 0.0,
-                    color: self.mats[mat].albedo,
-                    material: mat as f32,
-                    emission: emission::incandescence(VAPOR_TEMP),
-                    _pad: 0.0,
-                });
+        /// Couple a meteor/blast into EVERY impactable body in the zone — the impact is object-agnostic
+        /// (docs/23: everything is matter, no special-case for "the probe"). For each body: if the ray
+        /// passes through it before the ground it takes a DIRECT hit (full energy at the entry point);
+        /// otherwise the blast wave reaches it, energy falling off with distance from ground zero. Each
+        /// body is struck by the SAME honest pipeline as the terrain — momentum impulse + shock heat +
+        /// vapor expansion (`Aggregate::deposit_impact`), no scripted kick. `self.probe` is the only body
+        /// today; add more to the `bodies` slice and the loop is unchanged — the multi-object case is
+        /// built in, not retrofitted.
+        fn couple_impact_to_bodies(
+            &mut self,
+            eye: glam::DVec3,
+            dir: glam::DVec3,
+            ground: glam::DVec3,
+            energy: f64,
+        ) {
+            const RAY_CAPTURE: f64 = 0.6; // ~ a body's particle spacing
+            let terrain_t = (ground - eye).dot(dir); // along-ray distance to the ground
+            let momentum_mag = (METEOR_MASS * METEOR_SPEED) as f64;
+            let sigma = self.mats[materials::index_of(&self.mats, "granite")].fracture_strength as f64;
+            let reach =
+                crate::damage::crater_radius(crate::damage::crater_volume(energy, sigma)).max(1.0);
+            let mats = &self.mats;
+            // The impactable bodies. One probe today; extend this slice to N bodies — nothing else changes.
+            for body in [&mut self.probe] {
+                // Direct hit? The ray passes through this body before it reaches the ground.
+                let mut direct: Option<glam::DVec3> = None;
+                let mut best_t = terrain_t;
+                for p in &body.particles {
+                    let rel = p.pos - eye;
+                    let t = rel.dot(dir);
+                    if t <= 0.0 || t >= best_t {
+                        continue;
+                    }
+                    if (rel - dir * t).length() < RAY_CAPTURE {
+                        best_t = t;
+                        direct = Some(p.pos);
+                    }
+                }
+                let (site, e_at) = match direct {
+                    Some(pos) => (pos, energy), // direct hit — full energy at the entry point
+                    None => (ground, energy * (-(body.com() - ground).length() / reach).exp()),
+                };
+                // Real momentum too (p = m·v), with the same falloff as the energy.
+                let p_at = dir * momentum_mag * (e_at / energy);
+                body.deposit_impact(mats, site, p_at, e_at);
             }
-            self.gpu_particles.append(&self.queue, &burst);
         }
 
         fn remesh_world(&mut self) {
@@ -772,8 +800,15 @@ mod app {
             // Debris friction comes from the REAL material (granite — the bulk rock), not a tuned
             // number: the angle of repose emerges from it (docs/23). Mixed-material debris using one
             // representative μ is a flagged approximation (a per-particle μ is a later refinement).
-            let friction =
-                self.mats[materials::index_of(&self.mats, "granite")].friction_coefficient;
+            let bulk = &self.mats[materials::index_of(&self.mats, "granite")];
+            let friction = bulk.friction_coefficient;
+            // Normal damping DERIVED from the material's coefficient of restitution (docs/24 Stage 1):
+            // how bouncy debris is — and how strongly an impact rebounds into ejecta — is a material
+            // property, not a dial. Same representative-material approximation as friction (flagged).
+            let normal_damp = crate::granular::damping_for_restitution(
+                bulk.restitution as f64,
+                CONTACT_STIFFNESS as f64,
+            ) as f32;
             GpuStepParams {
                 gravity: [0.0, -SURFACE_GRAVITY, 0.0],
                 dt,
@@ -792,7 +827,7 @@ mod app {
                 bucket_k: GRID_BUCKET_K,
                 c_radius: CONTACT_RADIUS,
                 c_stiffness: CONTACT_STIFFNESS,
-                c_normal_damp: CONTACT_NORMAL_DAMP,
+                c_normal_damp: normal_damp,
                 c_friction: friction,
                 c_tangent_damp: CONTACT_TANGENT_DAMP,
             }
@@ -1326,7 +1361,10 @@ mod app {
             });
             let forces = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("gpu-particle-forces"),
-                size: (capacity as u64) * 16, // vec3<f32> laid out with 16-byte stride
+                // `Accum` (particle_step.wgsl): contact force + the 6-component stiffness/damping tensor
+                // S = Σ g·(n⊗n) + the momentum-coupling vector Σ S·v_neighbor for the DIRECTIONAL implicit
+                // solve — 64 bytes (four 16-byte rows).
+                size: (capacity as u64) * 64,
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });

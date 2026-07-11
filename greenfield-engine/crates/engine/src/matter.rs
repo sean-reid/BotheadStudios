@@ -22,11 +22,14 @@ use glam::Vec3;
 
 pub const PARTICLE_HALF: f32 = 0.45; // rendered/collision half-extent (voxel-ish)
 
-// DEBT (physical honesty): `DRAG` is a mild per-step velocity damping. There is **no atmosphere**
-// modelled, so in vacuum this is not real drag — it's a numerical stabilizer standing in for one.
-// Keep it only until proper contact damping / an actual fluid (pressure + drag) exists; don't let it
-// masquerade as physics. See docs/16 (no-fakery) and docs/15 (honesty invariant).
-pub const DRAG: f32 = 0.9995;
+// `DRAG` = 1.0: NO per-step velocity damping. This was a fudge — a per-step multiply that bled 62%/s of
+// a vacuum particle's speed (exposed by `gpu-verify` foundational test F, docs/24). It was masking the
+// non-conservative HEIGHTFIELD terrain contact (min-translation normal flip / vertical walls). With that
+// resolved — the momentum-conserving contact solve, the conservative bilinear terrain penalty, and
+// steep-terrain materialization (`materialize_steep_terrain`) — the core model no longer needs it, and a
+// particle in vacuum correctly keeps its momentum (no atmosphere is modelled; when one is, drag emerges
+// from real gas dynamics, not a constant). See docs/16 (no-fakery), docs/15 (honesty invariant).
+pub const DRAG: f32 = 1.0;
 pub const CONTACT_DAMP: f32 = 0.35; // energy kept after touching ground
 pub const SETTLE_SPEED: f32 = 0.02; // below this, a grounded particle deposits into the grid
 const SETTLE_FRAMES: u32 = 10; // ...or after this many consecutive grounded steps
@@ -251,6 +254,308 @@ impl MatterSim {
         ejecta.len()
     }
 
+    /// **Terrain becomes matter** (`docs/24` Stage 3, the `docs/19` LOD-materialization bridge made
+    /// real). Every SOLID voxel within `radius` of `site` (centered coords) is removed from the world
+    /// and re-created as a grain **at rest** at that voxel's centre: same position (so gravitational
+    /// potential energy is conserved — nothing teleports), same material and temperature, **zero
+    /// velocity** (so no kinetic energy is injected). This is not destruction and not scripted ejecta —
+    /// it is a change of *representation*, from the lossy heightfield summary into the real grains the
+    /// granular contact law acts on. The impact region is then honest matter: compression, rebound, and
+    /// the crater all EMERGE from contact (verified conservative in `tools/gpu-verify` scene I-flat),
+    /// instead of the non-conservative heightfield-edge penalty that injected the crater "free energy".
+    /// A driver (the meteor's momentum, [`Self::deposit_impulse`]) is applied separately. Returns the
+    /// count materialized; the new grains are `self.particles[start..]` where `start` was the prior len.
+    pub fn materialize_region(
+        &mut self,
+        world: &mut World,
+        materials: &[Material],
+        site: Vec3,
+        radius: f32,
+    ) -> usize {
+        let center = world.center();
+        let sv = site + center; // voxel space
+        let ri = radius.ceil() as i32;
+        let (cx, cy, cz) = (sv.x.floor() as i32, sv.y.floor() as i32, sv.z.floor() as i32);
+        let start = self.particles.len();
+        for dz in -ri..=ri {
+            for dy in -ri..=ri {
+                for dx in -ri..=ri {
+                    if self.particles.len() >= self.max_particles {
+                        break;
+                    }
+                    let (x, y, z) = (cx + dx, cy + dy, cz + dz);
+                    let vc = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                    if (vc - sv).length() > radius {
+                        continue;
+                    }
+                    let Some(mat) = world.material_at(x, y, z) else {
+                        continue;
+                    };
+                    world.set_voxel(x, y, z, None);
+                    self.particles.push(Particle {
+                        pos: vc - center, // same place the voxel was → PE conserved
+                        vel: Vec3::ZERO,  // AT REST → no KE injected
+                        material: mat,
+                        mass: materials[mat].density, // kg (1 m³ voxel)
+                        temp_k: REF_TEMP_K,
+                        resting_frames: 0,
+                    });
+                }
+            }
+        }
+        if self.particles.len() > start {
+            self.dirty = true;
+        }
+        self.particles.len() - start
+    }
+
+    /// **Materialize STEEP terrain into grains** (`docs/24` Path B). A heightfield represents gentle
+    /// slopes conservatively (a smooth bilinear surface → an exact −∇U penalty), but NOT vertical walls:
+    /// a cliff smoothed over one voxel becomes a ~N:1 gradient, a huge non-conservative force that
+    /// explodes energetic grains (and was the last thing the `drag` fudge masked). The honest fix is to
+    /// make steep terrain what it physically is — loose matter (talus/scree). Any column within `radius`
+    /// of `site` whose highest solid voxel stands `steep_drop`+ above its LOWEST neighbour is a cliff
+    /// face; its exposed voxels (down to that neighbour) become grains at rest, and the heightfield
+    /// settles to a gentle slope the contact can handle. Same conservation as [`Self::materialize_region`]
+    /// (mass + potential energy; zero injected kinetic energy). Returns the count materialized.
+    pub fn materialize_steep_terrain(
+        &mut self,
+        world: &mut World,
+        materials: &[Material],
+        site: Vec3,
+        radius: f32,
+        steep_drop: i32,
+    ) -> usize {
+        let center = world.center();
+        let sv = site + center;
+        let ri = radius.ceil() as i32;
+        let (cx, cz) = (sv.x.floor() as i32, sv.z.floor() as i32);
+        // 1. Find the exposed cliff-face voxels (scan the heightfield read-only, then mutate).
+        let mut faces: Vec<(i32, i32, i32)> = Vec::new();
+        for dz in -ri..=ri {
+            for dx in -ri..=ri {
+                let (x, z) = (cx + dx, cz + dz);
+                if (((dx * dx + dz * dz) as f32).sqrt()) > radius {
+                    continue;
+                }
+                let Some(top) = world.surface_top_voxel(x, z) else {
+                    continue;
+                };
+                let solid_top = top - 1; // highest solid voxel in this column
+                let mut min_nbr = solid_top; // lowest neighbouring solid top
+                for (nx, nz) in [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)] {
+                    if let Some(nt) = world.surface_top_voxel(nx, nz) {
+                        min_nbr = min_nbr.min(nt - 1);
+                    }
+                }
+                let face_height = (solid_top - min_nbr) as f32;
+                if solid_top - min_nbr >= steep_drop {
+                    for y in (min_nbr + 1)..=solid_top {
+                        // A HARD material HOLDS a steep face — a real granite cliff, which we see standing
+                        // in nature (Robin). Only material too WEAK to support its own cliff slumps to
+                        // talus. Critical vertical-cliff height ≈ strength / (ρ·g); above it the face can't
+                        // hold. Granite (~1.2e7 Pa) holds ~450 m; dirt (~5e3 Pa) holds <0.4 m. So a granite
+                        // cliff stays rigid terrain; a dirt/sand bank becomes grains — emergent from
+                        // strength, not a rule. (A granite cliff that a heightfield still can't contact
+                        // conservatively is the case for COHESIVE-aggregate materialization — flagged next.)
+                        if let Some(mat) = world.material_at(x, y, z) {
+                            let m = &materials[mat];
+                            let h_crit = m.fracture_strength / (m.density.max(1.0) * 9.81);
+                            if face_height > h_crit {
+                                faces.push((x, y, z)); // too weak to hold this cliff ⇒ slumps
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 2. Materialize the faces (voxel → grain at rest at its own centre — mass + PE conserved).
+        let start = self.particles.len();
+        for (x, y, z) in faces {
+            if self.particles.len() >= self.max_particles {
+                break;
+            }
+            let Some(mat) = world.material_at(x, y, z) else {
+                continue;
+            };
+            world.set_voxel(x, y, z, None);
+            self.particles.push(Particle {
+                pos: Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - center,
+                vel: Vec3::ZERO,
+                material: mat,
+                mass: materials[mat].density,
+                temp_k: REF_TEMP_K,
+                resting_frames: 0,
+            });
+        }
+        if self.particles.len() > start {
+            self.dirty = true;
+        }
+        self.particles.len() - start
+    }
+
+    /// **The honest impact driver** (`docs/24` Stage 2): deposit the impactor's real `momentum`
+    /// (kg·m/s, a vector) into the grains materialized this event (`self.particles[since..]`) that lie
+    /// within `core_radius` of `site` — the coupling core the impactor actually shoves. Every core
+    /// grain gets the SAME velocity change `Δv = momentum / Σmᵢ`, so `Σ mᵢ·Δvᵢ = momentum` EXACTLY:
+    /// momentum is conserved, not invented. Ejection is NOT assigned here — it emerges as the driven
+    /// core compresses the material ahead of it and the contacts rebound. Because a small fast impactor
+    /// carries huge momentum but that momentum spread over the core's large mass yields only a modest
+    /// Δv, only a few percent of ½mv² ends up as bulk motion — exactly the "~5% to ejecta" the old
+    /// scripted code hard-coded, here falling out of momentum-vs-energy instead of a magic constant. The
+    /// remaining energy is shock heat; deposit it with [`Self::deposit_shock_heat`]. Returns the core
+    /// grain count (0 if none in range).
+    pub fn deposit_impulse(
+        &mut self,
+        since: usize,
+        site: Vec3,
+        momentum: Vec3,
+        core_radius: f32,
+    ) -> usize {
+        let core: Vec<usize> = (since..self.particles.len())
+            .filter(|&i| (self.particles[i].pos - site).length() <= core_radius)
+            .collect();
+        if core.is_empty() {
+            return 0;
+        }
+        let m_total: f32 = core.iter().map(|&i| self.particles[i].mass.max(1.0e-6)).sum();
+        let dv = momentum / m_total; // uniform Δv ⇒ Σ mᵢ·Δv = momentum (conserved)
+        for &i in &core {
+            self.particles[i].vel += dv;
+        }
+        core.len()
+    }
+
+    /// Deposit shock **heat** (`docs/20`) into the grains materialized this event
+    /// (`self.particles[since..]`): `heat_energy` J spread with a radial gradient — densest at `site`
+    /// (the contact melts/vaporizes and glows) and falling to zero by `r_max` (the rim stays cold
+    /// rubble). This is the energy the momentum impulse ([`Self::deposit_impulse`]) did NOT turn into
+    /// motion — the bulk of a fast impactor's ½mv². It is not destroyed: it raises each grain's `temp_k`
+    /// through its material specific heat (→ incandescent `emission`, radiated later). Honest gradient,
+    /// not a uniform fireball.
+    pub fn deposit_shock_heat(
+        &mut self,
+        since: usize,
+        site: Vec3,
+        heat_energy: f32,
+        materials: &[Material],
+    ) {
+        if since >= self.particles.len() {
+            return;
+        }
+        // FILL the isobaric core from the contact OUTWARD (not a smeared gradient — that diluted the
+        // energy below the vaporization threshold everywhere, the "448 K over 14 m" bug). A hypervelocity
+        // impactor is sub-grain-sized, so its energy concentrates into a small PLASMA CORE: fill each
+        // grain, nearest first, up to `SUPERHEAT ×` its own vaporization energy, spilling to the next
+        // grain when full, until the budget is spent. The core reaches a few× vaporization (→ vapor
+        // expansion extracts the excess as ejecta KE); grains past the core stay cold rubble. SUPERHEAT
+        // is the core superheat ratio — a physical modeling choice (real plasma cores reach ≫ this);
+        // it also sets the fraction of impact energy that becomes ejection KE: `1 − 1/SUPERHEAT`.
+        const SUPERHEAT: f32 = 3.0;
+        let mut order: Vec<usize> = (since..self.particles.len()).collect();
+        order.sort_by(|&a, &b| {
+            (self.particles[a].pos - site)
+                .length()
+                .total_cmp(&(self.particles[b].pos - site).length())
+        });
+        let mut budget = heat_energy;
+        for &i in &order {
+            if budget <= 0.0 {
+                break;
+            }
+            let mat = &materials[self.particles[i].material];
+            let c = mat.thermal.as_ref().map_or(1000.0, |t| t.specific_heat);
+            let rho = mat.density.max(1.0);
+            let e_vap = crate::damage::vapor_energy_density(mat).unwrap_or(2.0e10) as f32;
+            let e_here = budget.min(SUPERHEAT * e_vap); // J into this 1 m³ grain (fill to the cap)
+            budget -= e_here;
+            self.particles[i].temp_k += e_here / (rho * c);
+        }
+    }
+
+    /// **Vapor-driven ejection** (`docs/24`, Robin's model) — the real engine of a hypervelocity crater.
+    /// At ~17 km/s the shock deposits FAR more energy than it takes to vaporize the target near the
+    /// contact (½v² ≈ 30–50× granite's vaporization energy), so that matter flashes directly to gas (no
+    /// atmosphere needed). The vapor is a superheated high-pressure bubble; it EXPANDS, doing PdV work on
+    /// the surrounding matter — and THAT throws the ejecta curtain and excavates the bowl, not elastic
+    /// rebound. This routes the energy we already deposited as shock heat (`deposit_shock_heat`) through
+    /// the phase transition it should drive, honestly and conservatively:
+    ///   • For each grain heated PAST full vaporization (`damage::vapor_energy_density`), the EXCESS
+    ///     (superheat) thermal energy is the vapor's available expansion energy `E_expand`.
+    ///   • That energy is removed from the grain's `temp_k` (the gas cools as it expands — adiabatic) and
+    ///     converted to RADIAL outward kinetic energy shared over the ejecta from `site`, with
+    ///     `Σ ½mᵢvᵢ² = E_expand` (energy conserved: thermal → kinetic, nothing invented — the honest
+    ///     replacement for the deleted scripted ejecta speed).
+    /// The GPU then flies the trajectories (ballistic + contact + fallback). A uniform radial speed is a
+    /// documented first model for the (unresolvable, sub-µs) expansion velocity profile. Returns
+    /// `E_expand` (J), the energy the vapor delivered to ejection.
+    pub fn deposit_vapor_expansion(
+        &mut self,
+        since: usize,
+        site: Vec3,
+        materials: &[Material],
+    ) -> f32 {
+        // 1. Sum the superheat (energy above full vaporization) and cool those grains back toward the
+        //    boil point — that energy is leaving as expansion, not staying as heat.
+        let mut e_expand = 0.0f32;
+        for i in since..self.particles.len() {
+            let mat = &materials[self.particles[i].material];
+            let Some(e_vap) = crate::damage::vapor_energy_density(mat) else {
+                continue; // no thermal data ⇒ we don't claim to know its vaporization (honesty)
+            };
+            let c = mat.thermal.as_ref().map_or(1000.0, |t| t.specific_heat);
+            let rho = mat.density.max(1.0);
+            let e_thermal = rho * c * (self.particles[i].temp_k - REF_TEMP_K); // J in this 1 m³ grain
+            let excess = e_thermal - e_vap as f32;
+            if excess > 0.0 {
+                e_expand += excess;
+                self.particles[i].temp_k -= excess / (rho * c); // adiabatic cooling of the vapor
+            }
+        }
+        if e_expand <= 0.0 {
+            return 0.0;
+        }
+        // 2. The vapor is a hot gas bubble at the core; as it expands it launches a shock FRONT into the
+        //    surrounding grains. FAITHFULLY that front is a thin, ~km/s wave — UNRESOLVABLE at our step
+        //    (it would tunnel, >1 m/substep). So we spread E_expand over just enough of the NEAREST grains
+        //    that the front speed stays resolvable (≤ V_MAX), and no further — the shock as concentrated
+        //    as the hardware allows (emulate to the extent computers are capable). We push those grains
+        //    radially outward; the crater bowl, the up-and-out curtain, and the downward compaction then
+        //    ALL EMERGE from the granular contact (the free surface lets the top fly; the buried sides
+        //    compress). We do NOT impose the asymmetry, a direction, or a crater size — only the honest
+        //    outward push, capped at what we can resolve.
+        const V_MAX: f32 = 200.0; // ≈0.2 m/substep — within the implicit contact's deep-overlap range
+        let m_needed = 2.0 * e_expand / (V_MAX * V_MAX); // mass over which E_expand gives exactly V_MAX
+        // Gather the nearest grains (from the contact outward) until we've collected `m_needed`.
+        let mut idx: Vec<usize> = (since..self.particles.len())
+            .filter(|&i| (self.particles[i].pos - site).length() > 0.5)
+            .collect();
+        idx.sort_by(|&a, &b| {
+            (self.particles[a].pos - site)
+                .length()
+                .total_cmp(&(self.particles[b].pos - site).length())
+        });
+        let mut m_front = 0.0f32;
+        let mut front = Vec::new();
+        for &i in &idx {
+            if m_front >= m_needed {
+                break;
+            }
+            m_front += self.particles[i].mass.max(1.0e-6);
+            front.push(i);
+        }
+        if m_front <= 0.0 {
+            return 0.0;
+        }
+        let v0 = (2.0 * e_expand / m_front).sqrt(); // ≤ V_MAX (exactly V_MAX once m_needed is reached)
+        for &i in &front {
+            let radial = self.particles[i].pos - site;
+            let r = radial.length().max(1.0e-6);
+            self.particles[i].vel += (radial / r) * v0; // push the front out; the rest emerges
+        }
+        e_expand
+    }
+
     /// Structural collapse: detach every voxel no longer connected to the anchored base into a
     /// falling particle (starting from rest). Run after an edit that may have undercut or isolated
     /// matter (a dig). One pass suffices — `find_unsupported` returns the complete disconnected set,
@@ -472,6 +777,335 @@ mod tests {
             before,
             "matter fully conserved after settling"
         );
+    }
+
+    #[test]
+    fn materializing_terrain_conserves_matter_and_injects_no_energy() {
+        // docs/24 Stage 3: turning a patch of terrain into grains must conserve MASS (voxels removed ==
+        // grains made) and inject NO energy — grains are at rest, at the exact voxel centres (so both
+        // kinetic AND gravitational potential energy are unchanged by the representation change).
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let before = w.solid_count();
+        let surf = center_surface(&w);
+
+        let mut sim = MatterSim::new(50_000);
+        let n = sim.materialize_region(&mut w, &mats, Vec3::new(0.0, surf - 3.0, 0.0), 4.0);
+        assert!(n > 0, "solid terrain in range should materialize");
+        // Mass conserved: the world lost exactly n voxels, now held as n grains.
+        assert_eq!(n, sim.particle_count());
+        assert_eq!(w.solid_count() + sim.particle_count(), before);
+        // No kinetic energy injected: every grain is at rest.
+        assert!(
+            sim.particles.iter().all(|p| p.vel == Vec3::ZERO),
+            "materialized grains start at rest (no injected KE)"
+        );
+        // No potential energy injected: each grain sits at an integer+0.5 voxel centre (where its voxel
+        // was), and the world no longer contains a solid voxel there.
+        let center = w.center();
+        for p in &sim.particles {
+            let v = p.pos + center;
+            assert!(
+                (v.x - (v.x.floor() + 0.5)).abs() < 1e-4 && (v.y - (v.y.floor() + 0.5)).abs() < 1e-4,
+                "grain sits at its former voxel centre"
+            );
+            assert!(
+                w.material_at(v.x.floor() as i32, v.y.floor() as i32, v.z.floor() as i32).is_none(),
+                "the voxel it came from is now air"
+            );
+        }
+    }
+
+    #[test]
+    fn materialize_steep_terrain_turns_cliffs_into_grains_conserving_mass() {
+        // docs/24 Path B: a vertical cliff a heightfield can't represent conservatively becomes loose
+        // grains (talus) — mass conserved, grains at rest, and the terrain left behind is gentler.
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let c = w.center();
+        let (px, pz) = (c.x as i32, c.z as i32);
+        let surf = w.surface_top_voxel(px, pz).unwrap();
+        // Carve a deep narrow pit → steep walls around it (a cliff the bilinear penalty would explode on).
+        for y in (surf - 6)..surf {
+            for (x, z) in [(px, pz), (px + 1, pz), (px, pz + 1), (px + 1, pz + 1)] {
+                w.set_voxel(x, y, z, None);
+            }
+        }
+        let after_dig = w.solid_count();
+
+        let mut sim = MatterSim::new(50_000);
+        let site = Vec3::new(0.0, surf as f32 - c.y, 0.0);
+        let n = sim.materialize_steep_terrain(&mut w, &mats, site, 6.0, 3);
+        assert!(n > 0, "the steep pit walls materialize into grains");
+        assert_eq!(n, sim.particle_count());
+        // Mass conserved by the materialize step: solid lost == grains gained.
+        assert_eq!(after_dig - w.solid_count(), sim.particle_count());
+        assert!(
+            sim.particles.iter().all(|p| p.vel == Vec3::ZERO),
+            "materialized cliff grains start at rest (no injected KE)"
+        );
+    }
+
+    #[test]
+    fn a_granite_cliff_holds_while_the_dirt_above_it_slumps() {
+        // Robin's antithesis: granite is strong enough to STAND as a cliff (we see them in nature). A pit
+        // dug through the dirt cap INTO the granite bulk makes a wall that is weak dirt on top, granite
+        // below. The dirt slumps to talus; the GRANITE HOLDS — no granite grains are shed. Emergent from
+        // strength (critical cliff height ≈ σ/ρg): dirt ~0.4 m, granite ~450 m.
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let c = w.center();
+        let (px, pz) = (c.x as i32, c.z as i32);
+        let surf = w.surface_top_voxel(px, pz).unwrap();
+        for y in (surf - 16)..surf {
+            for (x, z) in [(px, pz), (px + 1, pz), (px, pz + 1), (px + 1, pz + 1)] {
+                w.set_voxel(x, y, z, None); // pit through the ~10 m dirt into the granite
+            }
+        }
+        let mut sim = MatterSim::new(50_000);
+        let site = Vec3::new(0.0, surf as f32 - c.y, 0.0);
+        let n = sim.materialize_steep_terrain(&mut w, &mats, site, 6.0, 3);
+        assert!(n > 0, "the weak dirt above the cliff slumps to grains");
+        let granite = materials::index_of(&mats, "granite");
+        assert!(
+            sim.particles.iter().all(|p| p.material != granite),
+            "the granite cliff HOLDS — no granite grains slump (only the dirt above does)"
+        );
+    }
+
+    #[test]
+    fn the_impulse_deposits_exactly_the_impactor_momentum() {
+        // docs/24 Stage 2: the driver conserves momentum — Σ mᵢ·vᵢ over the core grains equals the
+        // deposited momentum vector, exactly. No scripted ejecta speed; the meteor's real momentum.
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let surf = center_surface(&w);
+        let mut sim = MatterSim::new(50_000);
+        let site = Vec3::new(0.0, surf - 3.0, 0.0);
+        let start = sim.particle_count();
+        sim.materialize_region(&mut w, &mats, site, 4.0);
+
+        let momentum = Vec3::new(0.0, -1.7e7, 0.0); // a downward meteor impulse (kg·m/s)
+        let core = sim.deposit_impulse(start, site, momentum, 3.0);
+        assert!(core > 0, "grains in the coupling core receive the impulse");
+
+        // Total momentum of the affected grains == the deposited momentum (to f32 tolerance).
+        let total: Vec3 = sim.particles[start..]
+            .iter()
+            .map(|p| p.vel * p.mass)
+            .fold(Vec3::ZERO, |a, b| a + b);
+        assert!(
+            (total - momentum).length() / momentum.length() < 1e-4,
+            "momentum conserved: got {total:?} vs {momentum:?}"
+        );
+        // And only a modest fraction of a fast impactor's kinetic energy becomes bulk motion (the rest
+        // is heat): with the core mass ≫ impactor mass, ½·p²/M_core ≪ the meteor's ½mv².
+        let ke_bulk: f32 = sim.particles[start..]
+            .iter()
+            .map(|p| 0.5 * p.mass * p.vel.length_squared())
+            .sum();
+        let meteor_ke = 0.5 * 1000.0 * 17000.0 * 17000.0; // the p above is 1000 kg × 17 km/s
+        assert!(
+            ke_bulk < 0.20 * meteor_ke,
+            "most impact energy is heat, not ejecta motion (bulk {ke_bulk:.2e} vs {meteor_ke:.2e})"
+        );
+    }
+
+    #[test]
+    fn shock_heat_is_hottest_at_the_impact_and_conserves_the_energy() {
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let surf = center_surface(&w);
+        let mut sim = MatterSim::new(50_000);
+        let site = Vec3::new(0.0, surf - 3.0, 0.0);
+        let start = sim.particle_count();
+        sim.materialize_region(&mut w, &mats, site, 5.0);
+
+        let heat = 1.0e11f32;
+        sim.deposit_shock_heat(start, site, heat, &mats);
+
+        // Energy conserved: Σ (ΔT · ρ · c · V) over grains ≈ the deposited heat (V = 1 m³).
+        let deposited: f32 = sim.particles[start..]
+            .iter()
+            .map(|p| {
+                let m = &mats[p.material];
+                let c = m.thermal.as_ref().map_or(1000.0, |t| t.specific_heat);
+                (p.temp_k - REF_TEMP_K) * m.density.max(1.0) * c
+            })
+            .sum();
+        assert!(
+            (deposited - heat).abs() / heat < 1e-3,
+            "shock heat conserved: {deposited:.3e} vs {heat:.3e}"
+        );
+        // Hottest grain is near the impact, coolest near the rim (radial gradient, not uniform).
+        let nearest = sim.particles[start..]
+            .iter()
+            .min_by(|a, b| {
+                (a.pos - site).length().total_cmp(&(b.pos - site).length())
+            })
+            .unwrap();
+        let farthest = sim.particles[start..]
+            .iter()
+            .max_by(|a, b| {
+                (a.pos - site).length().total_cmp(&(b.pos - site).length())
+            })
+            .unwrap();
+        assert!(
+            nearest.temp_k > farthest.temp_k,
+            "the core is hotter than the rim ({} vs {})",
+            nearest.temp_k,
+            farthest.temp_k
+        );
+    }
+
+    #[test]
+    fn vapor_expansion_converts_superheat_to_radial_motion_conserving_energy() {
+        // docs/24 (Robin's model): superheat past vaporization becomes RADIAL ejecta KE — the honest,
+        // conservative engine of crater ejection (thermal → kinetic, nothing invented).
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let surf = center_surface(&w);
+        let mut sim = MatterSim::new(50_000);
+        // Below the 10 m dirt cap, in the granite bulk (dirt/grass carry no thermal data, so they can't
+        // vaporize — an honest data gap, not a bug; the rock does the vaporizing).
+        let site = Vec3::new(0.0, surf - 14.0, 0.0);
+        let start = sim.particle_count();
+        sim.materialize_region(&mut w, &mats, site, 4.0);
+        // Deposit enough heat to drive the core WELL past vaporization (superheat).
+        sim.deposit_shock_heat(start, site, 1.0e13, &mats);
+
+        let thermal = |sim: &MatterSim| -> f32 {
+            sim.particles[start..]
+                .iter()
+                .map(|p| {
+                    let m = &mats[p.material];
+                    let c = m.thermal.as_ref().map_or(1000.0, |t| t.specific_heat);
+                    (p.temp_k - REF_TEMP_K) * m.density.max(1.0) * c
+                })
+                .sum()
+        };
+        let ke = |sim: &MatterSim| -> f32 {
+            sim.particles[start..].iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum()
+        };
+        let (th0, ke0) = (thermal(&sim), ke(&sim));
+
+        let e_expand = sim.deposit_vapor_expansion(start, site, &mats);
+        assert!(e_expand > 0.0, "superheated matter drives an expansion");
+
+        // Energy conserved: the thermal energy removed equals the kinetic energy added equals E_expand.
+        let thermal_lost = th0 - thermal(&sim);
+        let ke_gained = ke(&sim) - ke0;
+        assert!(
+            (thermal_lost - e_expand).abs() / e_expand < 1.0e-3,
+            "thermal removed == E_expand ({thermal_lost:.3e} vs {e_expand:.3e})"
+        );
+        assert!(
+            (ke_gained - e_expand).abs() / e_expand < 1.0e-2,
+            "kinetic added == E_expand — energy conserved ({ke_gained:.3e} vs {e_expand:.3e})"
+        );
+        // The vapor pushes only its BUBBLE WALL outward (radially — pure geometry, no assigned
+        // direction). Most grains stay put at t=0; the crater bowl + up-and-out curtain EMERGE from
+        // contact over time on the GPU (we don't impose them here).
+        let pushed: Vec<_> = sim.particles[start..].iter().filter(|p| p.vel.length() > 1.0).collect();
+        assert!(!pushed.is_empty(), "the vapor pushes its bubble wall");
+        assert!(
+            pushed
+                .iter()
+                .all(|p| p.vel.dot((p.pos - site).normalize_or_zero()) > 0.0),
+            "the pushed wall moves radially outward"
+        );
+    }
+
+    /// SERVER-SIDE DIAGNOSTIC (not an assertion): run the exact operator sequence the meteor uses on a
+    /// real generated world and report what the debris actually does — so we can see whether a crater
+    /// should form, headlessly. Run with: `cargo test -p engine meteor_impact_diagnostic -- --nocapture`.
+    #[test]
+    fn meteor_impact_diagnostic() {
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let surf = center_surface(&w);
+        let mut sim = MatterSim::new(200_000);
+
+        // Mirror lib.rs::meteor exactly.
+        let (mmass, mspeed) = (1000.0f32, 17000.0f32);
+        let energy = 0.5 * mmass * mspeed * mspeed;
+        let hit = Vec3::new(0.0, surf - 0.5, 0.0); // strike at the surface
+        let hv = hit + w.center();
+        let hit_mat = w.material_at(hv.x as i32, hv.y as i32, hv.z as i32);
+        let strength = hit_mat.map_or(1.2e7, |m| mats[m].fracture_strength);
+        let crater_r =
+            crate::damage::crater_radius(crate::damage::crater_volume(energy as f64, strength as f64));
+        let mat_r = (crater_r as f32).min(14.0);
+        let _ = hit_mat;
+
+        let start = sim.particle_count();
+        let n = sim.materialize_region(&mut w, &mats, hit, mat_r);
+        let momentum = Vec3::new(0.0, -1.0, 0.0) * (mmass * mspeed);
+        let core_r = (mat_r * 0.35).max(2.0);
+        sim.deposit_impulse(start, hit, momentum, core_r);
+        let bulk_ke: f32 =
+            sim.particles[start..].iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
+        sim.deposit_shock_heat(start, hit, (energy - bulk_ke).max(0.0), &mats);
+        let e_expand = sim.deposit_vapor_expansion(start, hit, &mats);
+
+        // Composition of what got materialized.
+        let mut comp: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for p in &sim.particles[start..] {
+            *comp.entry(mats[p.material].id.as_str()).or_default() += 1;
+        }
+        let has_thermal = sim.particles[start..]
+            .iter()
+            .filter(|p| mats[p.material].thermal.is_some())
+            .count();
+        let hottest = sim.particles[start..].iter().map(|p| p.temp_k).fold(0.0f32, f32::max);
+        let vaporized = sim.particles[start..]
+            .iter()
+            .filter(|p| {
+                crate::damage::vapor_energy_density(&mats[p.material])
+                    .map_or(false, |ev| {
+                        let m = &mats[p.material];
+                        let c = m.thermal.as_ref().map_or(1000.0, |t| t.specific_heat);
+                        (m.density * c * (p.temp_k - REF_TEMP_K)) as f64 >= ev
+                    })
+            })
+            .count();
+        let moving_up = sim.particles[start..].iter().filter(|p| p.vel.y > 1.0).count();
+        let outward = sim.particles[start..]
+            .iter()
+            .filter(|p| {
+                let h = Vec3::new(p.pos.x - hit.x, 0.0, p.pos.z - hit.z);
+                h.length() > 0.5 && Vec3::new(p.vel.x, 0.0, p.vel.z).dot(h.normalize_or_zero()) > 1.0
+            })
+            .count();
+        let max_speed = sim.particles[start..].iter().map(|p| p.vel.length()).fold(0.0f32, f32::max);
+
+        println!("\n=== METEOR IMPACT DIAGNOSTIC (server-side) ===");
+        println!("energy {energy:.2e} J, crater_r {crater_r:.1} m (capped to mat_r {mat_r:.1} m)");
+        println!("surface strength used: {strength:.2e} Pa (material at hit)");
+        println!("materialized {n} grains; composition: {comp:?}");
+        println!("  with thermal data (can vaporize): {has_thermal}/{n}");
+        println!("hottest grain: {hottest:.0} K; grains AT/PAST vaporization: {vaporized}");
+        println!("VAPOR expansion energy E_expand: {e_expand:.2e} J");
+        println!(
+            "ejection: {moving_up} grains moving UP (>1 m/s), {outward} moving OUTWARD, max speed {max_speed:.1} m/s"
+        );
+        println!("=== NB: this is the t=0 SETUP. The vapor pushes only its bubble wall; the crater bowl");
+        println!("    and up-and-out curtain EMERGE from contact over ~10 s on the GPU (forward sim). ===\n");
+
+        // Regression guard. NOT an assumption that meteors vaporize — a CONSEQUENCE we observe: at
+        // 17 km/s the impactor's specific energy (½v² ≈ 1.4e8 J/kg) far exceeds soil's vaporization energy
+        // (~1e10 J/m³ ÷ ρ), so the deposited energy density crosses the material's own threshold and vapor
+        // EMERGES. A weaker impact, or a refractory target, would cross no threshold and make no vapor
+        // crater — correctly. So this checks the *material-property-driven consequence* holds for this
+        // energetic case (which is how we know energy→heat→vaporization still couples), not that
+        // vaporization is imposed. We assert NO grain count and NO crater size — those emerge (forward sim).
+        assert!(
+            vaporized > 0,
+            "this 17 km/s impact's energy density exceeds the target's vaporization threshold, so vapor \
+             emerges (a consequence, not an assumption)"
+        );
+        assert!(e_expand > 0.0, "the vaporized core has superheat to expand");
+        assert!(outward > 0 && max_speed > 50.0, "the vapor push drives an excavation front");
     }
 
     #[test]
