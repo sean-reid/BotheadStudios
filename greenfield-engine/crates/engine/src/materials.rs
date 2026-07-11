@@ -122,6 +122,12 @@ pub struct Material {
     /// (`docs/24` Stage 1). Like [`friction_coefficient`], a constitutive summary of sub-parcel physics.
     /// 0.5 default where not characterized.
     pub restitution: f32,
+    /// Pa. Cohesion — the ATTRACTIVE bond strength between touching grains of this matter (`docs/24`).
+    /// This is what lets a pile hold a slope (soil, wet sand) that a cohesionless pile (dry sand) can't,
+    /// and it closes the zero-overlap "frictionless graze". NOTE: this is the INTACT cohesion; loose
+    /// debris (already fractured) retains only a fraction, so the granular contact caps it at a granular
+    /// ceiling (a flagged approximation). 0 where not characterized (cohesionless).
+    pub cohesion: f32,
     /// 0 (mirror) .. 1 (matte). Drives specular highlight width (Phase 4).
     pub roughness: f32,
     /// 0 (dielectric) .. 1 (metal). Metals get a tinted, tighter highlight (sparkle).
@@ -160,6 +166,7 @@ pub fn load() -> Vec<Material> {
                 youngs_modulus: m.mechanical.youngs_modulus.unwrap_or(0.0),
                 friction_coefficient: m.mechanical.friction_coefficient.unwrap_or(0.6),
                 restitution: m.mechanical.restitution.unwrap_or(0.5),
+                cohesion: m.mechanical.cohesion.unwrap_or(0.0),
                 roughness: m.optical.roughness,
                 metallic: m.optical.metallic,
                 color_variance: m.optical.color_variance,

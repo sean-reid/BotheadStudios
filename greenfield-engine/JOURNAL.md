@@ -5,6 +5,37 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — Cohesive grain contact (the frictionless-graze fix, one property doing three jobs)
+
+**What.** Added an ATTRACTIVE adhesion term to the grain contact law (GPU shader + native `granular.rs`
+force-of-record): net normal force = repulsive spring − cohesion, so touching grains can now BOND (the
+force pulls them together) until the bond lets go past a short range. `cohesion = 0` recovers the exact
+old push-only contact. The friction load now includes the cohesion, so a touching/grazing pair has a
+real normal load — and therefore friction. `c_cohesion` is derived from `Material::cohesion`, converted
+to a per-mass adhesion and capped at a granular ceiling (loose debris is already fractured — rock grains
+keep only surface adhesion, they must not re-weld into solid). Reused the dead `c_max_accel` param slot,
+so no struct-layout churn.
+
+**Why.** Robin caught that a grain placed at *exactly* zero overlap grazes frictionlessly — friction is
+`μ·N` and `N = k·overlap = 0` there. Her instinct: "surely there's a property of matter that ensures
+this never happens unless the particles are separated?" There is — **cohesion**, a real material
+property already in `materials.json` that we used for solid bonds but not loose-grain contact. It closes
+the graze (touching ⇒ bonded ⇒ normal load ⇒ friction), it's *why* soil holds a slope dry sand can't
+(the same thread as the granite-cliff/talus split), and it's part of what holds a planet together
+against its own gravity — a prerequisite for the Moon-onto-vacuum-Earth moon-shot.
+
+**Verified.** New `gpu-verify` foundational test **F8**: a gentle separating nudge is HELD by the bond
+(1.00 m), a hard nudge BREAKS it (6.84 m), a cohesionless pair DRIFTS apart (2.00 m). Native
+`granular::cohesion_bonds_touching_grains_and_raises_friction`: a just-touching cohesive pair is pulled
+together and a zero-compression graze has friction, while dry stays frictionless. `cargo test -p engine`
+64/64; wasm builds; no scene regression (scenes default to cohesion = 0).
+
+**Open.** Cohesion is a single representative value (like friction) — a per-particle/mixed-material
+cohesion is a later refinement; and terrain contact doesn't yet carry cohesion (grains adhering to the
+ground), flagged.
+
+---
+
 ## 2026-07-11 — Emergent impact end-to-end: momentum-conserving contact, terrain-as-matter, drag fudge deleted
 
 **What.** A long arc turning the impact from scripted fudges into emergent particle physics (`docs/24`),

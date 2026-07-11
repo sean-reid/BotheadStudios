@@ -46,7 +46,7 @@ struct Params {
     gravity: [f32; 3],
     dt: f32,
     center: [f32; 3],
-    c_max_accel: f32,
+    c_cohesion: f32,
     drag: f32,
     contact_damp: f32,
     settle_speed: f32,
@@ -76,7 +76,6 @@ const CONTACT_RADIUS: f32 = 0.5; // = half the 1 m spacing ⇒ lattice neighbour
 const C_STIFFNESS: f32 = 5.0e5;
 const C_NORMAL_DAMP: f32 = 100.0;
 const C_TANGENT_DAMP: f32 = 100.0;
-const C_MAX_ACCEL: f32 = 1200.0; // cap on normal contact accel (prevents launches)
 const TABLE_SIZE: u32 = 1 << 15; // 32768 cells — ample for these scenes
 const BUCKET_K: u32 = 16;
 const SUBSTEPS: u32 = 16;
@@ -105,6 +104,7 @@ struct Scene {
     // (g = 0 or the real g, drag = 1.0) to check Newton's laws without the flagged atmospheric-drag debt.
     gravity_y: Option<f32>,
     drag: Option<f32>,
+    cohesion: Option<f32>, // attractive adhesion between grains (None ⇒ 0, cohesionless)
 }
 impl Scene {
     fn flat(world_w: u32, world_d: u32, top: i32, friction: f32) -> Self {
@@ -117,6 +117,7 @@ impl Scene {
             normal_damp: None,
             gravity_y: None,
             drag: None,
+            cohesion: None,
         }
     }
     fn params(&self, count: u32) -> Params {
@@ -124,7 +125,7 @@ impl Scene {
             gravity: [0.0, self.gravity_y.unwrap_or(-9.81), 0.0],
             dt: (1.0 / 60.0) / SUBSTEPS as f32,
             center: [self.world_w as f32 / 2.0, self.center_y, self.world_d as f32 / 2.0],
-            c_max_accel: C_MAX_ACCEL,
+            c_cohesion: self.cohesion.unwrap_or(0.0),
             drag: self.drag.unwrap_or(0.999),
             contact_damp: 0.4,
             settle_speed: 0.30, // supported grains slower than this stick (static-friction approx)
@@ -587,6 +588,45 @@ fn main() {
             failures += !all_ok as i32;
         }
 
+        // F8 — COHESION (a material property, docs/24): touching grains BOND (attract). A gentle
+        // separating nudge is held by the adhesion; a hard nudge breaks the bond; a cohesionless pair
+        // drifts apart from any nudge. This is the same cohesion that lets soil hold a slope dry sand
+        // can't — and it closes the zero-overlap "frictionless graze" (a bonded pair has a normal load).
+        {
+            let cohesive = {
+                let mut s = vac(0.0);
+                s.cohesion = Some(6.0); // ~ deployed soil-debris scale (σ·A/ρ)
+                s
+            };
+            let nudged = |vsep: f32| {
+                vec![
+                    {
+                        let mut a = Particle::at(-0.5, 50.0, 0.0);
+                        a.vel = [-vsep, 0.0, 0.0];
+                        a
+                    },
+                    {
+                        let mut b = Particle::at(0.5, 50.0, 0.0);
+                        b.vel = [vsep, 0.0, 0.0];
+                        b
+                    },
+                ]
+            };
+            let sep_after = |ps: Vec<Particle>, sc: &Scene| {
+                let out = simulate(&gpu, ps, 60, sc);
+                out[1].offset[0] - out[0].offset[0]
+            };
+            let held = sep_after(nudged(0.5), &cohesive); // gentle ⇒ bond holds (stays ~touching)
+            let broke = sep_after(nudged(3.0), &cohesive); // hard ⇒ bond breaks (separates)
+            let dry = sep_after(nudged(0.5), &vac(0.0)); // cohesionless ⇒ drifts apart
+            let ok = held < 1.2 && broke > 2.5 && dry > 1.5;
+            println!(
+                "F8 cohesion bonds grains (vacuum): gentle-nudge held {:.2} m, hard-nudge {:.2} m, cohesionless {:.2} m  {}",
+                held, broke, dry, pass(ok)
+            );
+            failures += !ok as i32;
+        }
+
         // DRAG DEBT (flagged, not pass/fail): the DEPLOYED drag = 0.999 is a numerical stand-in for an
         // atmosphere that ISN'T MODELLED — so in a real vacuum a free particle WRONGLY loses speed. Measure
         // and report it so the fudge stays visible (docs/16). Fix: model the atmosphere, or set drag = 1.0.
@@ -698,6 +738,7 @@ fn main() {
             normal_damp: None,
             gravity_y: None,
             drag: None,
+            cohesion: None,
         };
         // Pour a block above the pit centre.
         let mut ps = Vec::new();
@@ -763,7 +804,7 @@ fn main() {
                 }
             }
         }
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.7, normal_damp: None, gravity_y: None, drag: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.7, normal_damp: None, gravity_y: None, drag: None, cohesion: None };
         let mut ps = Vec::new();
         let s = 1.0f32;
         let j = 0.02 * s;
@@ -819,7 +860,7 @@ fn main() {
             }
         }
         // center_y = low ⇒ low floor at y=0, wall top at y=12.
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, drag: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, drag: None, cohesion: None };
         // Grains sitting on the low floor just left of the cliff (cliff at centered x=0, i.e. voxel 15),
         // shoved toward it at a healthy speed.
         // A single LOW layer of grains on the floor (y≈part_half), so ANY height gain = wall-climbing.
@@ -858,7 +899,7 @@ fn main() {
                 }
             }
         }
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, drag: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, drag: None, cohesion: None };
         // A pile of grains on the LOW side (centered x < 0 = voxel < 12), stacked so its weight presses
         // the bottom rows hard against the step face at x = 0.
         let mut ps = Vec::new();
@@ -909,7 +950,7 @@ fn main() {
                 hf[(z * w as i32 + x) as usize] = top;
             }
         }
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.6, normal_damp: None, gravity_y: None, drag: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.6, normal_damp: None, gravity_y: None, drag: None, cohesion: None };
         let mut ps = Vec::new();
         for ix in -3..=3 {
             for iz in -3..=3 {

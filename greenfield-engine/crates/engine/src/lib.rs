@@ -809,11 +809,20 @@ mod app {
                 bulk.restitution as f64,
                 CONTACT_STIFFNESS as f64,
             ) as f32;
+            // Cohesion (attractive adhesion between grains) DERIVED from the material — how a pile holds a
+            // slope, and whether touching grains bond, is a material property (docs/24). Per-mass
+            // acceleration = σ·A / (ρ·V) (A = grain cross-section). The INTACT σ is capped at a granular
+            // ceiling: loose debris is already fractured and retains only surface adhesion, so rock debris
+            // must not re-weld into solid. Representative-material approximation, like the friction (flagged).
+            let grain_area = std::f32::consts::PI * CONTACT_RADIUS * CONTACT_RADIUS;
+            const GRANULAR_COHESION_CEIL: f32 = 5.0e4; // Pa — clay-level; loose-debris adhesion ceiling
+            let c_cohesion =
+                bulk.cohesion.min(GRANULAR_COHESION_CEIL) * grain_area / bulk.density.max(1.0);
             GpuStepParams {
                 gravity: [0.0, -SURFACE_GRAVITY, 0.0],
                 dt,
                 center: [c.x, c.y, c.z],
-                c_max_accel: 0.0, // (unused — force cap removed as a fudge; implicit integration instead)
+                c_cohesion,
                 drag: matter::DRAG,
                 contact_damp: matter::CONTACT_DAMP,
                 settle_speed: 0.0, // (unused — settle "freeze" removed as a fudge)
@@ -1276,7 +1285,7 @@ mod app {
         gravity: [f32; 3], // uniform planetary surface gravity (m/s²)
         dt: f32,
         center: [f32; 3],
-        c_max_accel: f32, // cap on normal contact accel (prevents deep-overlap launches)
+        c_cohesion: f32, // attractive adhesion between touching grains (docs/24)
         drag: f32,
         contact_damp: f32,
         settle_speed: f32,

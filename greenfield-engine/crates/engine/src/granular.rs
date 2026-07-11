@@ -46,6 +46,13 @@ pub struct Contact {
     /// Tangential regularization (1/s): how sharply the friction force ramps with slip speed before it
     /// saturates at the Coulomb cap. Avoids a discontinuity at zero slip.
     pub tangent_damp: f64,
+    /// Attractive ADHESION (1/s², per-mass) between touching grains — cohesion (`docs/24`). Full in
+    /// contact, tapering to 0 over `coh_range` beyond touch. It lets a pile hold a slope a cohesionless
+    /// pile can't, and gives a touching pair a real normal load (so friction — closing the zero-overlap
+    /// graze). 0 ⇒ cohesionless (dry sand). Derived from `Material::cohesion` (capped for loose debris).
+    pub cohesion: f64,
+    /// Range (m) beyond `touch` over which cohesion acts before the bond lets go.
+    pub coh_range: f64,
 }
 
 /// Acceleration on grain *i* due to contact with grain *j* (equal radii). Zero unless they overlap.
@@ -55,26 +62,36 @@ pub fn contact_accel(pi: DVec3, vi: DVec3, pj: DVec3, vj: DVec3, c: &Contact) ->
     let d = pi - pj;
     let dist = d.length();
     let touch = 2.0 * c.radius;
-    if dist >= touch || dist < 1.0e-9 {
+    // Cohesion extends the interaction range beyond touch; beyond that the bond has let go.
+    if dist >= touch + c.coh_range || dist < 1.0e-9 {
         return DVec3::ZERO; // not in contact (or coincident — no defined normal)
     }
     let n = d / dist; // unit normal, from j toward i
-    let overlap = touch - dist;
+    let overlap = touch - dist; // >0 overlapping (compression); <0 separated but within cohesion range
     let v_rel = vi - vj;
     let v_n = v_rel.dot(n); // >0 separating, <0 approaching
 
-    // Normal: linear-spring repulsion (soft-sphere DEM) minus damping of the approach. NO force cap —
-    // a cap is a fudge; a stiff contact is kept stable by IMPLICIT integration in the step, not by
-    // clamping the force. Clamp to ≥0 so a contact can only push apart, never suck together.
-    let a_n_mag = (c.stiffness * overlap - c.normal_damp * v_n).max(0.0);
-    let a_n = n * a_n_mag;
+    // Normal = repulsive spring (soft-sphere DEM, compression only) minus attractive ADHESION. NO force
+    // cap — a cap is a fudge; a stiff contact is kept stable by implicit integration, not by clamping.
+    // Cohesion lets the net force PULL (attractive) — bonding touching grains — until it breaks past
+    // `coh_range`. c.cohesion = 0 recovers the old push-only contact.
+    let f_rep = if overlap > 0.0 {
+        (c.stiffness * overlap - c.normal_damp * v_n).max(0.0)
+    } else {
+        0.0
+    };
+    let sep = (-overlap).max(0.0); // separation beyond touch (0 while overlapping)
+    let f_coh = c.cohesion * (1.0 - sep / c.coh_range).clamp(0.0, 1.0); // adhesion, tapered over the range
+    let a_n = n * (f_rep - f_coh); // net: repulsion − attraction
 
-    // Tangential (Coulomb friction): oppose the slip, but never exceed μ·normal. Regularized so it
-    // ramps smoothly from zero slip instead of chattering.
+    // Tangential (Coulomb friction): oppose the slip, never exceed μ·N where N is the real contact LOAD —
+    // BOTH the repulsion and the adhesion press the surfaces, so cohesion raises the friction (apparent
+    // cohesion), giving a touching pair friction even at zero compression. Regularized so it ramps smoothly.
+    let normal_load = f_rep + f_coh;
     let v_t = v_rel - n * v_n;
     let vt_mag = v_t.length();
     let a_t = if vt_mag > 1.0e-9 {
-        let mag = (c.tangent_damp * vt_mag).min(c.friction * a_n_mag);
+        let mag = (c.tangent_damp * vt_mag).min(c.friction * normal_load);
         -(v_t / vt_mag) * mag
     } else {
         DVec3::ZERO
@@ -124,7 +141,48 @@ mod tests {
             normal_damp: 140.0,
             friction: 0.6,
             tangent_damp: 200.0,
+            cohesion: 0.0, // cohesionless by default (dry) — existing tests are the push-only contact
+            coh_range: 0.15,
         }
+    }
+
+    #[test]
+    fn cohesion_bonds_touching_grains_and_raises_friction() {
+        // docs/24: cohesion is an ATTRACTIVE force between touching grains (0 for dry sand). It bonds a
+        // just-touching pair (net force pulls them together) and adds to the friction normal load.
+        let mut c = params();
+        c.cohesion = 500.0;
+        // Two grains EXACTLY touching (overlap 0): dry ⇒ no force; cohesive ⇒ net attraction (pulls in).
+        let touching = |cohesion: f64| {
+            let mut cc = params();
+            cc.cohesion = cohesion;
+            contact_accel(
+                DVec3::new(1.0, 0.0, 0.0), // 1.0 apart = touch (radius 0.5)
+                DVec3::ZERO,
+                DVec3::ZERO,
+                DVec3::ZERO,
+                &cc,
+            )
+        };
+        assert_eq!(touching(0.0), DVec3::ZERO, "dry: no force at zero overlap");
+        assert!(touching(500.0).x < 0.0, "cohesive: net force pulls the pair together (−x)");
+
+        // Cohesion raises the friction load: a grain sliding tangentially on a just-touching cohesive
+        // contact feels friction even with zero compression (closing the frictionless graze).
+        let sliding = |cohesion: f64| {
+            let mut cc = params();
+            cc.cohesion = cohesion;
+            contact_accel(
+                DVec3::new(1.0, 0.0, 0.0),
+                DVec3::new(0.0, 0.0, 2.0), // sliding in +z, no compression
+                DVec3::ZERO,
+                DVec3::ZERO,
+                &cc,
+            )
+            .z
+        };
+        assert_eq!(sliding(0.0), 0.0, "dry graze at zero overlap is frictionless");
+        assert!(sliding(500.0) < 0.0, "cohesive graze has friction opposing the slip");
     }
 
     #[test]

@@ -17,7 +17,7 @@ struct Params {
     gravity      : vec3<f32>,
     dt           : f32,
     center       : vec3<f32>, // world.center() offset (centered→voxel coords)
-    c_max_accel  : f32,       // cap on normal contact accel (prevents deep-overlap launches — docs/23)
+    c_cohesion   : f32,       // attractive adhesion (1/s²) between touching grains — cohesion (docs/24)
     drag         : f32,
     contact_damp : f32,       // ground-collision velocity damping
     settle_speed : f32,
@@ -125,44 +125,52 @@ fn accum_tensor(acc : ptr<function, Accum>, n : vec3<f32>, g : f32) {
     (*acc).s_off = (*acc).s_off + g * vec3<f32>(n.x * n.y, n.x * n.z, n.y * n.z);
 }
 
+// Short-range adhesion tail (m) beyond touch: real cohesion (van der Waals / capillary) is a near-contact
+// attraction that fades over a small gap. Sets how far a bonded pair can be pulled before the bond lets go.
+const COH_RANGE : f32 = 0.15;
+
 fn contact_accel(pi : vec3<f32>, vi : vec3<f32>, pj : vec3<f32>, vj : vec3<f32>) -> Accum {
     var acc = zero_accum();
     let d = pi - pj;
     let dist = length(d);
     let touch = 2.0 * P.c_radius;
-    if (dist >= touch || dist < 1.0e-9) { return acc; }
+    // Cohesion EXTENDS the interaction range: grains attract within COH_RANGE of touching, not only when
+    // overlapping. Beyond that the bond has let go (separated).
+    if (dist >= touch + COH_RANGE || dist < 1.0e-9) { return acc; }
     let n = d / dist;
-    let overlap = touch - dist;
+    let overlap = touch - dist; // > 0 overlapping (compression); < 0 separated but within cohesion range
     let v_rel = vi - vj;
     let v_n = dot(v_rel, n);
-    // The normal SPRING force (always ≥ 0 while overlapping — contacts only push). The normal DAMPING is
-    // NOT added here: it goes into the implicit matrix (accum_tensor's dt·c term) so it can't inject
-    // energy at high coordination. Coulomb friction is capped by the spring force (the real normal load).
-    let a_n_mag = P.c_stiffness * overlap;
-    let a_n = n * a_n_mag;
+    // Normal force = repulsive spring (compression only) MINUS cohesive adhesion (an attraction that is
+    // full in contact and tapers to 0 at COH_RANGE). c_cohesion=0 ⇒ pure repulsion (dry, cohesionless
+    // sand — which correctly grazes frictionlessly). c_cohesion>0 ⇒ touching grains BOND, so a resting or
+    // grazing pair has a real normal load and therefore friction (closing the zero-overlap knife-edge),
+    // and a wet/fine/soil pile holds a slope its dry counterpart can't. The DAMPING is implicit (tensor).
+    let f_rep = P.c_stiffness * max(overlap, 0.0);
+    let sep = max(-overlap, 0.0); // separation beyond touch (0 while overlapping)
+    let f_coh = P.c_cohesion * clamp(1.0 - sep / COH_RANGE, 0.0, 1.0); // adhesion, tapered over the range
+    let a_n = n * (f_rep - f_coh); // net: repulsive − attractive (can pull grains together)
+    // Friction opposes slip, capped at μ·N where N is the real contact LOAD pressing the surfaces — BOTH
+    // the repulsion and the adhesion hold them together, so cohesion raises the friction (apparent
+    // cohesion in shear). This is what gives a touching pair friction even at zero compression.
+    let normal_load = f_rep + f_coh;
     let v_t = v_rel - n * v_n;
     let vt_mag = length(v_t);
-    // Coulomb friction (regularized): tangential force opposes slip, magnitude capped at μ·N. This must
-    // stay an explicit FORCE (not implicit damping): friction holds a grain static on a slope by opposing
-    // the DRIVING load at zero velocity — a damper gives nothing at v=0, so implicit friction collapses
-    // the angle of repose. The angle of repose emerges from this μ·N cap.
     var a_t = vec3<f32>(0.0);
     if (vt_mag > 1.0e-9) {
-        // Coulomb cap μ·N, regularized by c_tangent — AND clamped at vt_mag/dt so the friction impulse
-        // can at most HALT the slip, never reverse it. Without that clamp, a deep impact makes N (hence
-        // μ·N) enormous, the explicit tangential impulse overshoots |v_t|, reverses the slip and INJECTS
-        // energy. Friction is dissipative: it removes at most the tangential momentum, never adds.
-        let mag = min(min(P.c_tangent_damp * vt_mag, P.c_friction * a_n_mag), vt_mag / P.dt);
+        // Clamped at vt_mag/dt so friction can only HALT the slip, never reverse it (see the note above).
+        let mag = min(min(P.c_tangent_damp * vt_mag, P.c_friction * normal_load), vt_mag / P.dt);
         a_t = -(v_t / vt_mag) * mag;
     }
     acc.force = a_n + a_t;
-    // θ-method tensor coefficient g = θ²·dt²·k + θ·dt·c (see THETA note). The complementary ρ·S term is in
-    // the RHS (cs_integrate). Near-conservative ⇒ restitution survives; A-stable ⇒ high coordination safe.
-    let g = THETA * THETA * P.dt * P.dt * P.c_stiffness + THETA * P.dt * P.c_normal_damp;
-    accum_tensor(&acc, n, g);
-    // Momentum coupling: S_contact·v_j = g·(n·v_j)·n. Summed per grain in cs_forces and fed to the RHS,
-    // this preserves the colliding pair's COM velocity (momentum conservation — gpu-verify F5).
-    acc.sv_nbr = g * dot(n, vj) * n;
+    // Only the repulsive SPRING is stiff enough to need implicit stabilization (the adhesion is a bounded,
+    // near-constant force). Gate the tensor + momentum coupling on compression.
+    if (overlap > 0.0) {
+        let g = THETA * THETA * P.dt * P.dt * P.c_stiffness + THETA * P.dt * P.c_normal_damp;
+        accum_tensor(&acc, n, g);
+        // Momentum coupling: S_contact·v_j = g·(n·v_j)·n — preserves the pair's COM velocity (gpu-verify F5).
+        acc.sv_nbr = g * dot(n, vj) * n;
+    }
     return acc;
 }
 
