@@ -2529,17 +2529,32 @@ mod app {
                 if let Some(rel) = self.impact_site_rel {
                     agg.set_boundary_hole_center(earth_pos + rel); // the crater orbits with its planet
                 }
+                // TWO-WAY coupling, momentum-EXACT (Newton's third law): Earth's impulse is the
+                // mirror of what the cloud actually received through this step. An independent
+                // first-order estimate (evaluated at different positions/times than the cloud's own
+                // integration) is non-symplectic — it PUMPED energy into the Earth–cloud orbit until
+                // the debris unbound (Robin watched Earth shudder, then the moonlets escape). Here we
+                // measure the cloud's true momentum change, subtract the Sun's share (that reaction
+                // belongs to the Sun), and hand Earth the equal-and-opposite rest — which also carries
+                // the boundary/shear reaction. Total momentum conserves to roundoff.
+                let p_before: glam::DVec3 =
+                    agg.particles.iter().map(|p| p.vel * p.mass).sum();
+                let sun_pos = self.bodies[0].pos;
+                let sun_mass = self.bodies[0].mass;
+                let j_sun: glam::DVec3 = agg
+                    .particles
+                    .iter()
+                    .map(|p| {
+                        let d = sun_pos - p.pos;
+                        let r2 = d.length_squared().max(1.0);
+                        d * (crate::orbit::G * sun_mass * p.mass * r2.powf(-1.5)) * dt
+                    })
+                    .sum();
                 agg.step(&mut self.debris_acc, dt);
+                let p_after: glam::DVec3 =
+                    agg.particles.iter().map(|p| p.vel * p.mass).sum();
+                self.bodies[1].vel -= (p_after - p_before - j_sun) / self.bodies[1].mass;
                 self.sim_since_impact += dt; // the aftermath clock (sim time, not wall time)
-                // TWO-WAY gravity: the cloud pulls Earth back (Newton's third law — one-way coupling
-                // leaked momentum and pumped spurious chaos into the orbits). First-order impulse.
-                let mut a_earth = glam::DVec3::ZERO;
-                for p in &agg.particles {
-                    let d = p.pos - earth_pos;
-                    let r2 = d.length_squared().max(EARTH_RADIUS_M * EARTH_RADIUS_M);
-                    a_earth += d * (crate::orbit::G * p.mass * r2.powf(-1.5));
-                }
-                self.bodies[1].vel += a_earth * dt;
                 // DEMOTION (docs/27): settled matter IS Earth again — drain it back into the bulk
                 // summary (mass to the planet, particle removed). Fidelity ∝ observability (docs/13);
                 // FPS follows from honesty — we stop simulating what has stopped happening. r_tol spans
