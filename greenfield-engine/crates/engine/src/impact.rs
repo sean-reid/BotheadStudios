@@ -275,8 +275,8 @@ mod tests {
         let earth_profile = crate::planet::earth();
         let m_theia = theia.total_mass();
         let contact = EARTH_RADIUS_M + theia.radius();
-        let (d0, v_in) = (9.6e7, 6_000.0);
-        let b = 1.30 * contact;
+        let (d0, v_in) = (9.6e7, 5_000.0); // v∞ ≈ 4 km/s — top of the canonical Theia range, matches start_birth
+        let b = 1.46 * contact;
 
         let mut bodies = vec![
             crate::orbit::Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: EARTH_MASS },

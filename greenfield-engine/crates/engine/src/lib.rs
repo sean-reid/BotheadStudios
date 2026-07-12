@@ -1787,6 +1787,7 @@ mod app {
         /// The bulk interior sphere (the un-materialized deep Earth): visible only through the crater —
         /// the top of the outer core at cap depth, glowing at its REAL temperature ("hollow earth" fix).
         interior_uni: UniformSlot,
+        sun_uni: UniformSlot,
         interior_tint: [f32; 4],
         interior_glow: [f32; 4],
         wall_unis: Vec<UniformSlot>,
@@ -1904,6 +1905,7 @@ mod app {
                 .map(|_| make_space_uniform(&device, &bind_layout))
                 .collect();
             let interior_uni = make_space_uniform(&device, &bind_layout);
+            let sun_uni = make_space_uniform(&device, &bind_layout);
             let wall_unis: Vec<UniformSlot> = (0..WALL_N)
                 .map(|_| make_space_uniform(&device, &bind_layout))
                 .collect();
@@ -2016,6 +2018,7 @@ mod app {
                 impact_site_rel: None,
                 shell_unis,
                 interior_uni,
+                sun_uni,
                 interior_tint,
                 interior_glow,
                 wall_unis,
@@ -2203,9 +2206,12 @@ mod app {
             // ~10.8 km/s at ~46° obliquity (perigee 5.6e6 m — a solid hit): the giant-impact
             // hypothesis's geometry, EMERGENT from b, never aimed. (0.87·contact gave only 29° — too
             // steep; the ejecta buried instead of lofting. Robin caught it on-screen.)
+            // Near-PARABOLIC approach (canonical Theia: v∞ ≈ 0–4 km/s; our 4 km/s at this range gives
+            // v∞ ≈ 2.6). The previous 6 km/s arrived ~1.3 km/s hot over escape speed and ejected far
+            // too much. Wider aim keeps the ~45° obliquity at the slower closing rate.
             let d0 = 9.6e7; // ≈ 25% of lunar distance — the scene's opening framing
-            let v_in = 6_000.0;
-            let b = 1.30 * contact;
+            let v_in = 5_000.0;
+            let b = 1.46 * contact;
             let earth = self.bodies[1];
             self.bodies.truncate(2);
             self.bodies.push(crate::orbit::Body {
@@ -2251,7 +2257,7 @@ mod app {
                 return String::from("null");
             };
             let earth = self.bodies[1];
-            let mu = crate::orbit::G * EARTH_MASS;
+            let mu = crate::orbit::G * earth.mass; // live mass — the books moved with the matter
             let touch = agg.contact.map_or(1.0e6, |c| 2.2 * c.radius);
             let mut aloft: Vec<usize> = Vec::new();
             let (mut bound_m, mut escaped_m) = (0.0f64, 0.0f64);
@@ -2494,6 +2500,10 @@ mod app {
                     self.debris_acc = acc0;
                     self.moon_debris = Some(agg);
                     self.impact_site_rel = Some(site - earth_pos); // crater mask, in Earth's frame
+                    // The materialized cap LEFT Earth's bulk: its mass moves from the summary body to
+                    // the particles (it was double-counted — Earth pulled ~22% too hard at Theia scale).
+                    let cap_mass = moon_mass * (crate::impact::CAP_N as f64 / DEBRIS_N as f64);
+                    self.bodies[1].mass -= cap_mass;
                     // The impactor IS the debris now — its matter exists exactly once. Reduce the parked
                     // point mass to nothing (a 1 kg marker keeps the body-array shape) so its mass isn't
                     // counted twice in the N-body (Theia is 11% of Earth — a real double-count).
@@ -2506,14 +2516,14 @@ mod app {
             // contact law + the conservative Earth boundary + Gauss-interior gravity).
             if let Some(agg) = self.moon_debris.as_mut() {
                 let earth_pos = self.bodies[1].pos;
-                agg.set_gravity_source_pos(earth_pos);
-                // EVERY massive body pulls the debris — Sun first among them (declared matter, its mass
-                // from planet::sun()'s composition). One law, no scene modifiers.
-                agg.set_gravity_bodies(vec![(
-                    self.bodies[0].pos,
-                    self.bodies[0].mass,
-                    crate::planet::sun().radius(),
-                )]);
+                // EVERY massive body pulls the debris with its LIVE mass — Earth (which shrank by the
+                // materialized cap and regrows by demotion) and the Sun (declared matter). The static
+                // build-time source is retired here so nothing is counted twice.
+                agg.gravity_source = None;
+                agg.set_gravity_bodies(vec![
+                    (earth_pos, self.bodies[1].mass, EARTH_RADIUS_M),
+                    (self.bodies[0].pos, self.bodies[0].mass, 6.96e8),
+                ]);
                 agg.set_boundary_center(earth_pos);
                 agg.boundary_vel = self.bodies[1].vel; // the ground shears at Earth's velocity (no spin yet)
                 if let Some(rel) = self.impact_site_rel {
@@ -2521,6 +2531,15 @@ mod app {
                 }
                 agg.step(&mut self.debris_acc, dt);
                 self.sim_since_impact += dt; // the aftermath clock (sim time, not wall time)
+                // TWO-WAY gravity: the cloud pulls Earth back (Newton's third law — one-way coupling
+                // leaked momentum and pumped spurious chaos into the orbits). First-order impulse.
+                let mut a_earth = glam::DVec3::ZERO;
+                for p in &agg.particles {
+                    let d = p.pos - earth_pos;
+                    let r2 = d.length_squared().max(EARTH_RADIUS_M * EARTH_RADIUS_M);
+                    a_earth += d * (crate::orbit::G * p.mass * r2.powf(-1.5));
+                }
+                self.bodies[1].vel += a_earth * dt;
                 // DEMOTION (docs/27): settled matter IS Earth again — drain it back into the bulk
                 // summary (mass to the planet, particle removed). Fidelity ∝ observability (docs/13);
                 // FPS follows from honesty — we stop simulating what has stopped happening. r_tol spans
@@ -2701,6 +2720,23 @@ mod app {
                     [0.0; 4], // the surface doesn't self-glow (the exposed deep matter does)
                 );
             }
+            // THE SUN: real matter (planet::sun), rendered where it actually is — a ~0.5° disk of
+            // photosphere-temperature plasma (5,772 K → white, via the same incandescence law as hot
+            // rock). It enters frame whenever the camera looks sunward — opposition geometry included —
+            // because it is drawn at its position, not painted on a skybox.
+            {
+                let spos = ((r_bodies[0] - focus) * DISPLAY_SCALE).as_vec3();
+                let sun_r_disp = (6.96e8 * DISPLAY_SCALE) as f32;
+                write_space_uniform(
+                    &self.queue,
+                    &self.sun_uni,
+                    view_proj,
+                    Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(sun_r_disp)),
+                    earth_light,
+                    [0.0, 0.0, 0.0, 1.0],          // no reflectance — it is the illuminant
+                    incandescence(5_772.0),         // the photosphere glows at its real temperature
+                );
+            }
             // The BULK INTERIOR (the un-materialized deep Earth): an opaque sphere at the depth the
             // crater exposes — the top of the outer core — glowing at its real temperature (docs/25).
             // The planet is not hollow; through the crater you see molten interior, not far-side crust.
@@ -2864,6 +2900,7 @@ mod app {
                     occlusion_query_set: None,
                 });
                 pass.set_pipeline(&self.pipeline);
+                draw(&mut pass, &self.sun_uni, &self.sphere_gpu); // the Sun, where it really is
                 draw(&mut pass, &self.interior_uni, &self.sphere_gpu); // the glowing deep interior
                 for uni in self.wall_unis.iter() {
                     draw(&mut pass, uni, &self.sphere_gpu); // crater bowl wall (zero-scale when intact)
