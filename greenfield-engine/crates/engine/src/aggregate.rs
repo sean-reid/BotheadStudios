@@ -594,8 +594,9 @@ impl Aggregate {
         v_ref: DVec3,
         speed_tol: f64,
         r_tol: f64,
-    ) -> (usize, f64) {
+    ) -> (usize, f64, DVec3) {
         let mut drained_mass = 0.0;
+        let mut drained_l = DVec3::ZERO; // angular momentum about the planet — it becomes SPIN
         let mut i = 0;
         let mut n = 0;
         while i < self.particles.len() {
@@ -604,6 +605,7 @@ impl Aggregate {
                 && (p.vel - v_ref).length() < speed_tol;
             if settled {
                 drained_mass += p.mass;
+                drained_l += (p.pos - center).cross((p.vel - v_ref) * p.mass);
                 self.particles.swap_remove(i);
                 self.temps.swap_remove(i);
                 self.mat_ids.swap_remove(i);
@@ -612,7 +614,7 @@ impl Aggregate {
                 i += 1;
             }
         }
-        (n, drained_mass)
+        (n, drained_mass, drained_l)
     }
 
     pub fn step(&mut self, acc: &mut Vec<DVec3>, dt: f64) {
@@ -1097,7 +1099,7 @@ mod tests {
             1.0,
         );
         agg.self_gravity = false;
-        let (n, m) = agg.drain_settled(DVec3::ZERO, r0, DVec3::ZERO, 30.0, 1.0e6);
+        let (n, m, _l) = agg.drain_settled(DVec3::ZERO, r0, DVec3::ZERO, 30.0, 1.0e6);
         assert_eq!(n, 1, "only the settled particle drains");
         assert!((m - 5.0).abs() < 1e-9, "its mass returns to the planet");
         assert_eq!(agg.particles.len(), 2, "orbiting + falling matter keeps simulating");

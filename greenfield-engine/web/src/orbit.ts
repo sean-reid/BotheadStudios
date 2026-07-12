@@ -352,6 +352,9 @@ async function main(): Promise<void> {
         `Earth–${birthScene ? "Theia" : "Moon"} <b>${demo.moon_distance_km().toFixed(0)}</b> km · ` +
         `v <b>${demo.moon_speed_kms().toFixed(2)}</b> km/s<br>` +
         `${line2}<br>` +
+        (demo.earth_day_hours() > 0
+          ? `Earth day <b>${demo.earth_day_hours().toFixed(1)} h</b> · `
+          : "") +
         `time <b>${Math.round(demo.time_scale_value()).toLocaleString()}×</b> · ` +
         `<b>${fps}</b> fps · build <b>${__BUILD_ID__}</b> · drag / pinch` +
         (demo.has_impacted()

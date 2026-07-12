@@ -29,6 +29,7 @@ mod granular;
 mod gravity;
 mod impact;
 mod planet;
+mod tides;
 #[cfg(test)]
 mod isotropy;
 mod materials;
@@ -1779,6 +1780,14 @@ mod app {
         /// SIM seconds elapsed since the impact — the honest answer to "what timeframe are we watching
         /// this over?" (the aftermath runs under time-LOD, so real seconds ≠ sim seconds).
         sim_since_impact: f64,
+        /// Earth's SPIN angular momentum (docs/27): set by the modern day length in the orbital scenes;
+        /// ZERO for proto-Earth in the birth scene (its primordial spin is unknown — flagged) so the
+        /// post-impact day length EMERGES from the collision geometry. Fed by the boundary-shear mirror,
+        /// demoted matter's orbital L, and drained by tidal torque on the moonlets.
+        spin_l: glam::DVec3,
+        /// Accumulated rotation angle (rad) about the spin axis — the VISIBLE rotation of the shell
+        /// (and its landmask) at the real rate implied by spin_l.
+        spin_angle: f64,
         moon_debris: Option<crate::aggregate::Aggregate>,
         /// Impact site relative to Earth's centre (set at the shatter) — masks the shell over the
         /// materialized region so the excavated crater is visible, and moves with the orbiting Earth.
@@ -2017,6 +2026,11 @@ mod app {
                 debris_rate_mul: 1.0,
                 crater_heal_m3: 0.0,
                 sim_since_impact: 0.0,
+                // Modern Earth: the measured sidereal day, spin axis ⊥ the orbital (x-y) plane.
+                spin_l: glam::DVec3::new(0.0, 0.0, 1.0)
+                    * (crate::tides::moment_of_inertia(EARTH_MASS, EARTH_RADIUS_M)
+                        * (2.0 * std::f64::consts::PI / 86_164.0)),
+                spin_angle: 0.0,
                 moon_debris: None,
                 impact_site_rel: None,
                 shell_unis,
@@ -2212,6 +2226,8 @@ mod app {
             // Near-PARABOLIC approach (canonical Theia: v∞ ≈ 0–4 km/s; our 4 km/s at this range gives
             // v∞ ≈ 2.6). The previous 6 km/s arrived ~1.3 km/s hot over escape speed and ejected far
             // too much. Wider aim keeps the ~45° obliquity at the slower closing rate.
+            // Proto-Earth spin: UNKNOWN, declared zero (flagged) — the post-impact day must EMERGE.
+            self.spin_l = glam::DVec3::ZERO;
             let d0 = 9.6e7; // ≈ 25% of lunar distance — the scene's opening framing
             let v_in = 5_000.0;
             let b = 1.46 * contact;
@@ -2306,6 +2322,12 @@ mod app {
                 biggest / M_MOON,
                 clump.len()
             )
+        }
+
+        /// Earth's day length (hours) from its live spin state — ∞ (0.0 returned as -1) if not spinning.
+        pub fn earth_day_hours(&self) -> f64 {
+            let t = crate::tides::spin_period_s(self.spin_l, self.bodies[1].mass, EARTH_RADIUS_M);
+            if t.is_finite() { t / 3600.0 } else { -1.0 }
         }
 
         /// SIM seconds since the impact (−1 before it) — for the HUD's T+ aftermath clock.
@@ -2419,6 +2441,9 @@ mod app {
                 (0..n_moons).map(|k| self.bodies[2 + k].vel - earth_vel_before).collect();
 
             crate::orbit::verlet_step(&mut self.bodies, &mut self.acc, dt);
+            // The planet visibly ROTATES at the rate its spin angular momentum implies.
+            self.spin_angle += dt * self.spin_l.length()
+                / crate::tides::moment_of_inertia(self.bodies[1].mass, EARTH_RADIUS_M);
 
             // SWEPT continuous collision (the general "forecast the path" primitive, docs/13).
             let (earth_pos, earth_vel) = (self.bodies[1].pos, self.bodies[1].vel);
@@ -2553,8 +2578,15 @@ mod app {
                 // the boundary/shear reaction. Total momentum conserves to roundoff.
                 let p_before: glam::DVec3 =
                     agg.particles.iter().map(|p| p.vel * p.mass).sum();
+                let earth_vel_now = self.bodies[1].vel;
+                let l_before = crate::tides::cloud_angular_momentum(
+                    &agg.particles, earth_pos, earth_vel_now,
+                );
                 let sun_pos = self.bodies[0].pos;
                 let sun_mass = self.bodies[0].mass;
+                let j_sun_ang = crate::tides::sun_angular_impulse(
+                    &agg.particles, earth_pos, sun_pos, sun_mass, dt,
+                );
                 let j_sun: glam::DVec3 = agg
                     .particles
                     .iter()
@@ -2569,6 +2601,35 @@ mod app {
                     agg.particles.iter().map(|p| p.vel * p.mass).sum();
                 let m_e = self.bodies[1].mass;
                 self.bodies[1].vel -= (p_after - p_before - j_sun) / m_e;
+                // ANGULAR mirror (docs/27): the cloud's ΔL about Earth, minus the Sun's share, is the
+                // boundary shear's torque — it becomes Earth SPIN. This is how the giant impact sets
+                // the length of the day; nothing declares it.
+                let l_after = crate::tides::cloud_angular_momentum(
+                    &agg.particles, earth_pos, earth_vel_now,
+                );
+                self.spin_l -= l_after - l_before - j_sun_ang;
+                // TIDAL torque: the spinning Earth's bulge exchanges angular momentum with every aloft
+                // bound moonlet (outward migration for a fast prograde spin) — the 4.5 Gyr mechanism,
+                // validated against the Moon's measured 3.8 cm/yr recession (tides.rs).
+                let mu_e = crate::orbit::G * m_e;
+                for p in agg.particles.iter_mut() {
+                    let r = (p.pos - earth_pos).length();
+                    let eps = 0.5 * (p.vel - earth_vel_now).length_squared() - mu_e / r;
+                    if eps < 0.0 && r > 1.1 * EARTH_RADIUS_M {
+                        let (kick, d_spin) = crate::tides::tidal_kick(
+                            crate::tides::EARTH_K2_OVER_Q,
+                            p,
+                            earth_pos,
+                            earth_vel_now,
+                            m_e,
+                            EARTH_RADIUS_M,
+                            self.spin_l,
+                            dt,
+                        );
+                        p.vel += kick;
+                        self.spin_l += d_spin;
+                    }
+                }
                 self.sim_since_impact += dt; // the aftermath clock (sim time, not wall time)
                 // DEMOTION (docs/27): settled matter IS Earth again — drain it back into the bulk
                 // summary (mass to the planet, particle removed). Fidelity ∝ observability (docs/13);
@@ -2576,7 +2637,7 @@ mod app {
                 // the pile depth; the drained heat is dropped (flagged). Earth's gravity-source mass for
                 // the remaining debris still reads the original EARTH_MASS (≤2% low — flagged).
                 let frag_r = agg.contact.map_or(5.0e5, |c| c.radius);
-                let (n_drained, m_drained) = agg.drain_settled(
+                let (n_drained, m_drained, l_drained) = agg.drain_settled(
                     earth_pos,
                     EARTH_RADIUS_M,
                     self.bodies[1].vel,
@@ -2585,6 +2646,7 @@ mod app {
                 );
                 if n_drained > 0 {
                     self.bodies[1].mass += m_drained; // Earth grows by what it swallowed
+                    self.spin_l += l_drained; // ...and spins up by the angular momentum it swallowed
                     // The returned matter refills the bowl: heal by its solid volume (bulk density).
                     // (hole_radius() inlined via field reads — `agg` holds the moon_debris borrow.)
                     let rho = self.mats[agg.material].density.max(1.0) as f64;
@@ -2728,8 +2790,12 @@ mod app {
                 None
             };
             let crater_r = 1.1 * self.hole_radius(); // the crater as it stands — healing shrinks it
+            let spin_rot = glam::DQuat::from_axis_angle(
+                self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z),
+                self.spin_angle % (2.0 * std::f64::consts::PI),
+            );
             for (i, uni) in self.shell_unis.iter().enumerate() {
-                let dir = crate::impact::fib_dir(i, SHELL_N);
+                let dir = spin_rot * crate::impact::fib_dir(i, SHELL_N);
                 let pos_w = earth_center + dir * (EARTH_RADIUS_M - 0.62 * shell_spacing);
                 let hidden = crater_site.map_or(false, |s| (pos_w - s).length() < crater_r);
                 let scale = if hidden { 0.0 } else { shell_grain_r }; // zero-scale ⇒ not drawn

@@ -319,10 +319,22 @@ mod tests {
             &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth_profile,
             EARTH_MASS, EARTH_RADIUS_M,
         );
+        // Spin bookkeeping (docs/27): Earth's gravity is CENTRAL (no torque about its own centre), the
+        // cloud's self-interactions conserve their own L, and there is no Sun in this test — so ALL
+        // change in the cloud's angular momentum about Earth is boundary shear, whose mirror is SPIN.
+        let l0 = crate::tides::cloud_angular_momentum(&agg.particles, DVec3::ZERO, DVec3::ZERO);
         let steps = if cfg!(debug_assertions) { 3_000 } else { 20_000 };
         for _ in 0..steps {
             agg.step(&mut acc2, 2.0);
         }
+        let l1 = crate::tides::cloud_angular_momentum(&agg.particles, DVec3::ZERO, DVec3::ZERO);
+        let spin_l = l0 - l1; // the shear's mirror: what the cloud lost, the planet's spin gained
+        let day_h = crate::tides::spin_period_s(spin_l, EARTH_MASS, EARTH_RADIUS_M) / 3600.0;
+        println!("EMERGENT length of day after the giant impact: {day_h:.1} h (canonical ~5 h)");
+        assert!(
+            (2.0..14.0).contains(&day_h),
+            "the impact sets a fast day, never declared (got {day_h:.1} h)"
+        );
         // MEASURE (no closure, no rule): the lofted bound reservoir, and REAL clumping — connected
         // components of contact adjacency among aloft fragments. Rubble-pile moonlets are fragments
         // held touching by inelastic contact + self-gravity; a multi-fragment clump is accretion
