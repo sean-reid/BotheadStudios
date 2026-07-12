@@ -135,7 +135,10 @@ pub fn tidal_kick(
 /// factor — nothing new declared. ANCHORS: today's day ⇒ f ≈ 1/298 (the real flattening); the
 /// emergent 3.8-h post-impact day ⇒ f ≈ 0.13, a visibly squashed proto-Earth (as models predict).
 pub fn flattening_from_spin(spin_omega: f64, mass: f64, radius: f64) -> f64 {
-    let q = spin_omega * spin_omega * radius.powi(3) / (G * mass);
+    // DOMAIN clamp: Radau–Darwin is a small-flattening theory. Past q ≈ 0.3 the body approaches
+    // rotational breakup (mass shedding — not yet modelled, flagged); extrapolating the formula gave
+    // f ≈ 2.4 and a NEGATIVE polar radius on screen. Clamp, honestly labelled.
+    let q = (spin_omega * spin_omega * radius.powi(3) / (G * mass)).min(0.3);
     let eta = 1.0 - 1.5 * EARTH_MOI_FACTOR;
     (2.5 * q) / (1.0 + 6.25 * eta * eta)
 }
@@ -143,7 +146,7 @@ pub fn flattening_from_spin(spin_omega: f64, mass: f64, radius: f64) -> f64 {
 /// The oblate figure's J₂ gravity coefficient, first order: J₂ = (2/3)·(f − q/2).
 /// ANCHOR: today's Earth ⇒ 1.08e-3 (measured: 1.0826e-3).
 pub fn j2_from_spin(spin_omega: f64, mass: f64, radius: f64) -> f64 {
-    let q = spin_omega * spin_omega * radius.powi(3) / (G * mass);
+    let q = (spin_omega * spin_omega * radius.powi(3) / (G * mass)).min(0.3); // domain clamp (see above)
     let f = flattening_from_spin(spin_omega, mass, radius);
     (2.0 / 3.0) * (f - 0.5 * q)
 }

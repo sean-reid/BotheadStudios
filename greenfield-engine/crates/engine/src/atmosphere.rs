@@ -271,6 +271,48 @@ impl AirField {
     }
 }
 
+/// Sea-level Rayleigh optical depths for the R/G/B bands (650/550/450 nm), scaled by the EMERGENT
+/// surface-pressure ratio (an airless world scatters nothing — the Moon stays colorless for free).
+/// τ(λ) = 0.0088·(P/P₀)·λ^−4.05 (λ in µm) — the standard empirical fit for Earth air (Hansen &
+/// Travis 1974); the λ⁻⁴ is molecular (Rayleigh) physics, the coefficient is our declared N₂/O₂
+/// column doing the scattering. THE BLUE MARBLE IS DERIVED, NEVER PAINTED: remove the atmosphere and
+/// the blue leaves with it.
+pub fn rayleigh_tau(pressure_ratio: f64) -> [f64; 3] {
+    let t = |um: f64| 0.0088 * pressure_ratio * um.powf(-4.05);
+    [t(0.650), t(0.550), t(0.450)]
+}
+
+/// Single-scatter Rayleigh VEIL toward a viewer: the added radiance (pre-tonemap, in the same units
+/// as albedo·SUN_GAIN) for a surface patch with view cosine `mu_v`, sun cosine `mu_s`, and
+/// sun-to-view angle cosine `cos_theta`. In-scatter = phase·(1 − e^−τ/μᵥ)·(sunlight attenuated on the
+/// way in). Flat-slab slant path (Chapman function is the refinement, flagged); single scatter only
+/// (multiple scattering + ozone are the refinement). Night side → 0, honestly.
+pub fn rayleigh_veil(mu_v: f64, mu_s: f64, cos_theta: f64, tau: [f64; 3], sun_gain: f64) -> [f32; 3] {
+    if mu_s <= 0.0 {
+        return [0.0; 3];
+    }
+    let mu_v = mu_v.max(0.08); // grazing-path cap in lieu of the true Chapman function (flagged)
+    let phase = (3.0 / (16.0 * std::f64::consts::PI)) * (1.0 + cos_theta * cos_theta);
+    let mut out = [0.0f32; 3];
+    for (i, t) in tau.iter().enumerate() {
+        let scattered = 1.0 - (-t / mu_v).exp(); // fraction of the beam scattered along the view path
+        let sun_in = (-t / mu_s.max(0.08)).exp(); // sunlight surviving the way in (twilight reddening)
+        out[i] = (sun_gain * phase * scattered * sun_in * mu_s) as f32;
+    }
+    out
+}
+
+/// Two-way transmittance of the surface's reflected light through the air (in on the sun path, out on
+/// the view path) — the slight reddening of the ground under its blue veil.
+pub fn rayleigh_transmit(mu_v: f64, mu_s: f64, tau: [f64; 3]) -> [f32; 3] {
+    let path = 1.0 / mu_v.max(0.08) + 1.0 / mu_s.max(0.08);
+    [
+        (-tau[0] * path).exp() as f32,
+        (-tau[1] * path).exp() as f32,
+        (-tau[2] * path).exp() as f32,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +320,29 @@ mod tests {
     use crate::materials;
     use crate::orbit::Body;
     use glam::DVec3;
+
+    #[test]
+    fn the_blue_marble_is_derived_from_the_air_not_painted() {
+        // λ⁻⁴: blue scatters ~4.4× more than red — the sky is blue because molecules are small.
+        let tau = rayleigh_tau(1.0);
+        assert!(
+            (tau[2] / tau[0] - (650.0f64 / 450.0).powf(4.05)).abs() < 0.1,
+            "the λ⁻⁴ law (got ratio {:.2})", tau[2] / tau[0]
+        );
+        // The day-side veil is BLUE-dominant…
+        let v = rayleigh_veil(0.8, 0.8, 0.5, tau, 22.0);
+        assert!(v[2] > v[1] && v[1] > v[0], "blue > green > red veil (got {v:?})");
+        // …brighter at the limb (long slant path)…
+        let limb = rayleigh_veil(0.1, 0.8, 0.5, tau, 22.0);
+        assert!(limb[2] > v[2], "limb glow exceeds nadir (got {} vs {})", limb[2], v[2]);
+        // …zero on the night side, and zero on an airless world. No atmosphere, no blue. Honest.
+        assert_eq!(rayleigh_veil(0.8, -0.1, 0.5, tau, 22.0), [0.0; 3], "night is dark");
+        let vacuum = rayleigh_tau(0.0);
+        assert_eq!(rayleigh_veil(0.8, 0.8, 0.5, vacuum, 22.0), [0.0; 3], "the Moon stays colorless");
+        // And the ground under the air reddens slightly (blue is scattered OUT of the beam).
+        let t = rayleigh_transmit(0.8, 0.8, tau);
+        assert!(t[0] > t[2], "transmittance favors red (got {t:?})");
+    }
 
     #[test]
     fn airs_declared_constants_give_the_real_gas_constant_and_scale_height() {

@@ -114,6 +114,13 @@ pub struct Aggregate {
     /// Sim-seconds since radiative cooling was last applied: per-substep decrements (~1e-4 K) underflow
     /// f32 at thousands of kelvin, so cooling is applied in batched, resolvable intervals.
     pub cool_elapsed: f64,
+    /// The NET boundary force (N) and its torque about the boundary centre (N·m) from the latest
+    /// `accelerations()` pass — measured DIRECTLY at the point of application, so the planet's
+    /// reaction (linear and SPIN) is Newton's-third-law-exact without differencing cloud momenta
+    /// about a moving reference (which FABRICATES angular momentum — measured: a 0.9-h day from a
+    /// 4.6e34 impactor, 4× more L than exists).
+    pub boundary_force_sum: DVec3,
+    pub boundary_torque_sum: DVec3,
 }
 
 impl Aggregate {
@@ -140,6 +147,8 @@ impl Aggregate {
             boundary_vel: DVec3::ZERO,
             boundary_hole: None,
             cool_elapsed: 0.0,
+            boundary_force_sum: DVec3::ZERO,
+            boundary_torque_sum: DVec3::ZERO,
         }
     }
 
@@ -270,6 +279,8 @@ impl Aggregate {
             boundary_vel: DVec3::ZERO,
             boundary_hole: None,
             cool_elapsed: 0.0,
+            boundary_force_sum: DVec3::ZERO,
+            boundary_torque_sum: DVec3::ZERO,
         }
     }
 
@@ -393,7 +404,7 @@ impl Aggregate {
     }
 
     /// Softened mutual-gravity acceleration on every particle (N-body).
-    pub fn accelerations(&self) -> Vec<DVec3> {
+    pub fn accelerations(&mut self) -> Vec<DVec3> {
         let s2 = self.softening * self.softening;
         let p = &self.particles;
         let mut acc = vec![self.gravity; p.len()]; // uniform external gravity (0 for a rubble pile)
@@ -469,7 +480,11 @@ impl Aggregate {
         // Conservative boundary sphere (the un-materialised bulk planet): an outward penalty spring for any
         // particle that has pushed inside it. A FORCE (−∇U of ½k·penetration²), not a velocity reset — so
         // debris rests on it and rains back without the "cancel the inward component" fudge.
+        self.boundary_force_sum = DVec3::ZERO;
+        self.boundary_torque_sum = DVec3::ZERO;
         if let Some((center, radius, stiffness)) = self.boundary {
+            let mut f_sum = DVec3::ZERO;
+            let mut tq_sum = DVec3::ZERO;
             for (i, body) in p.iter().enumerate() {
                 let d = body.pos - center;
                 let dist = d.length();
@@ -503,6 +518,7 @@ impl Aggregate {
                 if !in_solid {
                     continue;
                 }
+                let mut f_particle = DVec3::ZERO; // per-mass accel from the boundary, this particle
                 let v_rel = body.vel - self.boundary_vel;
                 let v_n = v_rel.dot(n_hat); // >0 exiting the solid
                 let (c_damp, mu, tan_d, sh, cr) = self.contact.map_or((0.0, 0.0, 0.0, 0.0, 1.0), |c| {
@@ -511,14 +527,21 @@ impl Aggregate {
                 let c_eff = c_damp + sh * v_n.abs() / (4.0 * cr.max(1.0e-9));
                 let f_n = (stiffness * pen - c_eff * v_n).max(0.0);
                 acc[i] += n_hat * f_n;
+                f_particle += n_hat * f_n;
                 // Coulomb shear against the moving ground: opposes slip, capped at μ·N.
                 let v_t = v_rel - n_hat * v_n;
                 let vt_mag = v_t.length();
                 if vt_mag > 1.0e-9 && mu > 0.0 {
                     let f_t = (tan_d * vt_mag).min(mu * f_n);
                     acc[i] -= (v_t / vt_mag) * f_t;
+                    f_particle -= (v_t / vt_mag) * f_t;
                 }
+                let force = f_particle * body.mass; // per-mass → newtons
+                f_sum += force;
+                tq_sum += (body.pos - center).cross(force);
             }
+            self.boundary_force_sum = f_sum;
+            self.boundary_torque_sum = tq_sum;
         }
 
         // Material cohesion: each intact bond is a Hookean spring toward its rest length, plus a damper

@@ -273,7 +273,7 @@ mod app {
                 .map(|t| t as f32 - c.y)
                 .unwrap_or(0.0);
             let spawn = Vec3::new(0.0, surf + SPHERE_RADIUS + SPAWN_HEIGHT, 0.0);
-            let probe = build_probe(&mats, spawn);
+            let mut probe = build_probe(&mats, spawn);
             let probe_acc = probe.accelerations();
             let probe_instances = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("probe-instances"),
@@ -1797,6 +1797,7 @@ mod app {
         /// the top of the outer core at cap depth, glowing at its REAL temperature ("hollow earth" fix).
         interior_uni: UniformSlot,
         sun_uni: UniformSlot,
+        atm_tau: [f64; 3],
         interior_tint: [f32; 4],
         interior_glow: [f32; 4],
         wall_unis: Vec<UniformSlot>,
@@ -1915,6 +1916,11 @@ mod app {
                 .collect();
             let interior_uni = make_space_uniform(&device, &bind_layout);
             let sun_uni = make_space_uniform(&device, &bind_layout);
+            // Rayleigh optical depths from the EMERGENT surface pressure (planet::earth's declared
+            // atmosphere mass) — the blue marble is derived from the air, never painted (docs/26).
+            let atm_tau = crate::atmosphere::rayleigh_tau(
+                crate::planet::earth().surface_pressure() / 101_325.0,
+            );
             let wall_unis: Vec<UniformSlot> = (0..WALL_N)
                 .map(|_| make_space_uniform(&device, &bind_layout))
                 .collect();
@@ -2036,6 +2042,7 @@ mod app {
                 shell_unis,
                 interior_uni,
                 sun_uni,
+                atm_tau,
                 interior_tint,
                 interior_glow,
                 wall_unis,
@@ -2579,14 +2586,8 @@ mod app {
                 let p_before: glam::DVec3 =
                     agg.particles.iter().map(|p| p.vel * p.mass).sum();
                 let earth_vel_now = self.bodies[1].vel;
-                let l_before = crate::tides::cloud_angular_momentum(
-                    &agg.particles, earth_pos, earth_vel_now,
-                );
                 let sun_pos = self.bodies[0].pos;
                 let sun_mass = self.bodies[0].mass;
-                let j_sun_ang = crate::tides::sun_angular_impulse(
-                    &agg.particles, earth_pos, sun_pos, sun_mass, dt,
-                );
                 let j_sun: glam::DVec3 = agg
                     .particles
                     .iter()
@@ -2601,13 +2602,12 @@ mod app {
                     agg.particles.iter().map(|p| p.vel * p.mass).sum();
                 let m_e = self.bodies[1].mass;
                 self.bodies[1].vel -= (p_after - p_before - j_sun) / m_e;
-                // ANGULAR mirror (docs/27): the cloud's ΔL about Earth, minus the Sun's share, is the
-                // boundary shear's torque — it becomes Earth SPIN. This is how the giant impact sets
-                // the length of the day; nothing declares it.
-                let l_after = crate::tides::cloud_angular_momentum(
-                    &agg.particles, earth_pos, earth_vel_now,
-                );
-                self.spin_l -= l_after - l_before - j_sun_ang;
+                // ANGULAR reaction (docs/27), measured DIRECTLY at the boundary: the shear torque the
+                // cloud received about Earth's centre mirrors into SPIN — this is how the impact sets
+                // the day. (The earlier ΔL-differencing about a moving centre FABRICATED angular
+                // momentum: a 0.9-h day from an impactor carrying a quarter of that — caught on the
+                // HUD by its own physics being impossible.)
+                self.spin_l -= agg.boundary_torque_sum * dt;
                 // TIDAL torque: the spinning Earth's bulge exchanges angular momentum with every aloft
                 // bound moonlet (outward migration for a fast prograde spin) — the 4.5 Gyr mechanism,
                 // validated against the Moon's measured 3.8 cm/yr recession (tides.rs).
@@ -2619,9 +2619,15 @@ mod app {
                 for p in agg.particles.iter_mut() {
                     let r = (p.pos - earth_pos).length();
                     // The oblate figure's gravity (J2): close orbits around the squashed post-impact
-                    // Earth precess — the profile change Robin asked about, from the same spin state.
-                    p.vel += crate::tides::j2_accel(p.pos - earth_pos, mu_e, EARTH_RADIUS_M, j2, s_hat)
-                        * dt;
+                    // Earth precess. EXTERIOR multipole ONLY — the expansion is invalid inside the
+                    // body, and applying it to crater-pile particles (r ≈ 0.5 R⊕, where 1/r⁴ blows up
+                    // 16×) pumped the pile against the boundary until EVERYTHING ejected past escape
+                    // (Robin: "an explosion of fudge" — it was: an equation used outside its domain).
+                    if r > 1.05 * EARTH_RADIUS_M {
+                        p.vel +=
+                            crate::tides::j2_accel(p.pos - earth_pos, mu_e, EARTH_RADIUS_M, j2, s_hat)
+                                * dt;
+                    }
                     let eps = 0.5 * (p.vel - earth_vel_now).length_squared() - mu_e / r;
                     if eps < 0.0 && r > 1.1 * EARTH_RADIUS_M {
                         let (kick, d_spin) = crate::tides::tidal_kick(
@@ -2798,6 +2804,15 @@ mod app {
                 None
             };
             let crater_r = 1.1 * self.hole_radius(); // the crater as it stands — healing shrinks it
+            // Camera eye in display coordinates (relative to the focus body) — the same construction
+            // as view_proj, needed for the per-grain Rayleigh view path.
+            let cp = self.camera.pitch.cos();
+            let eye_disp = glam::DVec3::new(
+                (cp * self.camera.yaw.sin()) as f64,
+                self.camera.pitch.sin() as f64,
+                (cp * self.camera.yaw.cos()) as f64,
+            ) * (self.camera.base_distance * self.camera.zoom) as f64;
+            let sun_dir_earth = (sun - earth_center).normalize_or_zero();
             let spin_axis = self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
             let spin_rot = glam::DQuat::from_axis_angle(
                 spin_axis,
@@ -2825,7 +2840,17 @@ mod app {
                 // area particles": the grain is the mean of its ~10°×10° patch, nothing painted.
                 let surf = crate::planet::earth_surface_material(dir);
                 let m = &self.mats[materials::index_of(&self.mats, surf)];
-                let tint = [m.albedo[0], m.albedo[1], m.albedo[2], 1.0];
+                // RAYLEIGH (docs/26): the declared air scatters sunlight over this patch — a blue
+                // veil (into the emissive channel: it IS added light) whose ground shows through
+                // slightly reddened (two-way transmittance). All from the emergent pressure; an
+                // airless world renders colorless by the same code.
+                let v_dir = (eye_disp - (pos_w - focus) * DISPLAY_SCALE).normalize_or_zero();
+                let mu_v = dir.dot(v_dir);
+                let mu_s = dir.dot(sun_dir_earth);
+                let cos_th = v_dir.dot(sun_dir_earth);
+                let veil = crate::atmosphere::rayleigh_veil(mu_v, mu_s, cos_th, self.atm_tau, 22.0);
+                let tr = crate::atmosphere::rayleigh_transmit(mu_v, mu_s, self.atm_tau);
+                let tint = [m.albedo[0] * tr[0], m.albedo[1] * tr[1], m.albedo[2] * tr[2], 1.0];
                 write_space_uniform(
                     &self.queue,
                     uni,
@@ -2833,7 +2858,7 @@ mod app {
                     Mat4::from_translation(spos) * Mat4::from_scale(Vec3::splat(scale)),
                     earth_light,
                     tint,
-                    [0.0; 4], // the surface doesn't self-glow (the exposed deep matter does)
+                    [veil[0], veil[1], veil[2], 1.0], // the sky, added over the ground
                 );
             }
             // THE SUN: real matter (planet::sun), rendered where it actually is — a ~0.5° disk of
