@@ -1772,6 +1772,10 @@ mod app {
         /// the impact. The integration substep stays FIXED (stability is physics); only the substep
         /// count grows — under overload the observable clock dilates rather than corrupting the model.
         debris_rate_mul: f64,
+        /// Volume (m³) of settled matter demoted back into Earth — the crater HEALS by exactly this
+        /// much (docs/27): the excavated bowl refills with the matter that fell back, and when the
+        /// carved volume is repaid the planet is whole again. Nothing re-solidifies by decree.
+        crater_heal_m3: f64,
         /// SIM seconds elapsed since the impact — the honest answer to "what timeframe are we watching
         /// this over?" (the aftermath runs under time-LOD, so real seconds ≠ sim seconds).
         sim_since_impact: f64,
@@ -2004,6 +2008,7 @@ mod app {
                 birth_mode: false,
                 debris_frame_dt: DEBRIS_DT,
                 debris_rate_mul: 1.0,
+                crater_heal_m3: 0.0,
                 sim_since_impact: 0.0,
                 moon_debris: None,
                 impact_site_rel: None,
@@ -2056,6 +2061,7 @@ mod app {
             self.debris_acc.clear();
             self.impact_site_rel = None;
             self.sim_since_impact = 0.0;
+            self.crater_heal_m3 = 0.0;
             // Drop the snapshot history — the renderer must not interpolate across the reset.
             self.snaps.clear();
             self.real_accum = 0.0;
@@ -2169,6 +2175,15 @@ mod app {
             (2.0 * self.impactor_radius).min(0.55 * EARTH_RADIUS_M)
         }
 
+        /// The crater's CURRENT radius: the carved half-ball minus the volume repaid by settled matter
+        /// (`crater_heal_m3`). Reaches zero ⇒ healed: hole gone, shell restored, interior covered.
+        fn hole_radius(&self) -> f64 {
+            let r0 = self.cap_extent();
+            let vol0 = (2.0 / 3.0) * std::f64::consts::PI * r0.powi(3);
+            let rem = (vol0 - self.crater_heal_m3).max(0.0);
+            (rem * 3.0 / (2.0 * std::f64::consts::PI)).cbrt()
+        }
+
         /// Configure the BIRTH OF THE MOON scenario (docs/27): body 2 becomes THEIA — Mars-sized,
         /// differentiated — inbound with a real IMPACT PARAMETER, so the ~45° obliquity of the
         /// giant-impact hypothesis EMERGES from geometry + gravity (recovered at contact by the
@@ -2205,6 +2220,7 @@ mod app {
             self.debris_acc.clear();
             self.impact_site_rel = None;
             self.sim_since_impact = 0.0;
+            self.crater_heal_m3 = 0.0;
             self.snaps.clear();
             self.real_accum = 0.0;
             // ~5 real seconds to impact: sim time-to-contact / 5.
@@ -2510,6 +2526,10 @@ mod app {
                 );
                 if n_drained > 0 {
                     self.bodies[1].mass += m_drained; // Earth grows by what it swallowed
+                    // The returned matter refills the bowl: heal by its solid volume (bulk density).
+                    let rho = self.mats[agg.material].density.max(1.0) as f64;
+                    self.crater_heal_m3 += m_drained / rho;
+                    agg.set_boundary_hole_radius(self.hole_radius());
                     self.debris_acc = agg.accelerations(); // particle count changed
                 }
                 // NO merge closure: a pairwise bound-in-contact merge welded disk material to
@@ -2644,7 +2664,7 @@ mod app {
             } else {
                 None
             };
-            let crater_r = 1.1 * self.cap_extent(); // the materialized cap extent (impact.rs), padded
+            let crater_r = 1.1 * self.hole_radius(); // the crater as it stands — healing shrinks it
             for (i, uni) in self.shell_unis.iter().enumerate() {
                 let dir = crate::impact::fib_dir(i, SHELL_N);
                 let pos_w = earth_center + dir * (EARTH_RADIUS_M - 0.62 * shell_spacing);
@@ -2688,7 +2708,7 @@ mod app {
             // floor. The gradient from dark rim to white-hot depth is the honest incandescence read.
             {
                 let profile = crate::planet::earth();
-                let hole_r = self.cap_extent();
+                let hole_r = self.hole_radius();
                 let wall_grain_r =
                     ((hole_r * (4.0 * std::f64::consts::PI / WALL_N as f64).sqrt() * 0.62)
                         * DISPLAY_SCALE) as f32;

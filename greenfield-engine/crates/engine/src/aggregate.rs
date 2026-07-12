@@ -167,6 +167,15 @@ impl Aggregate {
         }
     }
 
+    /// Shrink (heal) the hole as settled matter refills it; radius 0 removes it entirely.
+    pub fn set_boundary_hole_radius(&mut self, radius: f64) {
+        if radius <= 0.0 {
+            self.boundary_hole = None;
+        } else if let Some(h) = self.boundary_hole.as_mut() {
+            h.1 = radius;
+        }
+    }
+
     /// Set a uniform external gravity (e.g. a planet's surface field).
     pub fn with_gravity(mut self, gravity: DVec3) -> Self {
         self.gravity = gravity;
