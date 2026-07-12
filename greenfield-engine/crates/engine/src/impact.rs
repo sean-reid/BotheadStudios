@@ -37,17 +37,21 @@ pub fn fib_dir(i: usize, n: usize) -> DVec3 {
 /// incandescence). No deposited momentum, no assigned heat, no scripted anything. Returns the aggregate +
 /// its initial accelerations.
 #[allow(clippy::too_many_arguments)]
-pub fn build_impact_debris(
+#[allow(clippy::too_many_arguments)]
+pub fn build_impact_debris_between(
     mats: &[Material],
     site: DVec3,
     earth_pos: DVec3,
     earth_vel: DVec3,
-    moon_mass: f64,
+    impactor_mass: f64,
     v_contact: DVec3,
-    moon_r: f64,
+    impactor: &crate::planet::LayeredBody,
+    target: &crate::planet::LayeredBody,
     earth_mass: f64,
     earth_radius: f64,
 ) -> (Aggregate, Vec<DVec3>) {
+    let moon_mass = impactor_mass;
+    let moon_r = impactor.radius();
     let basalt = materials::index_of(mats, "basalt");
     let mat = &mats[basalt];
     // Equal-mass grains (the mass-agnostic contact model): the target's crust is materialized at the
@@ -65,8 +69,8 @@ pub fn build_impact_debris(
     // its crust, mantle, and hot core; Earth's cap is crust over mantle (and, this deep, the top of the
     // molten outer core). The phases/temps came from pressure + material melting laws (planet.rs), so
     // when the impact exposes deep matter it GLOWS because it genuinely is that hot — not painted.
-    let earth_body = crate::planet::earth();
-    let moon_body = crate::planet::moon();
+    let earth_body = target;
+    let moon_body = impactor;
 
     // IMPACTOR — a rubble ball touching the surface, moving at the TRUE contact velocity (relative to
     // the target). Its momentum and kinetic energy are carried mechanically, exactly once.
@@ -85,7 +89,9 @@ pub fn build_impact_debris(
 
     // TARGET impact region — a cap of crust in a half-ball BELOW the surface point (reflect any outward
     // direction inward), at rest on the bulk planet. This is the matter the impactor ploughs into.
-    let cap_extent = 2.0 * moon_r;
+    // Excavation scale ~ the impactor, clamped for GIANT impactors (a Theia-scale cap would swallow
+    // the planet; the giant-impact melt region is hemispheric, not global — flagged approximation).
+    let cap_extent = (2.0 * moon_r).min(0.55 * earth_radius);
     for i in 0..CAP_N {
         let d = fib_dir(i, CAP_N);
         let d_in = if d.dot(n) > 0.0 { d - n * (2.0 * d.dot(n)) } else { d }; // into the planet
@@ -127,6 +133,33 @@ pub fn build_impact_debris(
     (agg, acc0)
 }
 
+/// The moon-into-Earth case (the space-band Drop scene) — the general builder with those profiles.
+#[allow(clippy::too_many_arguments)]
+pub fn build_impact_debris(
+    mats: &[Material],
+    site: DVec3,
+    earth_pos: DVec3,
+    earth_vel: DVec3,
+    moon_mass: f64,
+    v_contact: DVec3,
+    _moon_r: f64,
+    earth_mass: f64,
+    earth_radius: f64,
+) -> (Aggregate, Vec<DVec3>) {
+    build_impact_debris_between(
+        mats,
+        site,
+        earth_pos,
+        earth_vel,
+        moon_mass,
+        v_contact,
+        &crate::planet::moon(),
+        &crate::planet::earth(),
+        earth_mass,
+        earth_radius,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +183,75 @@ mod tests {
             })
             .count();
         bound as f64 / agg.particles.len() as f64
+    }
+
+    #[test]
+    fn an_oblique_theia_impact_lofts_bound_material_the_protolunar_disk() {
+        // docs/27, THE antithesis test (Robin): the same machinery that shatters a moon must be able to
+        // BIRTH one. A Mars-sized differentiated impactor (Theia) strikes Earth OBLIQUELY at ~mutual
+        // escape speed — obliquity is what puts mantle material on lofted trajectories with angular
+        // momentum instead of straight up. Kepler alone would return every launched fragment to its
+        // launch radius; it is debris-debris contact + self-gravity (already in the model) that raise
+        // perigees into orbit. We integrate the aftermath and measure the PROTO-LUNAR material: bound
+        // fragments aloft at the end, and any with perigee already raised above the surface.
+        let mats = materials::load();
+        let theia = crate::planet::theia();
+        let earth = crate::planet::earth();
+        let m_theia = theia.total_mass();
+        let earth_pos = DVec3::ZERO;
+        let earth_vel = DVec3::ZERO;
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
+        // Mutual escape speed at contact, 45° oblique (tangential +x, radial −y).
+        let v_esc = (2.0 * G * (EARTH_MASS + m_theia)
+            / (EARTH_RADIUS_M + theia.radius()))
+        .sqrt();
+        let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
+
+        let (mut agg, mut acc) = build_impact_debris_between(
+            &mats, site, earth_pos, earth_vel, m_theia, v_contact, &theia, &earth,
+            EARTH_MASS, EARTH_RADIUS_M,
+        );
+        let steps = if cfg!(debug_assertions) { 4_000 } else { 20_000 };
+        for _ in 0..steps {
+            agg.step(&mut acc, 2.0); // hours of aftermath
+        }
+
+        let mu = G * EARTH_MASS;
+        let m_moon_real = 7.342e22;
+        let (mut aloft_bound, mut in_orbit, mut escaped) = (0.0f64, 0.0f64, 0.0f64);
+        for p in &agg.particles {
+            let r = (p.pos - earth_pos).length();
+            let v2 = (p.vel - earth_vel).length_squared();
+            let eps = 0.5 * v2 - mu / r;
+            if eps >= 0.0 {
+                escaped += p.mass;
+            } else if r > 1.1 * EARTH_RADIUS_M {
+                aloft_bound += p.mass;
+                let peri = crate::orbit::perigee(p.pos - earth_pos, p.vel - earth_vel, mu)
+                    .unwrap_or(0.0);
+                if peri > EARTH_RADIUS_M {
+                    in_orbit += p.mass; // perigee raised above the surface: genuinely orbiting
+                }
+            }
+        }
+        println!(
+            "protolunar: aloft+bound {:.2} M_moon · perigee-raised {:.2} M_moon · escaped {:.2} M_moon",
+            aloft_bound / m_moon_real,
+            in_orbit / m_moon_real,
+            escaped / m_moon_real
+        );
+        // The theorized disk is ~1–2 lunar masses. At 192-particle resolution we assert the emergence,
+        // not the precise number: a lunar-mass-scale amount of material must be aloft and BOUND (the
+        // proto-lunar reservoir), and most mass must NOT escape (giant impacts retain their debris).
+        assert!(
+            aloft_bound > 0.3 * m_moon_real,
+            "a lunar-mass-scale bound reservoir is lofted (got {:.2} M_moon)",
+            aloft_bound / m_moon_real
+        );
+        assert!(
+            escaped < 0.5 * (m_theia + aloft_bound),
+            "most material is retained by Earth's gravity"
+        );
     }
 
     #[test]

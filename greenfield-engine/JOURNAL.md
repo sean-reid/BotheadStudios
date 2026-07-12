@@ -5,6 +5,30 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — THE ANTITHESIS: the birth of the Moon (docs/27)
+
+**What.** Robin: *"a mass impacted the earth and ejected the material that became the moon — I'd like to
+see that happen. If it works, we can prove our system works."* The proof, as a passing native test: the
+SAME impact machinery that shatters a falling Moon, run in reverse role — a Mars-sized differentiated
+impactor (**Theia**: iron core + peridotite mantle, ~6.5e23 kg, declared like every other body) strikes
+Earth **obliquely** at the mutual escape speed (~9.5 km/s; obliquity is what puts mantle on lofted
+trajectories with angular momentum instead of straight up). Kepler alone would return every launched
+fragment to its launch radius — it is debris-debris CONTACT and SELF-GRAVITY, already in the model, that
+must raise perigees into orbit. Integrating the aftermath: **0.55 lunar masses of material ends up aloft,
+bound, and perigee-raised above the surface — genuinely orbiting** (the theorized proto-lunar disk is
+1–2 M_moon; 0.55 at 192-particle resolution is the right scale), while only 0.14 M_moon escapes. The
+Moon-forming reservoir emerges from the declared bodies and the one contact law. Nothing was scripted;
+the machinery was not told what a "disk" is.
+
+Also: `build_impact_debris` generalized to ANY impactor/target pair of layered bodies (the moon-drop
+scene is now just one parameterization), Theia added to the planet profiles, giant-impactor excavation
+clamped to a hemispheric scale (flagged approximation). The interactive birth-of-the-Moon SCENE (5 s HUD
+countdown, camera riding the ejecta out to watch the Moon form) is the next build on this physics.
+
+**Verified.** `an_oblique_theia_impact_lofts_bound_material_the_protolunar_disk`; 87/87 native.
+
+---
+
 ## 2026-07-11 — The exponential atmosphere EMERGES (docs/26 tests 1+2)
 
 **What.** Air is now dynamic matter (`atmosphere.rs`): gas parcels whose resistance to compression is

@@ -264,6 +264,19 @@ pub fn earth_surface_material(dir: glam::DVec3) -> &'static str {
     }
 }
 
+/// THEIA — the Mars-sized impactor of the giant-impact hypothesis (docs/27: the birth of the Moon).
+/// Declared as a differentiated Mars-like body: iron core, peridotite mantle, hot from accretion.
+/// Layer masses integrate to ~6.5e23 kg (Mars-scale, the theorized impactor class).
+pub fn theia() -> LayeredBody {
+    LayeredBody {
+        layers: vec![
+            Layer { material: "iron", outer_r: 1.8e6, density: 7_200.0, t_inner: 2_600.0, t_outer: 2_400.0 },
+            Layer { material: "peridotite", outer_r: 3.39e6, density: 3_400.0, t_inner: 2_200.0, t_outer: 1_200.0 },
+        ],
+        atmosphere_mass: 0.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
