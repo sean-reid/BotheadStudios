@@ -167,6 +167,72 @@ mod tests {
     }
 
     #[test]
+    fn a_dense_body_ploughing_through_air_feels_drag_and_momentum_is_conserved() {
+        // docs/26 emergence test 4: DRAG is not a coefficient — it is a dense solid exchanging momentum
+        // with the air parcels it sweeps, through the same contact machinery as everything else (the
+        // unequal-mass F/m form: equal-and-opposite FORCES, each particle divided by its own mass).
+        // Assertions: the body slows, the air gains exactly what the body loses (momentum conserved to
+        // float precision), and no energy is created. HONESTY FLAG: v0 parcels are isothermal-elastic,
+        // so the swept air gains bulk motion but not yet temperature — entry GLOW (test 5) needs the gas
+        // energy equation (compression work → internal energy), the next rung.
+        let mats = materials::load();
+        let air = &mats[materials::index_of(&mats, "air")];
+        let r = 1.0_f64; // parcel radius (m)
+        let parcel_m = 1.225 * (4.0 / 3.0) * std::f64::consts::PI * r.powi(3); // real air mass
+        let body_m = 2900.0 * (4.0 / 3.0) * std::f64::consts::PI * r.powi(3); // real basalt mass
+        let contact = gas_contact_from_material(air, r, parcel_m, 101_325.0);
+
+        // A corridor of resting parcels; the body flies down its axis.
+        let mut particles = vec![Body {
+            pos: DVec3::new(0.0, 0.0, -4.0),
+            vel: DVec3::new(0.0, 0.0, 60.0),
+            mass: body_m,
+        }];
+        for ix in -2i32..2 {
+            for iy in -2i32..2 {
+                for iz in 0..12 {
+                    particles.push(Body {
+                        pos: DVec3::new(
+                            (ix as f64 + 0.5) * 2.0 * r,
+                            (iy as f64 + 0.5) * 2.0 * r,
+                            iz as f64 * 2.0 * r,
+                        ),
+                        vel: DVec3::ZERO,
+                        mass: parcel_m,
+                    });
+                }
+            }
+        }
+        let mut agg = Aggregate::new(particles, 0.1).with_contact(contact, parcel_m);
+        agg.self_gravity = false;
+
+        let p0: DVec3 = agg.particles.iter().map(|b| b.vel * b.mass).sum();
+        let ke0: f64 = agg.particles.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
+        let v0 = agg.particles[0].vel.z;
+        let mut acc = agg.accelerations();
+        for _ in 0..800 {
+            agg.step(&mut acc, 1.0e-3);
+        }
+        let p1: DVec3 = agg.particles.iter().map(|b| b.vel * b.mass).sum();
+        let ke1: f64 = agg.particles.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
+        let v1 = agg.particles[0].vel.z;
+        let air_pz: f64 = agg.particles[1..].iter().map(|b| b.mass * b.vel.z).sum();
+        println!(
+            "drag: body {v0:.1} → {v1:.2} m/s · air gained {air_pz:.0} kg·m/s · ΔP {:.2e} · KE {ke0:.0} → {ke1:.0} J",
+            (p1 - p0).length()
+        );
+
+        assert!(v1 < v0 * 0.999, "the body decelerates — drag EMERGES from swept air (v {v0} → {v1})");
+        assert!(air_pz > 0.0, "the air is swept forward — it gained the body's momentum");
+        assert!(
+            (p1 - p0).length() < 1.0e-6 * p0.length(),
+            "momentum conserved across the phase boundary (drift {:.3e})",
+            (p1 - p0).length()
+        );
+        assert!(ke1 <= ke0 * 1.001, "no energy created (KE {ke0:.0} → {ke1:.0} J)");
+    }
+
+    #[test]
     fn air_parcels_released_in_vacuum_expand_freely_and_never_clump() {
         // docs/26 emergence test 3: no cohesion, no fake containment — gas fills whatever it's given.
         let mats = materials::load();
@@ -183,7 +249,7 @@ mod tests {
                 mass,
             });
         }
-        let mut agg = Aggregate::new(parcels, 0.1).with_contact(contact);
+        let mut agg = Aggregate::new(parcels, 0.1).with_contact(contact, mass);
         agg.self_gravity = false; // a lab box of air, not a self-gravitating cloud
         let r0 = agg.rms_radius();
         let mut acc = agg.accelerations();

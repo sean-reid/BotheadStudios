@@ -82,6 +82,11 @@ pub struct Aggregate {
     /// terrain/debris uses. This is what makes matter collide instead of interpenetrate; without it a
     /// cloud is just ballistic points. Derived from the material via `granular::contact_from_material`.
     pub contact: Option<crate::granular::Contact>,
+    /// The particle mass the `contact` parameters were derived for (`contact_from_material`'s
+    /// `particle_mass`). The pair law's per-mass output × this = the pair FORCE; each particle then
+    /// divides by ITS OWN mass — so unequal-mass contacts (a dense solid through light air parcels)
+    /// conserve momentum exactly. Equal-mass aggregates are unchanged (F/m ≡ the old acceleration).
+    pub contact_ref_mass: f64,
     /// Specific heat (J/(kg·K)) used to convert contact-dissipated energy into temperature rise — energy
     /// is conserved, not destroyed (docs/20): friction/damping heat the matter (→ incandescence).
     pub specific_heat: f64,
@@ -115,6 +120,7 @@ impl Aggregate {
             self_gravity: true, // a bare aggregate is a self-gravitating pile
             gravity_source: None,
             contact: None,
+            contact_ref_mass: 1.0,
             specific_heat: 1000.0, // generic rock-ish default; set from the material via with_specific_heat
             boundary: None,
             boundary_hole: None,
@@ -123,8 +129,9 @@ impl Aggregate {
 
     /// Give the aggregate the canonical particle–particle contact law (built from a material). This is
     /// the one collision law the whole engine uses — see `granular::contact_from_material`.
-    pub fn with_contact(mut self, contact: crate::granular::Contact) -> Self {
+    pub fn with_contact(mut self, contact: crate::granular::Contact, ref_mass: f64) -> Self {
         self.contact = Some(contact);
+        self.contact_ref_mass = ref_mass.max(1.0e-30);
         self
     }
 
@@ -226,6 +233,7 @@ impl Aggregate {
             self_gravity: false,
             gravity_source: None,
             contact: None,
+            contact_ref_mass: 1.0,
             specific_heat: 1000.0, // generic rock-ish default; set from the material via with_specific_heat
             boundary: None,
             boundary_hole: None,
@@ -398,11 +406,16 @@ impl Aggregate {
         // particles passing through each other; sticking, ploughing and cratering all emerge from it.
         // O(n²) — fine for the coarse clouds here; a neighbour grid is the scaling refinement.
         if let Some(c) = self.contact {
+            let m_ref = self.contact_ref_mass;
             for i in 0..p.len() {
                 for j in (i + 1)..p.len() {
-                    let a = crate::granular::contact_accel(p[i].pos, p[i].vel, p[j].pos, p[j].vel, &c);
-                    acc[i] += a;
-                    acc[j] -= a; // equal & opposite ⇒ momentum conserved
+                    // The law's per-mass output × the reference mass = the pair FORCE; each particle
+                    // divides by its own mass — equal & opposite FORCES ⇒ momentum conserved for ANY
+                    // mass ratio (a dense solid through light air parcels included).
+                    let f = crate::granular::contact_accel(p[i].pos, p[i].vel, p[j].pos, p[j].vel, &c)
+                        * m_ref;
+                    acc[i] += f / p[i].mass.max(1.0e-30);
+                    acc[j] -= f / p[j].mass.max(1.0e-30);
                 }
             }
         }
@@ -512,18 +525,21 @@ impl Aggregate {
         // step becomes HEAT, split evenly across each dissipating pair — the source of the emergent
         // incandescence (a hard impact glows because the matter genuinely got hot).
         if let Some(c) = self.contact {
-            let heat_per_k = self.specific_heat; // J/(kg·K); dissipation is already per-kg (W/kg)
+            let heat_per_k = self.specific_heat; // J/(kg·K)
+            let m_ref = self.contact_ref_mass;
             let p = &self.particles;
             let mut d_temp = vec![0.0f64; p.len()];
             for i in 0..p.len() {
                 for j in (i + 1)..p.len() {
+                    // Specific power × ref mass = the pair's actual dissipated watts; split half-half,
+                    // each side's temperature rise divides by ITS OWN heat capacity (m·c).
                     let pw = crate::granular::contact_dissipation(
                         p[i].pos, p[i].vel, p[j].pos, p[j].vel, &c,
-                    );
+                    ) * m_ref;
                     if pw > 0.0 {
-                        let dt_k = pw * dt / (2.0 * heat_per_k);
-                        d_temp[i] += dt_k;
-                        d_temp[j] += dt_k;
+                        let e_half = 0.5 * pw * dt;
+                        d_temp[i] += e_half / (p[i].mass.max(1.0e-30) * heat_per_k);
+                        d_temp[j] += e_half / (p[j].mass.max(1.0e-30) * heat_per_k);
                     }
                 }
             }
@@ -978,7 +994,7 @@ mod tests {
             ],
             0.1,
         )
-        .with_contact(contact);
+        .with_contact(contact, 1.0);
         agg.self_gravity = false;
 
         let p0: DVec3 = agg.particles.iter().map(|b| b.vel * b.mass).sum();

@@ -116,7 +116,7 @@ pub fn build_impact_debris(
         .with_material(basalt) // bulk contact-law material (per-pair material contact: flagged refinement)
         // 1/r² outside the planet, Gauss's-law linear interior inside — no singular core attractor.
         .with_gravity_source(earth_pos, earth_mass, earth_radius)
-        .with_contact(contact)
+        .with_contact(contact, frag_mass)
         .with_specific_heat(specific_heat)
         .with_boundary(earth_pos, earth_radius, contact.stiffness)
         .with_boundary_hole(surface, cap_extent);
