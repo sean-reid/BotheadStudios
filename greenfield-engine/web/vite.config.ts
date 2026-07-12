@@ -132,6 +132,7 @@ export default defineConfig({
         main: resolve(root, "index.html"),
         terrain: resolve(root, "terrain.html"),
         orbit: resolve(root, "orbit.html"),
+        birth: resolve(root, "birth.html"),
         twomoons: resolve(root, "twomoons.html"),
       },
     },

@@ -1758,6 +1758,18 @@ mod app {
         /// fragments (docs/21), and the impact energy — which is ≫ the Moon's binding energy — disperses
         /// it (emergent, no scripted destroy). `None` until the first impact. The fragments then fly out,
         /// arc under Earth's gravity, and some fall back — the ejecta curtain at planetary scale.
+        /// The inbound impactor's physical radius/mass — the Moon by default; Theia in the
+        /// birth-of-the-Moon scenario (docs/27). Drives CCD contact distance, shell rendering,
+        /// excavation scale, and which layered profile materializes at the strike.
+        impactor_radius: f64,
+        impactor_mass: f64,
+        birth_mode: bool,
+        /// Sim-seconds per frame for the post-impact debris (time-LOD): 3 s for the moon-drop close-up;
+        /// larger for the birth scene, whose disk evolves over hours.
+        debris_frame_dt: f64,
+        /// SIM seconds elapsed since the impact — the honest answer to "what timeframe are we watching
+        /// this over?" (the aftermath runs under time-LOD, so real seconds ≠ sim seconds).
+        sim_since_impact: f64,
         moon_debris: Option<crate::aggregate::Aggregate>,
         /// Impact site relative to Earth's centre (set at the shatter) — masks the shell over the
         /// materialized region so the excavated crater is visible, and moves with the orbiting Earth.
@@ -1982,6 +1994,11 @@ mod app {
                 moon_hit: vec![false; num_moons],
                 impact_energy_j: 0.0,
                 mats,
+                impactor_radius: MOON_RADIUS_M,
+                impactor_mass: MOON_MASS,
+                birth_mode: false,
+                debris_frame_dt: DEBRIS_DT,
+                sim_since_impact: 0.0,
                 moon_debris: None,
                 impact_site_rel: None,
                 shell_unis,
@@ -2032,6 +2049,7 @@ mod app {
             self.moon_debris = None;
             self.debris_acc.clear();
             self.impact_site_rel = None;
+            self.sim_since_impact = 0.0;
             // Drop the snapshot history — the renderer must not interpolate across the reset.
             self.snaps.clear();
             self.real_accum = 0.0;
@@ -2140,6 +2158,90 @@ mod app {
             self.depth_view = create_depth_view(&self.device, width, height);
         }
 
+        /// Excavation scale of the current impactor (matches impact.rs: hemispheric clamp for giants).
+        fn cap_extent(&self) -> f64 {
+            (2.0 * self.impactor_radius).min(0.55 * EARTH_RADIUS_M)
+        }
+
+        /// Configure the BIRTH OF THE MOON scenario (docs/27): body 2 becomes THEIA — Mars-sized,
+        /// differentiated — inbound with a real IMPACT PARAMETER, so the ~45° obliquity of the
+        /// giant-impact hypothesis EMERGES from geometry + gravity (recovered at contact by the
+        /// conservation laws), never assigned. The approach distance and time scale are chosen so the
+        /// strike lands ~5 real seconds after the scene starts (the HUD counts it down).
+        pub fn start_birth(&mut self) {
+            let theia = crate::planet::theia();
+            self.impactor_radius = theia.radius();
+            self.impactor_mass = theia.total_mass();
+            self.birth_mode = true;
+            self.debris_frame_dt = 8.0; // disk-formation time-LOD (the aftermath spans hours)
+            let contact = EARTH_RADIUS_M + self.impactor_radius;
+            // Inbound geometry (relative to Earth, in the orbital plane): approach from +x at 6 km/s
+            // with an impact parameter of 0.87·contact — gravity does the rest (contact speed ≈ the
+            // mutual escape speed, tangential share ≈ half ⇒ oblique).
+            let d0 = 9.6e7; // ≈ 25% of lunar distance — the scene's opening framing
+            let v_in = 6_000.0;
+            let b = 0.87 * contact;
+            let earth = self.bodies[1];
+            self.bodies.truncate(2);
+            self.bodies.push(crate::orbit::Body {
+                pos: earth.pos + glam::DVec3::new(d0, b, 0.0),
+                vel: earth.vel + glam::DVec3::new(-v_in, 0.0, 0.0),
+                mass: self.impactor_mass,
+            });
+            self.acc = crate::orbit::accelerations(&self.bodies);
+            self.initial_bodies = self.bodies.clone();
+            self.moon_hit = vec![false];
+            self.impacted = false;
+            self.impact_energy_j = 0.0;
+            self.moon_debris = None;
+            self.debris_acc.clear();
+            self.impact_site_rel = None;
+            self.sim_since_impact = 0.0;
+            self.snaps.clear();
+            self.real_accum = 0.0;
+            // ~5 real seconds to impact: sim time-to-contact / 5.
+            let t_sim = (d0 - contact) / v_in;
+            self.time_scale = (t_sim / 5.0).max(1.0);
+        }
+
+        /// SIM seconds since the impact (−1 before it) — for the HUD's T+ aftermath clock.
+        pub fn sim_since_impact_s(&self) -> f64 {
+            if self.moon_debris.is_some() {
+                self.sim_since_impact
+            } else {
+                -1.0
+            }
+        }
+
+        /// Real seconds until the forecast impact (−1 once it has happened / no closing approach).
+        /// The countdown IS the simulation's own forecast — distance and closing speed from the live
+        /// N-body state, divided by the observable time rate.
+        pub fn impact_countdown_s(&self) -> f64 {
+            if self.impacted || self.bodies.len() < 3 {
+                return -1.0;
+            }
+            let rel = self.bodies[2].pos - self.bodies[1].pos;
+            let relv = self.bodies[2].vel - self.bodies[1].vel;
+            let dist = rel.length() - (EARTH_RADIUS_M + self.impactor_radius);
+            let closing = -rel.dot(relv) / rel.length().max(1.0);
+            if closing <= 0.0 {
+                return -1.0;
+            }
+            (dist / closing) / self.time_scale
+        }
+
+        /// Farthest debris fragment from Earth (km) — the camera rides this outward as the disk forms.
+        pub fn debris_extent_km(&self) -> f64 {
+            let earth = self.bodies[1].pos;
+            self.moon_debris.as_ref().map_or(0.0, |agg| {
+                agg.particles
+                    .iter()
+                    .map(|p| (p.pos - earth).length())
+                    .fold(0.0, f64::max)
+                    / 1000.0
+            })
+        }
+
         pub fn set_time_scale(&mut self, scale: f32) {
             self.time_scale = (scale as f64).clamp(1.0, 2_000_000.0);
         }
@@ -2167,8 +2269,8 @@ mod app {
                 // substep itself) — the next iteration picks up the new rate immediately, so nothing
                 // ever advances past the collision at the old rate.
                 let (dt_sub, real_per_sub) = if self.moon_debris.is_some() {
-                    let d = DEBRIS_DT / MOON_DEBRIS_SUBSTEPS as f64;
-                    (d, d / (DEBRIS_DT * 60.0))
+                    let d = self.debris_frame_dt / MOON_DEBRIS_SUBSTEPS as f64;
+                    (d, d / (self.debris_frame_dt * 60.0))
                 } else {
                     (self.time_scale / 960.0, 1.0 / 960.0)
                 };
@@ -2188,7 +2290,7 @@ mod app {
         /// One physics substep: N-body verlet + swept CCD (conservation-law contact state) + the
         /// mutual-impact materialization + the debris cloud. Pure physics — no rendering state.
         fn step_substep(&mut self, dt: f64) {
-            let contact = EARTH_RADIUS_M + MOON_RADIUS_M; // Earth + Moon radii: surfaces touch here
+            let contact = EARTH_RADIUS_M + self.impactor_radius; // surfaces touch here
             let mut shatter: Option<(glam::DVec3, glam::DVec3, f64)> = None; // (site, v_contact, energy)
             let n_moons = self.bodies.len() - 2;
 
@@ -2284,9 +2386,15 @@ mod app {
                 if self.moon_debris.is_none() {
                     let moon_mass = self.initial_bodies[2].mass;
                     let (earth_pos, earth_vel) = (self.bodies[1].pos, self.bodies[1].vel);
-                    let (agg, acc0) = crate::impact::build_impact_debris(
+                    // Which matter arrives depends on the scenario: the Moon, or Theia (docs/27).
+                    let impactor_profile = if self.birth_mode {
+                        crate::planet::theia()
+                    } else {
+                        crate::planet::moon()
+                    };
+                    let (agg, acc0) = crate::impact::build_impact_debris_between(
                         &self.mats, site, earth_pos, earth_vel, moon_mass, v_contact,
-                        MOON_RADIUS_M, EARTH_MASS, EARTH_RADIUS_M,
+                        &impactor_profile, &crate::planet::earth(), EARTH_MASS, EARTH_RADIUS_M,
                     );
                     self.debris_acc = acc0;
                     self.moon_debris = Some(agg);
@@ -2305,6 +2413,7 @@ mod app {
                     agg.set_boundary_hole_center(earth_pos + rel); // the crater orbits with its planet
                 }
                 agg.step(&mut self.debris_acc, dt);
+                self.sim_since_impact += dt; // the aftermath clock (sim time, not wall time)
             }
         }
 
@@ -2401,7 +2510,7 @@ mod app {
             // everything else is drawn relative to it. Switching focus re-centres the whole view.
             let focus = r_bodies[self.focus];
             let sun = r_bodies[0];
-            let moon_r = (MOON_RADIUS_M * DISPLAY_SCALE) as f32;
+            let moon_r = (self.impactor_radius * DISPLAY_SCALE) as f32;
 
             // Light direction = TO the real Sun from each body (per-body; the Sun is the illuminant,
             // not a hardcoded direction). So the lit hemisphere and the phases come from the geometry.
@@ -2420,7 +2529,7 @@ mod app {
             } else {
                 None
             };
-            let crater_r = 2.2 * MOON_RADIUS_M; // the materialized cap extent (impact.rs), padded
+            let crater_r = 1.1 * self.cap_extent(); // the materialized cap extent (impact.rs), padded
             for (i, uni) in self.shell_unis.iter().enumerate() {
                 let dir = crate::impact::fib_dir(i, SHELL_N);
                 let pos_w = earth_center + dir * (EARTH_RADIUS_M - 0.62 * shell_spacing);
@@ -2448,7 +2557,7 @@ mod app {
             // The planet is not hollow; through the crater you see molten interior, not far-side crust.
             {
                 let ipos = ((earth_center - focus) * DISPLAY_SCALE).as_vec3();
-                let ir = ((EARTH_RADIUS_M - 2.0 * MOON_RADIUS_M) * DISPLAY_SCALE) as f32;
+                let ir = ((EARTH_RADIUS_M - self.cap_extent()) * DISPLAY_SCALE) as f32;
                 write_space_uniform(
                     &self.queue,
                     &self.interior_uni,
@@ -2464,7 +2573,7 @@ mod app {
             // floor. The gradient from dark rim to white-hot depth is the honest incandescence read.
             {
                 let profile = crate::planet::earth();
-                let hole_r = 2.0 * MOON_RADIUS_M;
+                let hole_r = self.cap_extent();
                 let wall_grain_r =
                     ((hole_r * (4.0 * std::f64::consts::PI / WALL_N as f64).sqrt() * 0.62)
                         * DISPLAY_SCALE) as f32;
@@ -2501,7 +2610,7 @@ mod app {
             // MOONS AS MATTER: each intact moon is a grain shell (like Earth) — its basalt crust at
             // its real reflectance, no smooth-sphere summary. A shattered moon is its debris instead.
             let mshell_spacing =
-                MOON_RADIUS_M * (4.0 * std::f64::consts::PI / MOON_SHELL_N as f64).sqrt();
+                self.impactor_radius * (4.0 * std::f64::consts::PI / MOON_SHELL_N as f64).sqrt();
             let mshell_grain_r = ((0.62 * mshell_spacing) * DISPLAY_SCALE) as f32;
             for (idx, uni) in self.moon_unis.iter().enumerate() {
                 let k = idx / MOON_SHELL_N;
@@ -2516,7 +2625,7 @@ mod app {
                 }
                 let bi = 2 + k; // body index of this moon
                 let dir = crate::impact::fib_dir(i, MOON_SHELL_N);
-                let pos_w = r_bodies[bi] + dir * (MOON_RADIUS_M - 0.62 * mshell_spacing);
+                let pos_w = r_bodies[bi] + dir * (self.impactor_radius - 0.62 * mshell_spacing);
                 let mpos = ((pos_w - focus) * DISPLAY_SCALE).as_vec3();
                 let mlight = (sun - r_bodies[bi]).as_vec3().normalize();
                 write_space_uniform(

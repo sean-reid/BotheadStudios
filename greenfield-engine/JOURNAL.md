@@ -5,6 +5,30 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-11 — The Birth of the Moon: the SCENE (docs/27)
+
+**What.** The proven giant-impact physics, now watchable: a new scene (**Birth of the Moon** in the scene
+picker) opens ~5 real seconds before the strike at the close framing (25% of lunar distance), with a HUD
+countdown that IS the simulation's own forecast (distance / closing speed from the live N-body state —
+the same conservation-law machinery, read as a clock). Theia arrives with a real IMPACT PARAMETER
+(0.87 of the contact radius at 6 km/s from quarter-lunar range), so the ~45° obliquity of the hypothesis
+EMERGES from geometry + gravity at contact — never aimed. At the strike, both bodies materialize (Theia's
+iron core + hot mantle; Earth's crust/mantle/outer-core cap), and the camera rides OUT with the ejecta —
+view distance tracks the debris extent — to the wide whole-orbit framing, watching the lofted, bound,
+perigee-raised material (0.55 M_moon in the native test) circularize into the proto-lunar disk. Replay
+re-runs the encounter.
+
+Also, for ALL impact scenes (Robin): a **T+ aftermath clock in SIM time** (y/mo/d/h/m/s at the scale the
+number deserves) — the honest answer to "what timeframe are we watching?", since time-LOD means wall
+time ≠ world time; and the pre-impact countdown for the birth scene. The impactor is now a first-class
+parameter of the space band (radius/mass/profile drive CCD, excavation, rendering, materialization), so
+the moon-drop is just one configuration of the same scene machinery.
+
+**Verified.** 87/87 native (the physics is the previous entry's test); wasm + TypeScript build clean.
+The choreography needs on-device eyes.
+
+---
+
 ## 2026-07-11 — THE ANTITHESIS: the birth of the Moon (docs/27)
 
 **What.** Robin: *"a mass impacted the earth and ejected the material that became the moon — I'd like to

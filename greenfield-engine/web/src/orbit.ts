@@ -98,7 +98,11 @@ async function main(): Promise<void> {
     // Moon count comes from the page (<body data-moons="2">) so orbit.html and twomoons.html share
     // this one script. Default 1.
     const numMoons = Number(document.body.getAttribute("data-moons")) || 1;
+    const birthScene = document.body.getAttribute("data-scene") === "birth";
     const demo = await OrbitDemo.create(canvas, numMoons);
+    // Birth of the Moon (docs/27): body 2 becomes Theia, inbound ~5 real seconds from impact — the
+    // physics is identical machinery; only the declared impactor changes.
+    if (birthScene) demo.start_birth();
     hideStatus();
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;
@@ -144,13 +148,16 @@ async function main(): Promise<void> {
     void camEarth;
     void camMoon;
 
-    // Orbital decay: brake the Moon until its orbit crashes into the planet.
-    mkBtn("Brake Moon ½×", () => demo.brake_moon());
-    mkBtn("Drop Moon", () => {
-      demo.drop_moon();
-      followMoon = true; // ride the descent down
-    });
-    mkBtn("Reset", () => {
+    // Orbital decay: brake the Moon until its orbit crashes into the planet. (The birth scene has no
+    // such controls — the encounter IS the scene; Reset replays it.)
+    if (!birthScene) {
+      mkBtn("Brake Moon ½×", () => demo.brake_moon());
+      mkBtn("Drop Moon", () => {
+        demo.drop_moon();
+        followMoon = true; // ride the descent down
+      });
+    }
+    mkBtn(birthScene ? "Replay" : "Reset", () => {
       demo.reset_moon();
       followMoon = true;
     });
@@ -180,8 +187,17 @@ async function main(): Promise<void> {
     // Moon's real separation as it falls, flooring at 25% of lunar distance for the impact close-up.
     // Manual zoom (wheel/pinch) takes over; Drop/Reset re-engage the follow.
     const LUNAR_KM = 384_400;
-    const followZoom = (): number =>
-      Math.max(0.25 / 1.7, Math.min(1, demo.moon_distance_km() / LUNAR_KM));
+    const CLOSE_ZOOM = 0.25 / 1.7; // the moon-collision's final framing (25% of lunar distance)
+    const followZoom = (): number => {
+      if (birthScene) {
+        // Pre-impact: hold the close framing. Post-impact: ride OUT with the ejecta — view distance
+        // tracks the debris extent until it reaches the wide whole-orbit framing (zoom 1).
+        const ext = demo.debris_extent_km();
+        if (ext <= 0) return CLOSE_ZOOM;
+        return Math.max(CLOSE_ZOOM, Math.min(1, (3.0 * ext) / (1.7 * LUNAR_KM)));
+      }
+      return Math.max(CLOSE_ZOOM, Math.min(1, demo.moon_distance_km() / LUNAR_KM));
+    };
     let followMoon = true;
     const cam = { yaw: 0.6, pitch: 0.5, zoom: followZoom() };
     let userInteracted = false;
@@ -272,9 +288,40 @@ async function main(): Promise<void> {
           `${Math.round(peri).toLocaleString()}</b> km ` +
           `<span style="opacity:.7">(Earth R ≈ 6,371 — brake below this to crash)</span>`;
       }
+      // The aftermath clock (Robin): SIM time since the impact, at the unit the scale deserves —
+      // the honest answer to "what timeframe are we watching this over?" (time-LOD ≠ wall time).
+      const fmtSim = (s: number): string => {
+        const units: [number, string][] = [
+          [31_557_600, "y"],
+          [2_629_800, "mo"],
+          [86_400, "d"],
+          [3_600, "h"],
+          [60, "m"],
+          [1, "s"],
+        ];
+        let rest = s;
+        const parts: string[] = [];
+        for (const [sec, label] of units) {
+          if (rest >= sec && parts.length < 2) {
+            const n = Math.floor(rest / sec);
+            parts.push(`${n}${label}`);
+            rest -= n * sec;
+          }
+        }
+        return parts.length ? parts.join(" ") : "0s";
+      };
+      const tPlus = demo.sim_since_impact_s();
+      const countdown = demo.impact_countdown_s();
+      let eventLine = "";
+      if (tPlus >= 0) {
+        eventLine = `<br><b style="color:#ffd08a">T+${fmtSim(tPlus)}</b> after impact`;
+      } else if (birthScene && countdown >= 0) {
+        eventLine = `<br><b style="color:#ff8a8a; font-size:16px">IMPACT IN T−${countdown.toFixed(1)} s</b>`;
+      }
       stats.innerHTML =
-        `<b>Sun · Earth · Moon</b> · frame <b>${demo.focus_label()}</b> · ` +
-        `Earth–Moon <b>${demo.moon_distance_km().toFixed(0)}</b> km · ` +
+        (birthScene ? `<b>The Birth of the Moon</b> — Theia inbound · ` : "") +
+        `<b>Sun · Earth · ${birthScene ? "Theia" : "Moon"}</b> · frame <b>${demo.focus_label()}</b> · ` +
+        `Earth–${birthScene ? "Theia" : "Moon"} <b>${demo.moon_distance_km().toFixed(0)}</b> km · ` +
         `v <b>${demo.moon_speed_kms().toFixed(2)}</b> km/s<br>` +
         `${line2}<br>` +
         `time <b>${Math.round(demo.time_scale_value()).toLocaleString()}×</b> · ` +
@@ -282,7 +329,8 @@ async function main(): Promise<void> {
         (demo.has_impacted()
           ? `<br><b style="color:#ffd08a">IMPACT</b> · ${demo.debris_count()} fragments · ` +
             `${(demo.impact_energy_j() / 1e30).toFixed(2)}e30 J`
-          : "");
+          : "") +
+        eventLine;
     };
 
     let firstFrame = true;
