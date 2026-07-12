@@ -2612,8 +2612,16 @@ mod app {
                 // bound moonlet (outward migration for a fast prograde spin) — the 4.5 Gyr mechanism,
                 // validated against the Moon's measured 3.8 cm/yr recession (tides.rs).
                 let mu_e = crate::orbit::G * m_e;
+                let spin_omega = self.spin_l.length()
+                    / crate::tides::moment_of_inertia(m_e, EARTH_RADIUS_M);
+                let j2 = crate::tides::j2_from_spin(spin_omega, m_e, EARTH_RADIUS_M);
+                let s_hat = self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
                 for p in agg.particles.iter_mut() {
                     let r = (p.pos - earth_pos).length();
+                    // The oblate figure's gravity (J2): close orbits around the squashed post-impact
+                    // Earth precess — the profile change Robin asked about, from the same spin state.
+                    p.vel += crate::tides::j2_accel(p.pos - earth_pos, mu_e, EARTH_RADIUS_M, j2, s_hat)
+                        * dt;
                     let eps = 0.5 * (p.vel - earth_vel_now).length_squared() - mu_e / r;
                     if eps < 0.0 && r > 1.1 * EARTH_RADIUS_M {
                         let (kick, d_spin) = crate::tides::tidal_kick(
@@ -2790,13 +2798,25 @@ mod app {
                 None
             };
             let crater_r = 1.1 * self.hole_radius(); // the crater as it stands — healing shrinks it
+            let spin_axis = self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
             let spin_rot = glam::DQuat::from_axis_angle(
-                self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z),
+                spin_axis,
                 self.spin_angle % (2.0 * std::f64::consts::PI),
+            );
+            // OBLATE figure: the spin flattens the planet (Radau–Darwin) — equator bulges (+f/3),
+            // poles sink (−2f/3), volume-preserving to first order. At today's day it's 1/298
+            // (imperceptible); at the post-impact 3.8-h day it's ~13% — a visibly squashed world.
+            let spin_omega_r = self.spin_l.length()
+                / crate::tides::moment_of_inertia(self.bodies[1].mass, EARTH_RADIUS_M);
+            let flat = crate::tides::flattening_from_spin(
+                spin_omega_r, self.bodies[1].mass, EARTH_RADIUS_M,
             );
             for (i, uni) in self.shell_unis.iter().enumerate() {
                 let dir = spin_rot * crate::impact::fib_dir(i, SHELL_N);
-                let pos_w = earth_center + dir * (EARTH_RADIUS_M - 0.62 * shell_spacing);
+                let u = dir.dot(spin_axis);
+                let r_oblate = (EARTH_RADIUS_M - 0.62 * shell_spacing)
+                    * (1.0 + flat * (1.0 / 3.0 - u * u)); // +f/3 equator, −2f/3 poles
+                let pos_w = earth_center + dir * r_oblate;
                 let hidden = crater_site.map_or(false, |s| (pos_w - s).length() < crater_r);
                 let scale = if hidden { 0.0 } else { shell_grain_r }; // zero-scale ⇒ not drawn
                 let spos = ((pos_w - focus) * DISPLAY_SCALE).as_vec3();

@@ -129,6 +129,39 @@ pub fn tidal_kick(
     (kick, -d_l_orbit)
 }
 
+/// Rotational FLATTENING from spin (Radau–Darwin): a spinning body bulges until the equipotential
+/// balances centrifugal vs gravity. f = (5q/2) / (1 + (25/4)·(1 − (3/2)·C)²), with
+/// q = ω²R³/(GM) (centrifugal/gravity ratio at the equator) and C the measured moment-of-inertia
+/// factor — nothing new declared. ANCHORS: today's day ⇒ f ≈ 1/298 (the real flattening); the
+/// emergent 3.8-h post-impact day ⇒ f ≈ 0.13, a visibly squashed proto-Earth (as models predict).
+pub fn flattening_from_spin(spin_omega: f64, mass: f64, radius: f64) -> f64 {
+    let q = spin_omega * spin_omega * radius.powi(3) / (G * mass);
+    let eta = 1.0 - 1.5 * EARTH_MOI_FACTOR;
+    (2.5 * q) / (1.0 + 6.25 * eta * eta)
+}
+
+/// The oblate figure's J₂ gravity coefficient, first order: J₂ = (2/3)·(f − q/2).
+/// ANCHOR: today's Earth ⇒ 1.08e-3 (measured: 1.0826e-3).
+pub fn j2_from_spin(spin_omega: f64, mass: f64, radius: f64) -> f64 {
+    let q = spin_omega * spin_omega * radius.powi(3) / (G * mass);
+    let f = flattening_from_spin(spin_omega, mass, radius);
+    (2.0 / 3.0) * (f - 0.5 * q)
+}
+
+/// The J₂ (oblateness) gravitational perturbation on a satellite at `rel` from the planet centre,
+/// spin axis `s_hat`: a = −(3/2)·J₂·μ·R²/r⁴ · [(1 − 5u²)·r̂ + 2u·ŝ], u = r̂·ŝ. This is what makes
+/// close orbits around an oblate world precess — the gravity profile Robin asked about.
+pub fn j2_accel(rel: DVec3, mu: f64, r_planet: f64, j2: f64, s_hat: DVec3) -> DVec3 {
+    let r = rel.length();
+    if r < 1.0e-9 || j2 == 0.0 {
+        return DVec3::ZERO;
+    }
+    let r_hat = rel / r;
+    let u = r_hat.dot(s_hat);
+    let k = -1.5 * j2 * mu * r_planet * r_planet / (r * r * r * r);
+    (r_hat * (1.0 - 5.0 * u * u) + s_hat * (2.0 * u)) * k
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +169,21 @@ mod tests {
     const M_E: f64 = 5.972e24;
     const R_E: f64 = 6.371e6;
     const M_MOON: f64 = 7.342e22;
+
+    #[test]
+    fn todays_spin_yields_the_real_flattening_and_j2() {
+        // Radau–Darwin + the declared MOI factor, nothing else: the measured day length must give the
+        // measured figure of the Earth. f_real = 1/298.25 = 3.353e-3; J2_real = 1.0826e-3.
+        let omega = 2.0 * std::f64::consts::PI / 86_164.0;
+        let f = flattening_from_spin(omega, M_E, R_E);
+        let j2 = j2_from_spin(omega, M_E, R_E);
+        println!("flattening 1/{:.0} (real 1/298) · J2 {j2:.4e} (real 1.0826e-3)", 1.0 / f);
+        assert!((f - 3.353e-3).abs() / 3.353e-3 < 0.05, "real flattening emerges (got {f:.3e})");
+        assert!((j2 - 1.0826e-3).abs() / 1.0826e-3 < 0.08, "real J2 emerges (got {j2:.3e})");
+        // And the post-impact 3.8-h day squashes the planet visibly.
+        let f_fast = flattening_from_spin(2.0 * std::f64::consts::PI / (3.8 * 3600.0), M_E, R_E);
+        assert!(f_fast > 0.08, "a 3.8-h day is dramatically oblate (got {f_fast:.3})");
+    }
 
     #[test]
     fn the_declared_k2_q_reproduces_the_measured_lunar_recession() {
