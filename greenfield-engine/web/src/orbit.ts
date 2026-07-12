@@ -162,16 +162,25 @@ async function main(): Promise<void> {
       followMoon = true;
     });
 
-    // Variable time multiplier.
+    // Variable time multiplier. Before an impact this scales the orbital fast-forward; AFTER an
+    // impact it scales the aftermath rate (the disk evolves over months — you need the throttle).
     let timeScale = demo.time_scale_value();
     const applyTime = (): void => demo.set_time_scale(timeScale);
     mkBtn("⏪ slower", () => {
-      timeScale = Math.max(1, timeScale / 2);
-      applyTime();
+      if (demo.has_impacted()) {
+        demo.nudge_aftermath_rate(false);
+      } else {
+        timeScale = Math.max(1, timeScale / 2);
+        applyTime();
+      }
     });
     mkBtn("⏩ faster", () => {
-      timeScale = Math.min(2_000_000, timeScale * 2);
-      applyTime();
+      if (demo.has_impacted()) {
+        demo.nudge_aftermath_rate(true);
+      } else {
+        timeScale = Math.min(2_000_000, timeScale * 2);
+        applyTime();
+      }
     });
 
     document.body.appendChild(bar);

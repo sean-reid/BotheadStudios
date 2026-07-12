@@ -255,6 +255,85 @@ mod tests {
     }
 
     #[test]
+    fn the_birth_scene_geometry_actually_lofts_the_disk() {
+        // Regression guard for the SCENE, not just the physics: run the birth scenario's EXACT inbound
+        // geometry (d0 = 9.6e7 m, v = 6 km/s, impact parameter 1.30·contact — from start_birth) through
+        // the real integrator + swept CCD + conservation-law contact recovery, then materialize and
+        // integrate the aftermath. The first version of the scene used b = 0.87·contact, which yields a
+        // 29° (radial-dominant) hit whose ejecta BURIES instead of lofting — on-screen, "the planetoid
+        // just adds its mass to Earth" (Robin). This test would have caught it: the recovered contact
+        // obliquity must be ≥ 40°, and a lunar-mass-scale bound reservoir must end up aloft.
+        let mats = materials::load();
+        let theia = crate::planet::theia();
+        let earth_profile = crate::planet::earth();
+        let m_theia = theia.total_mass();
+        let contact = EARTH_RADIUS_M + theia.radius();
+        let (d0, v_in) = (9.6e7, 6_000.0);
+        let b = 1.30 * contact;
+
+        let mut bodies = vec![
+            crate::orbit::Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: EARTH_MASS },
+            crate::orbit::Body {
+                pos: DVec3::new(d0, b, 0.0),
+                vel: DVec3::new(-v_in, 0.0, 0.0),
+                mass: m_theia,
+            },
+        ];
+        let mut acc = crate::orbit::accelerations(&bodies);
+        let dt = 2_500.0 / 960.0; // the scene's fast-forward substep (time_scale ≈ 2500)
+        let mut hit = None;
+        for _ in 0..40_000 {
+            let rel_old = bodies[1].pos - bodies[0].pos;
+            let vel_old = bodies[1].vel - bodies[0].vel;
+            crate::orbit::verlet_step(&mut bodies, &mut acc, dt);
+            let rel_new = bodies[1].pos - bodies[0].pos;
+            if let Some(t) = crate::orbit::swept_first_contact(rel_old, rel_new, contact) {
+                let rel_c = rel_old + (rel_new - rel_old) * t;
+                let n_hat = rel_c.normalize();
+                let mu = G * (EARTH_MASS + m_theia);
+                let v_c = crate::orbit::contact_velocity(rel_old, vel_old, n_hat, contact, mu);
+                hit = Some((bodies[0].pos + rel_c, v_c, n_hat));
+                break;
+            }
+        }
+        let (site, v_contact, n_hat) = hit.expect("the birth geometry must actually hit Earth");
+        // Obliquity at contact: the angle between the arrival velocity and straight-down.
+        let v_norm = v_contact.dot(-n_hat); // inward component
+        let obliquity = (v_contact.length_squared() - v_norm * v_norm).max(0.0).sqrt()
+            .atan2(v_norm)
+            .to_degrees();
+        println!("birth geometry: v_c {:.0} m/s at {obliquity:.0}° obliquity", v_contact.length());
+        assert!(
+            obliquity >= 40.0,
+            "the scene's impact parameter must yield a giant-impact obliquity (got {obliquity:.0}°)"
+        );
+
+        let (mut agg, mut acc2) = build_impact_debris_between(
+            &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth_profile,
+            EARTH_MASS, EARTH_RADIUS_M,
+        );
+        let steps = if cfg!(debug_assertions) { 4_000 } else { 15_000 };
+        for _ in 0..steps {
+            agg.step(&mut acc2, 2.0);
+        }
+        let mu = G * EARTH_MASS;
+        let mut aloft_bound = 0.0f64;
+        for p in &agg.particles {
+            let r = p.pos.length();
+            let eps = 0.5 * p.vel.length_squared() - mu / r;
+            if eps < 0.0 && r > 1.1 * EARTH_RADIUS_M {
+                aloft_bound += p.mass;
+            }
+        }
+        println!("birth scene lofts {:.2} M_moon aloft+bound", aloft_bound / 7.342e22);
+        assert!(
+            aloft_bound > 0.3 * 7.342e22,
+            "the SCENE's geometry lofts a lunar-mass-scale bound reservoir (got {:.2} M_moon)",
+            aloft_bound / 7.342e22
+        );
+    }
+
+    #[test]
     fn a_dropped_moon_impact_leaves_most_debris_gravitationally_bound() {
         // A dropped Moon strikes at ~escape speed (~11.2 km/s at contact). The impact energy
         // ½μΔv² ≈ 4.3e30 J over the combined Earth+Moon cloud (3 lunar masses) is ~2e7 J/kg —

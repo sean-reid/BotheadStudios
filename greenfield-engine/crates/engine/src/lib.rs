@@ -1767,6 +1767,10 @@ mod app {
         /// Sim-seconds per frame for the post-impact debris (time-LOD): 3 s for the moon-drop close-up;
         /// larger for the birth scene, whose disk evolves over hours.
         debris_frame_dt: f64,
+        /// Aftermath speed multiplier (1..64): scales how much SIM time each real second covers after
+        /// the impact. The integration substep stays FIXED (stability is physics); only the substep
+        /// count grows — under overload the observable clock dilates rather than corrupting the model.
+        debris_rate_mul: f64,
         /// SIM seconds elapsed since the impact — the honest answer to "what timeframe are we watching
         /// this over?" (the aftermath runs under time-LOD, so real seconds ≠ sim seconds).
         sim_since_impact: f64,
@@ -1998,6 +2002,7 @@ mod app {
                 impactor_mass: MOON_MASS,
                 birth_mode: false,
                 debris_frame_dt: DEBRIS_DT,
+                debris_rate_mul: 1.0,
                 sim_since_impact: 0.0,
                 moon_debris: None,
                 impact_site_rel: None,
@@ -2176,11 +2181,13 @@ mod app {
             self.debris_frame_dt = 8.0; // disk-formation time-LOD (the aftermath spans hours)
             let contact = EARTH_RADIUS_M + self.impactor_radius;
             // Inbound geometry (relative to Earth, in the orbital plane): approach from +x at 6 km/s
-            // with an impact parameter of 0.87·contact — gravity does the rest (contact speed ≈ the
-            // mutual escape speed, tangential share ≈ half ⇒ oblique).
+            // with an impact parameter of 1.30·contact — gravity does the rest. At contact this yields
+            // ~10.8 km/s at ~46° obliquity (perigee 5.6e6 m — a solid hit): the giant-impact
+            // hypothesis's geometry, EMERGENT from b, never aimed. (0.87·contact gave only 29° — too
+            // steep; the ejecta buried instead of lofting. Robin caught it on-screen.)
             let d0 = 9.6e7; // ≈ 25% of lunar distance — the scene's opening framing
             let v_in = 6_000.0;
-            let b = 0.87 * contact;
+            let b = 1.30 * contact;
             let earth = self.bodies[1];
             self.bodies.truncate(2);
             self.bodies.push(crate::orbit::Body {
@@ -2202,6 +2209,16 @@ mod app {
             // ~5 real seconds to impact: sim time-to-contact / 5.
             let t_sim = (d0 - contact) / v_in;
             self.time_scale = (t_sim / 5.0).max(1.0);
+        }
+
+        /// Double/halve the aftermath speed (the ⏩/⏪ controls after an impact). Returns the multiplier.
+        pub fn nudge_aftermath_rate(&mut self, faster: bool) -> f64 {
+            self.debris_rate_mul = if faster {
+                (self.debris_rate_mul * 2.0).min(64.0)
+            } else {
+                (self.debris_rate_mul / 2.0).max(1.0)
+            };
+            self.debris_rate_mul
         }
 
         /// SIM seconds since the impact (−1 before it) — for the HUD's T+ aftermath clock.
@@ -2270,7 +2287,7 @@ mod app {
                 // ever advances past the collision at the old rate.
                 let (dt_sub, real_per_sub) = if self.moon_debris.is_some() {
                     let d = self.debris_frame_dt / MOON_DEBRIS_SUBSTEPS as f64;
-                    (d, d / (self.debris_frame_dt * 60.0))
+                    (d, d / (self.debris_frame_dt * 60.0 * self.debris_rate_mul))
                 } else {
                     (self.time_scale / 960.0, 1.0 / 960.0)
                 };
@@ -2399,6 +2416,10 @@ mod app {
                     self.debris_acc = acc0;
                     self.moon_debris = Some(agg);
                     self.impact_site_rel = Some(site - earth_pos); // crater mask, in Earth's frame
+                    // The impactor IS the debris now — its matter exists exactly once. Reduce the parked
+                    // point mass to nothing (a 1 kg marker keeps the body-array shape) so its mass isn't
+                    // counted twice in the N-body (Theia is 11% of Earth — a real double-count).
+                    self.bodies[2].mass = 1.0;
                 }
             }
 
