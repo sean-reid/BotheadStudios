@@ -40,7 +40,10 @@ fn fs_main(i : VOut) -> @location(0) vec4<f32> {
     // NOTE (honesty): the sun DIRECTION here is still a placeholder; the real Sun body (proper
     // mass/distance) becomes the illuminant when the heliocentric view lands (docs/17).
     let SUN_GAIN = 22.0;
-    let AMBIENT = 0.02; // faint starlight fill so the night side isn't pure black
+    // NO ambient term: the Sun is the only appreciable light source in this universe (no other
+    // stars are modelled), so the night side is genuinely BLACK. The old 0.02 "starlight fill" was a
+    // fudged light source — Robin caught backlit bodies glowing that should have been dark crescents.
+    let AMBIENT = 0.0;
     // Reflected sunlight + self-emission. Incandescence is added BEFORE the sun term so hot ejecta glows
     // on its own — visible on the night side, exactly like real shock-heated rock. The colour/intensity
     // are a blackbody ramp of the fragment's actual temperature (matter physics → light, nothing scripted).
