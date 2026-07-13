@@ -133,6 +133,18 @@ mod app {
         camera_pos: [f32; 4],
     }
 
+    /// Sky-pass uniforms — the per-pixel view ray (inverse view-projection), the sun direction (the
+    /// SAME light the terrain is lit by), and the declared atmosphere's Rayleigh optical depth + sun
+    /// gain. Everything the honest sky needs; nothing hand-painted. Matches `sky.wgsl`'s `SkyU`.
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct SkyUniforms {
+        inv_view_proj: [[f32; 4]; 4],
+        sun_dir: [f32; 4], // xyz = direction to the sun (world), normalized
+        tau: [f32; 4],     // xyz = Rayleigh optical depth per band, w = sun gain
+        camera_pos: [f32; 4],
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct InstanceRaw {
@@ -174,6 +186,12 @@ mod app {
         /// The horizon ground plane (surface-of-a-planet framing). Reuses `world_uni` (same identity
         /// model / view_proj / light / material textures) — it is just another mesh in the world pass.
         ground_gpu: GpuMesh,
+
+        /// The honest sky: a fullscreen Rayleigh single-scatter pass (sky.wgsl) drawn behind the world.
+        /// `atm_tau` is the declared atmosphere's optical depth (same as the space band's blue marble).
+        sky_pipeline: wgpu::RenderPipeline,
+        sky_uni: UniformSlot,
+        atm_tau: [f64; 3],
 
         // Simulation
         mats: Vec<materials::Material>,
@@ -436,6 +454,39 @@ mod app {
             };
             let pipeline = build_pipeline(&device, &world_bind_layout, config.format);
 
+            // --- The honest sky: a fullscreen Rayleigh single-scatter pass ---
+            // The terrain is a patch of the SAME declared Earth as the space band, so its sky is derived
+            // from the SAME atmosphere: τ from the emergent surface pressure (planet::earth), the SAME
+            // λ⁻⁴ molecular scattering that gives the blue marble its veil (docs/26). No painted blue.
+            let atm_tau =
+                crate::atmosphere::rayleigh_tau(crate::planet::earth().surface_pressure() / 101_325.0);
+            let sky_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("sky-bind-layout"),
+                entries: &[uniform_entry(
+                    0,
+                    wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                )],
+            });
+            let sky_ubuf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("sky-uniforms"),
+                size: std::mem::size_of::<SkyUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let sky_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sky-bind-group"),
+                layout: &sky_bind_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: sky_ubuf.as_entire_binding(),
+                }],
+            });
+            let sky_uni = UniformSlot {
+                bind: sky_bind,
+                buf: sky_ubuf,
+            };
+            let sky_pipeline = build_sky_pipeline(&device, &sky_bind_layout, config.format);
+
             // Debris: a unit cube instanced per particle, tinted by material albedo.
             let matter = matter::MatterSim::new(MAX_PARTICLES);
 
@@ -496,6 +547,9 @@ mod app {
                 world_gpu,
                 world_uni,
                 ground_gpu,
+                sky_pipeline,
+                sky_uni,
+                atm_tau,
                 mats,
                 world,
                 field,
@@ -944,6 +998,9 @@ mod app {
             let (view_proj, eye) = self.view_proj();
             let light = Vec3::new(0.45, 0.9, 0.4).normalize();
             self.write_uniform(&self.world_uni, view_proj, Mat4::IDENTITY, eye, light);
+            // The sky reads the SAME sun direction the terrain is lit by, and the declared atmosphere's
+            // optical depth, so the graded sky and the lit ground are one consistent illumination.
+            self.write_sky_uniform(view_proj, eye, light);
             self.upload_probe_instances(); // the probe is drawn as its particles now
 
             let output = self
@@ -984,12 +1041,10 @@ mod app {
                         view: &view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 0.55,
-                                g: 0.70,
-                                b: 0.90,
-                                a: 1.0,
-                            }),
+                            // Cleared to black only as an initializer — EVERY visible pixel is then
+                            // painted by the fullscreen Rayleigh sky pass below. No flat-blue lie: the
+                            // blue is derived from the declared atmosphere's scattering (sky.wgsl).
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -1004,6 +1059,12 @@ mod app {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
+                // The honest sky first: a fullscreen Rayleigh single-scatter backdrop (no depth), so the
+                // world geometry paints over it wherever it is nearer. Derived from the declared air.
+                pass.set_pipeline(&self.sky_pipeline);
+                pass.set_bind_group(0, &self.sky_uni.bind, &[]);
+                pass.draw(0..3, 0..1);
+
                 pass.set_pipeline(&self.pipeline);
                 // Horizon ground plane first (shares world_uni), then the detailed patch on top of it —
                 // the plane hides the patch's floating side walls and carries the ground to the horizon.
@@ -1138,6 +1199,28 @@ mod app {
             self.queue
                 .write_buffer(&slot.buf, 0, bytemuck::bytes_of(&u));
         }
+
+        /// Upload the sky pass's per-frame uniforms: the inverse view-projection (to reconstruct each
+        /// pixel's world view ray), the sun direction, and the declared atmosphere's Rayleigh optical
+        /// depth + sun gain. `sun_gain` = 22.0 is the SAME display exposure the space band uses for the
+        /// blue marble, so the terrain sky and the orbital atmosphere are one consistent scattering.
+        fn write_sky_uniform(&self, view_proj: Mat4, eye: Vec3, sun: Vec3) {
+            const SUN_GAIN: f32 = 22.0;
+            let inv = view_proj.inverse();
+            let u = SkyUniforms {
+                inv_view_proj: inv.to_cols_array_2d(),
+                sun_dir: [sun.x, sun.y, sun.z, 0.0],
+                tau: [
+                    self.atm_tau[0] as f32,
+                    self.atm_tau[1] as f32,
+                    self.atm_tau[2] as f32,
+                    SUN_GAIN,
+                ],
+                camera_pos: [eye.x, eye.y, eye.z, 1.0],
+            };
+            self.queue
+                .write_buffer(&self.sky_uni.buf, 0, bytemuck::bytes_of(&u));
+        }
     }
 
     fn draw<'a>(pass: &mut wgpu::RenderPass<'a>, uni: &'a UniformSlot, mesh: &'a GpuMesh) {
@@ -1244,6 +1327,70 @@ mod app {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        })
+    }
+
+    /// The sky pipeline: a fullscreen triangle (no vertex buffer) that fills the background with the
+    /// derived Rayleigh sky. It does NOT test or write depth (it is the backdrop — the world geometry
+    /// drawn afterwards depth-tests against the cleared buffer and paints over it wherever it is nearer).
+    fn build_sky_pipeline(
+        device: &wgpu::Device,
+        bind_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sky-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/sky.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky-pipeline-layout"),
+            bind_group_layouts: &[bind_layout],
+            push_constant_ranges: &[],
+        });
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            // The sky is the backdrop: it must never occlude terrain, so depth-testing is disabled and
+            // it writes no depth. It is drawn first; the world pass then overwrites it where geometry is.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

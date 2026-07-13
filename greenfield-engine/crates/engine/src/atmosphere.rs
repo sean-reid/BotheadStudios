@@ -351,6 +351,45 @@ mod tests {
     }
 
     #[test]
+    fn the_rayleigh_sky_is_blue_overhead_and_pale_at_the_horizon() {
+        // The terrain scene's sky (shaders/sky.wgsl) is this SAME single-scatter law evaluated along the
+        // view ray: mu_v = the ray's cosine from the zenith (1 overhead, →0 at the horizon), mu_s the
+        // sun's elevation cosine, cos_theta = ray·sun. This test locks the two properties the shader
+        // renders, so the derived-physics claim can't silently regress into a hand-painted gradient.
+        let tau = rayleigh_tau(1.0); // Earth's 1-atm air — the same τ the space band's blue marble uses
+        let sun_y = 0.9f64; // a sun most of the way up
+        // Look straight up (short air path) vs out at the horizon (long slant path). cos_theta uses the
+        // ray·sun geometry for each; the horizon sample looks away from the sun (its dimmest azimuth).
+        let zenith = rayleigh_veil(1.0, sun_y, sun_y, tau, 22.0); // ray=up ⇒ cosθ = sun.y
+        let horizon = rayleigh_veil(0.02, sun_y, -0.2, tau, 22.0); // ray near-horizontal, anti-sun
+
+        // (1) OVERHEAD IS BLUE: short path ⇒ (1−e^{−τ·path}) ≈ τ·path, so radiance ∝ τ ∝ λ⁻⁴ — blue
+        //     dominates. The blue/red ratio at the zenith is far above 1.
+        let zen_ratio = zenith[2] / zenith[0];
+        assert!(
+            zenith[2] > zenith[1] && zenith[1] > zenith[0],
+            "the zenith is blue: blue > green > red (got {zenith:?})"
+        );
+        // (2) THE HORIZON PALES: long path saturates every band toward 1, so the colour whitens — its
+        //     blue/red ratio collapses toward unity, and it is BRIGHTER overall (more air scatters more
+        //     light). This is the pale/warm horizon band, and it FALLS OUT of the path length alone.
+        let hor_ratio = horizon[2] / horizon[0];
+        assert!(
+            zen_ratio > hor_ratio + 1.0,
+            "the zenith is far bluer than the horizon (zenith B/R {zen_ratio:.2} vs horizon {hor_ratio:.2})"
+        );
+        assert!(
+            horizon[2] > zenith[2],
+            "the horizon is brighter than the zenith (longer air path; got {} vs {})",
+            horizon[2], zenith[2]
+        );
+        // (3) NO AIR, NO SKY: strip the declared atmosphere and the whole gradient goes black — derived,
+        //     never painted, exactly like the space band's airless Moon.
+        let vacuum = rayleigh_tau(0.0);
+        assert_eq!(rayleigh_veil(1.0, sun_y, sun_y, vacuum, 22.0), [0.0; 3], "airless ⇒ black sky");
+    }
+
+    #[test]
     fn airs_declared_constants_give_the_real_gas_constant_and_scale_height() {
         let mats = materials::load();
         let air = &mats[materials::index_of(&mats, "air")];
