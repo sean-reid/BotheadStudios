@@ -32,6 +32,73 @@ pub fn fib_dir(i: usize, n: usize) -> DVec3 {
     DVec3::new(rxy * phi.cos(), y, rxy * phi.sin())
 }
 
+/// SHARED excavation primitive (docs/28 step 3): the target matter the impactor ploughs into, shaped as
+/// a FURROW elongated DOWNRANGE along the impact track — not the old isotropic half-ball (which made
+/// every impact look dead-centre regardless of obliquity — Robin: "looked like it hit the center, not
+/// 45°"). Scene-agnostic: any `target` LayeredBody, any site/track, so a meteor into terrain and Theia
+/// into Earth excavate by the SAME code. Grains sit BELOW the real (curved) surface, at rest on the
+/// bulk body, tagged [`SOURCE_TARGET`], with real composition + temperature at their depth.
+///
+/// `track_dir` is the impactor's velocity direction; its along-surface component sets the furrow's long
+/// axis. `extent` is the excavation scale (≈ impactor size, clamped). Returns (bodies, mat_ids, temps,
+/// source) for the caller to append.
+#[allow(clippy::too_many_arguments)]
+pub fn furrow_target_grains(
+    mats: &[Material],
+    target: &crate::planet::LayeredBody,
+    earth_pos: DVec3,
+    earth_radius: f64,
+    site: DVec3,
+    track_dir: DVec3,
+    frag_mass: f64,
+    earth_vel: DVec3,
+    n_grains: usize,
+    extent: f64,
+) -> (Vec<Body>, Vec<usize>, Vec<f32>, Vec<u8>) {
+    let n = (site - earth_pos).normalize_or_zero(); // outward surface normal
+    // Downrange tangent: the impact velocity projected onto the surface. A near-vertical impact has no
+    // preferred direction — fall back to any tangent so the furrow is a symmetric bowl (honest for 90°).
+    let t = {
+        let tang = track_dir - n * track_dir.dot(n);
+        tang.try_normalize().unwrap_or_else(|| {
+            let a = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
+            (a - n * a.dot(n)).normalize()
+        })
+    };
+    let b = n.cross(t).normalize_or_zero(); // lateral
+    // Elongated along-track, narrower across and in depth; the bowl centre sits DOWNRANGE of first
+    // contact (the impactor ploughs forward as it digs in).
+    let l_along = extent * 1.5;
+    let l_lat = extent * 0.6;
+    let l_depth = extent * 0.85;
+    let downrange = extent * 0.5;
+
+    let mut bodies = Vec::with_capacity(n_grains);
+    let mut mat_ids = Vec::with_capacity(n_grains);
+    let mut temps = Vec::with_capacity(n_grains);
+    let mut source = Vec::with_capacity(n_grains);
+    for i in 0..n_grains {
+        let u = fib_dir(i, n_grains);
+        let r = ((i as f64 + 0.5) / n_grains as f64).cbrt(); // fill the ellipsoid volume
+        let along = u.dot(t) * r * l_along + downrange;
+        let lat = u.dot(b) * r * l_lat;
+        let depth = -(u.dot(n).abs() * r) * l_depth; // always INTO the planet
+        // Project onto the real curved surface at this along/lateral offset, then descend by `depth`, so
+        // every grain is genuinely below the surface (a flat tangent furrow would bulge out over a
+        // sphere as it curves away).
+        let tangent_pt = site + t * along + b * lat;
+        let radial = (tangent_pt - earth_pos).normalize_or_zero();
+        let pos = earth_pos + radial * (earth_radius + depth);
+        bodies.push(Body { pos, vel: earth_vel, mass: frag_mass });
+        let r_earth = (pos - earth_pos).length();
+        let layer = target.layer_at(r_earth);
+        mat_ids.push(materials::index_of(mats, layer.material));
+        temps.push(target.temperature_at(r_earth) as f32);
+        source.push(crate::aggregate::SOURCE_TARGET);
+    }
+    (bodies, mat_ids, temps, source)
+}
+
 /// Build the mutual impact cloud. The impactor's fragments CARRY the true contact velocity (recovered by
 /// `orbit::contact_velocity` from the conservation laws) — they simply ARE the arriving body; the target's
 /// cap starts at rest. From there everything is mechanics: the one contact law transfers the momentum into
@@ -94,27 +161,19 @@ pub fn build_impact_debris_between(
         source.push(crate::aggregate::SOURCE_IMPACTOR);
     }
 
-    // TARGET impact region — a cap of crust in a half-ball BELOW the surface point (reflect any outward
-    // direction inward), at rest on the bulk planet. This is the matter the impactor ploughs into.
-    // Excavation scale ~ the impactor, clamped for GIANT impactors (a Theia-scale cap would swallow
-    // the planet; the giant-impact melt region is hemispheric, not global — flagged approximation).
+    // TARGET impact region — the matter the impactor ploughs into, excavated as a FURROW elongated
+    // DOWNRANGE along the impact track (the shared, angle-agnostic primitive above), not an isotropic
+    // half-ball. Excavation scale ~ the impactor, clamped for GIANT impactors (a Theia-scale cap would
+    // swallow the planet; the giant-impact melt region is hemispheric, not global — flagged).
     let cap_extent = (2.0 * moon_r).min(0.55 * earth_radius);
-    for i in 0..CAP_N {
-        let d = fib_dir(i, CAP_N);
-        let d_in = if d.dot(n) > 0.0 { d - n * (2.0 * d.dot(n)) } else { d }; // into the planet
-        let rr = cap_extent * ((i as f64 + 0.5) / CAP_N as f64).cbrt();
-        let pos = surface + d_in * rr;
-        particles.push(Body {
-            pos,
-            vel: earth_vel,
-            mass: frag_mass,
-        });
-        let r_earth = (pos - earth_pos).length();
-        let layer = earth_body.layer_at(r_earth);
-        mat_ids.push(materials::index_of(mats, layer.material));
-        temps.push(earth_body.temperature_at(r_earth) as f32);
-        source.push(crate::aggregate::SOURCE_TARGET);
-    }
+    let (cap_bodies, cap_mats, cap_temps, cap_src) = furrow_target_grains(
+        mats, earth_body, earth_pos, earth_radius, surface, v_contact, frag_mass, earth_vel, CAP_N,
+        cap_extent,
+    );
+    particles.extend(cap_bodies);
+    mat_ids.extend(cap_mats);
+    temps.extend(cap_temps);
+    source.extend(cap_src);
 
     // One canonical contact law from the real material. Grain radius is DENSITY-CONSISTENT — the radius a
     // grain of this mass and the material's density actually has, r = (3m/4πρ)^⅓ — so the contact
@@ -480,6 +539,64 @@ mod tests {
             aloft_earth / MOON_MASS,
             aloft_theia / MOON_MASS
         );
+    }
+
+    #[test]
+    fn furrow_is_elongated_downrange_below_surface_at_any_angle() {
+        // docs/28 step 3: the excavated target region is a FURROW along the impact track, not an
+        // isotropic bowl (which made every impact look dead-centre). Shared/angle-agnostic — the same
+        // primitive a terrain meteor and a Theia strike both use. Asserts: elongated downrange, biased
+        // forward of first contact, entirely below the real surface, all Earth-tagged — at oblique AND
+        // vertical incidence.
+        use crate::aggregate::SOURCE_TARGET;
+        let mats = materials::load();
+        let earth = crate::planet::earth();
+        let earth_pos = DVec3::ZERO;
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0); // a surface point (pole); tangent plane is x–z
+        let frag_mass = 1.0e18;
+        let extent = 2.0 * MOON_RADIUS_M;
+        let t = DVec3::X; // downrange tangent at this site
+        let lat = DVec3::Z; // lateral tangent
+
+        // OBLIQUE 45° track in the x–y plane → downrange = +x.
+        let track = DVec3::new(1.0, -1.0, 0.0).normalize();
+        let (bodies, mids, temps, src) = furrow_target_grains(
+            &mats, &earth, earth_pos, EARTH_RADIUS_M, site, track, frag_mass, DVec3::ZERO, CAP_N, extent,
+        );
+        assert_eq!(bodies.len(), CAP_N);
+        assert_eq!(mids.len(), CAP_N);
+        assert_eq!(temps.len(), CAP_N);
+        assert!(src.iter().all(|&s| s == SOURCE_TARGET), "all grains Earth-tagged");
+        for p in &bodies {
+            assert!(
+                p.pos.length() <= EARTH_RADIUS_M + 1.0,
+                "grain above the surface: r = {}",
+                p.pos.length()
+            );
+        }
+        let along: Vec<f64> = bodies.iter().map(|p| (p.pos - site).dot(t)).collect();
+        let across: Vec<f64> = bodies.iter().map(|p| (p.pos - site).dot(lat)).collect();
+        let span = |v: &[f64]| {
+            v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min)
+        };
+        assert!(
+            span(&along) > 1.3 * span(&across),
+            "furrow must be elongated downrange: along {:.2e} vs across {:.2e}",
+            span(&along),
+            span(&across)
+        );
+        let cx = along.iter().sum::<f64>() / along.len() as f64;
+        assert!(cx > 0.0, "furrow centroid should be downrange of contact, got {cx:.2e}");
+
+        // VERTICAL incidence (track along −n): no preferred direction → a symmetric bowl, still all
+        // below the surface (the fallback tangent must not panic or loft matter).
+        let (vb, _, _, _) = furrow_target_grains(
+            &mats, &earth, earth_pos, EARTH_RADIUS_M, site, -DVec3::Y, frag_mass, DVec3::ZERO, CAP_N,
+            extent,
+        );
+        for p in &vb {
+            assert!(p.pos.length() <= EARTH_RADIUS_M + 1.0, "vertical: grain above surface");
+        }
     }
 
     #[test]
