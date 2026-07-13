@@ -65,6 +65,10 @@ pub fn build_impact_debris_between(
     let mut particles = Vec::with_capacity(IMPACT_N);
     let mut mat_ids = Vec::with_capacity(IMPACT_N);
     let mut temps = Vec::with_capacity(IMPACT_N);
+    // PROVENANCE (docs/28): tag which body each grain is, as a physical attribute — so the disk's
+    // composition can be MEASURED (is any of the Moon Earth-derived, as the real one is?) and tinted by
+    // origin, not inferred from an index convention that swap_remove would scramble.
+    let mut source = Vec::with_capacity(IMPACT_N);
 
     // Both bodies are LAYERED (docs/25): each materialized particle samples the real construction —
     // material AND internal temperature — at its own radius. Nothing is uniform "rock": the Moon brings
@@ -87,6 +91,7 @@ pub fn build_impact_debris_between(
         let layer = moon_body.layer_at(rr);
         mat_ids.push(materials::index_of(mats, layer.material));
         temps.push(moon_body.temperature_at(rr) as f32);
+        source.push(crate::aggregate::SOURCE_IMPACTOR);
     }
 
     // TARGET impact region — a cap of crust in a half-ball BELOW the surface point (reflect any outward
@@ -108,6 +113,7 @@ pub fn build_impact_debris_between(
         let layer = earth_body.layer_at(r_earth);
         mat_ids.push(materials::index_of(mats, layer.material));
         temps.push(earth_body.temperature_at(r_earth) as f32);
+        source.push(crate::aggregate::SOURCE_TARGET);
     }
 
     // One canonical contact law from the real material. Grain radius is DENSITY-CONSISTENT — the radius a
@@ -149,6 +155,7 @@ pub fn build_impact_debris_between(
     // Per-particle composition + REAL internal temperatures from the layered bodies (docs/25).
     agg.mat_ids = mat_ids;
     agg.temps = temps;
+    agg.source = source; // per-particle provenance (Theia vs Earth)
     let acc0 = agg.accelerations();
     (agg, acc0)
 }
@@ -413,62 +420,65 @@ mod tests {
     }
 
     #[test]
-    fn audit_disk_provenance_temp() {
-        // TEMPORARY AUDIT TEST — measures Earth-cap vs impactor provenance of the lofted disk.
+    fn provenance_tags_each_body_and_survives_integration() {
+        // docs/28 step 1: provenance is a PHYSICAL attribute, not an index convention. Assert the builder
+        // tags Theia vs Earth correctly (by their t=0 physical state — the impactor ARRIVES carrying
+        // v_contact, Earth's cap is at REST), and that the tag stays aligned to `particles` through
+        // integration + drain (swap_remove must reorder `source` too, or the render tint desyncs).
+        use crate::aggregate::{SOURCE_IMPACTOR, SOURCE_TARGET};
         let mats = materials::load();
         let theia = crate::planet::theia();
         let earth = crate::planet::earth();
         let m_theia = theia.total_mass();
         let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
-        let v_esc =
-            (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
+        let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
         let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
         let (mut agg, mut acc) = build_impact_debris_between(
             &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth,
             EARTH_MASS, EARTH_RADIUS_M,
         );
-        let mu = G * EARTH_MASS;
-        let mut max_cap_r: f64 = 0.0;
-        let mut ever_aloft = vec![false; IMPACT_N];
-        for s in 0..20_000 {
+        // Counts at build: exactly the impactor and cap populations.
+        assert_eq!(agg.source.len(), IMPACT_N);
+        assert_eq!(agg.source.iter().filter(|&&s| s == SOURCE_IMPACTOR).count(), DEBRIS_N);
+        assert_eq!(agg.source.iter().filter(|&&s| s == SOURCE_TARGET).count(), CAP_N);
+        // The tag matches physical state: impactor grains move (v_contact ~km/s), Earth-cap grains rest.
+        for (i, p) in agg.particles.iter().enumerate() {
+            if agg.source[i] == SOURCE_IMPACTOR {
+                assert!(p.vel.length() > 1_000.0, "impactor grain {i} not moving: {}", p.vel.length());
+            } else {
+                assert!(p.vel.length() < 1.0, "cap grain {i} not at rest: {}", p.vel.length());
+            }
+        }
+        // The tag rides swap_remove: integrate the aftermath, drain settled matter, require source to
+        // stay exactly as long as particles (a desync would mis-tint or panic the render lookup).
+        for _ in 0..3000 {
             agg.step(&mut acc, 2.0);
-            if s % 100 == 0 {
-                for (i, p) in agg.particles.iter().enumerate() {
-                    let r = p.pos.length();
-                    if i >= DEBRIS_N {
-                        max_cap_r = max_cap_r.max(r);
-                    }
-                    if r > 1.1 * EARTH_RADIUS_M {
-                        ever_aloft[i] = true;
-                    }
+        }
+        let before = agg.particles.len();
+        let r_tol = 4.0 * agg.contact.map_or(5.0e5, |c| c.radius);
+        let (drained, _, _) =
+            agg.drain_settled(DVec3::ZERO, EARTH_RADIUS_M, DVec3::ZERO, 30.0, r_tol);
+        assert_eq!(agg.source.len(), agg.particles.len(), "source desynced from particles after drain");
+        assert_eq!(agg.particles.len(), before - drained);
+        // DOCUMENTS the deficit step 3 must close — NO target assertion here (that is step 3's job).
+        // The bound-aloft disk is ~100% Theia today; this print makes it a measurable number that will
+        // MOVE when progressive excavation lofts real Earth material.
+        let mu = G * EARTH_MASS;
+        let (mut aloft_earth, mut aloft_theia) = (0.0f64, 0.0f64);
+        for (i, p) in agg.particles.iter().enumerate() {
+            let r = p.pos.length();
+            if 0.5 * p.vel.length_squared() - mu / r < 0.0 && r > 1.1 * EARTH_RADIUS_M {
+                if agg.source[i] == SOURCE_TARGET {
+                    aloft_earth += p.mass;
+                } else {
+                    aloft_theia += p.mass;
                 }
             }
         }
-        let m_moon_real = 7.342e22;
-        let (mut aloft_imp, mut aloft_cap, mut esc_imp, mut esc_cap) = (0.0f64, 0.0, 0.0, 0.0);
-        let (mut n_ai, mut n_ac) = (0usize, 0usize);
-        for (i, p) in agg.particles.iter().enumerate() {
-            let r = p.pos.length();
-            let eps = 0.5 * p.vel.length_squared() - mu / r;
-            let cap = i >= DEBRIS_N;
-            if eps >= 0.0 {
-                if cap { esc_cap += p.mass } else { esc_imp += p.mass }
-            } else if r > 1.1 * EARTH_RADIUS_M {
-                if cap { aloft_cap += p.mass; n_ac += 1 } else { aloft_imp += p.mass; n_ai += 1 }
-            }
-        }
-        let cap_ever = ever_aloft[DEBRIS_N..].iter().filter(|b| **b).count();
-        let vap_cap = agg.vapor[DEBRIS_N..].iter().filter(|v| **v).count();
-        let vap_imp = agg.vapor[..DEBRIS_N].iter().filter(|v| **v).count();
-        let hot_cap = agg.temps[DEBRIS_N..].iter().cloned().fold(0.0f32, f32::max);
         println!(
-            "PROVENANCE: disk impactor {:.2} M_moon ({n_ai} pcl) | disk EARTH {:.2} M_moon ({n_ac} pcl) | escaped imp {:.2} cap {:.2}",
-            aloft_imp / m_moon_real, aloft_cap / m_moon_real, esc_imp / m_moon_real, esc_cap / m_moon_real
-        );
-        println!(
-            "cap: max r ever {mr:.3} R_e | cap ever-aloft {cap_ever}/{cn} | vapor cap {vap_cap} imp {vap_imp} | hottest cap {hot_cap:.0} K",
-            mr = max_cap_r / EARTH_RADIUS_M,
-            cn = CAP_N
+            "DISK PROVENANCE (bound, aloft): Earth {:.3} M_moon | Theia {:.3} M_moon",
+            aloft_earth / MOON_MASS,
+            aloft_theia / MOON_MASS
         );
     }
 

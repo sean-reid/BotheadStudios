@@ -131,7 +131,17 @@ pub struct Aggregate {
     /// Boil threshold (K) for the phase flip — the bulk material's boiling point (1-atm value;
     /// the local-vapor-pressure criterion is the refinement, flagged).
     pub boil_k: f64,
+    /// Per-particle PROVENANCE (docs/28): which body this matter came from — [`SOURCE_IMPACTOR`] (Theia)
+    /// or [`SOURCE_TARGET`] (Earth). A physical attribute, not an index convention: it rides `swap_remove`
+    /// and lets the disk's composition be measured and tinted by origin (the real Moon is Earth-like, so
+    /// "the disk is 100% impactor" is a bug the tag makes visible).
+    pub source: Vec<u8>,
 }
+
+/// Provenance tags for [`Aggregate::source`]. The impactor is the default (0) so a bare aggregate with
+/// no impact history reads as one uniform body.
+pub const SOURCE_IMPACTOR: u8 = 0;
+pub const SOURCE_TARGET: u8 = 1;
 
 impl Aggregate {
     pub fn new(particles: Vec<Body>, softening: f64) -> Self {
@@ -162,6 +172,7 @@ impl Aggregate {
             vapor: vec![false; n],
             contact_gas: None,
             boil_k: f64::INFINITY,
+            source: vec![SOURCE_IMPACTOR; n],
         }
     }
 
@@ -305,6 +316,7 @@ impl Aggregate {
             vapor: vec![false; n],
             contact_gas: None,
             boil_k: f64::INFINITY,
+            source: vec![SOURCE_IMPACTOR; n],
         }
     }
 
@@ -667,6 +679,9 @@ impl Aggregate {
                 self.mat_ids.swap_remove(i);
                 if !self.vapor.is_empty() {
                     self.vapor.swap_remove(i);
+                }
+                if !self.source.is_empty() {
+                    self.source.swap_remove(i);
                 }
                 n += 1;
             } else {

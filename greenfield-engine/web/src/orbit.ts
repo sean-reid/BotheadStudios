@@ -358,12 +358,17 @@ async function main(): Promise<void> {
           if (statsSkip) throw new Error("skipped");
           diskCache ??= demo.disk_stats_json();
           const d = JSON.parse(diskCache) as {
-            bound: number; escaped: number; biggest: number; clumps: number;
+            bound: number; escaped: number; biggest: number; clumps: number; earth: number;
           } | null;
           if (d && d.bound > 0.005) {
+            // Provenance of the bound disk (docs/28 step 1): the real Moon is Earth-like, so a disk that
+            // is all Theia is the deficit. Shown as ●Theia / ●Earth to match the render's origin tint.
+            const earth = d.earth ?? 0;
+            const theia = Math.max(0, d.bound - earth);
             eventLine +=
               ` · disk <b>${d.bound.toFixed(2)} M☾</b> in <b>${d.clumps}</b> moonlet${d.clumps === 1 ? "" : "s"}` +
               ` · biggest <b>${d.biggest.toFixed(2)} M☾</b>` +
+              ` · origin <b style="color:#ff9a52">${theia.toFixed(2)} Theia</b> / <b style="color:#6aa0ff">${earth.toFixed(2)} Earth</b>` +
               (d.escaped > 0.005 ? ` · escaped ${d.escaped.toFixed(2)} M☾` : "");
           }
         } catch { /* stats unavailable */ }

@@ -1720,6 +1720,7 @@ mod app {
         sizes: Vec<f32>,          // display radius factor ∝ (mass/initial fragment mass)^⅓ — accretion grows moonlets
         mats: Vec<usize>,         // per-fragment material index — snapshotted so tints track the SAME lagged
         //                           order as positions (a live read desynced after drain's swap_remove)
+        srcs: Vec<u8>,            // per-fragment provenance (Earth vs Theia) — same lagged order (docs/28 step 1)
         shattered: bool,
     }
 
@@ -2326,6 +2327,10 @@ mod app {
             let touch = agg.contact.map_or(1.0e6, |c| 2.2 * c.radius);
             let mut aloft: Vec<usize> = Vec::new();
             let (mut bound_m, mut escaped_m) = (0.0f64, 0.0f64);
+            // Provenance of the BOUND disk (docs/28 step 1): how much of the aloft, bound material is
+            // Earth-derived vs Theia-derived. The real Moon is Earth-like; today this reads ~0 Earth —
+            // the measurable deficit progressive excavation must close.
+            let mut bound_earth_m = 0.0f64;
             for (i, p) in agg.particles.iter().enumerate() {
                 let r = (p.pos - earth.pos).length();
                 let eps = 0.5 * (p.vel - earth.vel).length_squared() - mu / r;
@@ -2333,6 +2338,9 @@ mod app {
                     escaped_m += p.mass;
                 } else if r > 1.1 * EARTH_RADIUS_M {
                     bound_m += p.mass;
+                    if agg.source.get(i).copied() == Some(crate::aggregate::SOURCE_TARGET) {
+                        bound_earth_m += p.mass;
+                    }
                     aloft.push(i);
                 }
             }
@@ -2362,11 +2370,12 @@ mod app {
             }
             let biggest = clump.values().cloned().fold(0.0f64, f64::max);
             format!(
-                "{{\"bound\":{:.3},\"escaped\":{:.3},\"biggest\":{:.3},\"clumps\":{}}}",
+                "{{\"bound\":{:.3},\"escaped\":{:.3},\"biggest\":{:.3},\"clumps\":{},\"earth\":{:.3}}}",
                 bound_m / M_MOON,
                 escaped_m / M_MOON,
                 biggest / M_MOON,
-                clump.len()
+                clump.len(),
+                bound_earth_m / M_MOON
             )
         }
 
@@ -2827,14 +2836,15 @@ mod app {
         /// Record the observable state at the current physics clock (the renderer's source of truth).
         fn push_snapshot(&mut self) {
             let frag0 = (self.impactor_mass / DEBRIS_N as f64).max(1.0);
-            let (debris, temps, sizes, mats) = match self.moon_debris.as_ref() {
+            let (debris, temps, sizes, mats, srcs) = match self.moon_debris.as_ref() {
                 Some(agg) => (
                     agg.particles.iter().map(|p| p.pos).collect(),
                     agg.temps.clone(),
                     agg.particles.iter().map(|p| (p.mass / frag0).cbrt() as f32).collect(),
                     agg.mat_ids.clone(),
+                    agg.source.clone(),
                 ),
-                None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             };
             self.snaps.push_back(FrameSnap {
                 t: self.phys_clock,
@@ -2843,6 +2853,7 @@ mod app {
                 temps,
                 sizes,
                 mats,
+                srcs,
                 // Shattered is FOREVER (until Replay): keying this off moon_debris alone RESURRECTED
                 // the parked impactor's grain shell when geologic mode retired the cloud — a
                 // Theia-sized ghost sitting on Earth with no orbit ("pure fudge" — a render-state bug
@@ -2861,17 +2872,18 @@ mod app {
         #[allow(clippy::type_complexity)]
         fn sampled_state(
             &self,
-        ) -> (Vec<glam::DVec3>, Vec<glam::DVec3>, Vec<f32>, Vec<f32>, Vec<usize>, bool) {
+        ) -> (Vec<glam::DVec3>, Vec<glam::DVec3>, Vec<f32>, Vec<f32>, Vec<usize>, Vec<u8>, bool) {
             if self.snaps.is_empty() {
                 let frag0 = (self.impactor_mass / DEBRIS_N as f64).max(1.0);
-                let (d, t, sz, mt) = match self.moon_debris.as_ref() {
+                let (d, t, sz, mt, sc) = match self.moon_debris.as_ref() {
                     Some(a) => (
                         a.particles.iter().map(|p| p.pos).collect(),
                         a.temps.clone(),
                         a.particles.iter().map(|p| (p.mass / frag0).cbrt() as f32).collect(),
                         a.mat_ids.clone(),
+                        a.source.clone(),
                     ),
-                    None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                    None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
                 };
                 return (
                     self.bodies.iter().map(|b| b.pos).collect(),
@@ -2879,6 +2891,7 @@ mod app {
                     t,
                     sz,
                     mt,
+                    sc,
                     self.moon_debris.is_some(),
                 );
             }
@@ -2908,7 +2921,7 @@ mod app {
             // s1's — counts change when moonlets accrete).
             // mats travels with whichever snapshot supplies temps/sizes, so tints stay aligned to the
             // fragment order those came from.
-            let (debris, temps, sizes, mats) =
+            let (debris, temps, sizes, mats, srcs) =
                 if !s0.debris.is_empty() && s0.debris.len() == s1.debris.len() {
                     (
                         s0.debris
@@ -2919,22 +2932,24 @@ mod app {
                         s0.temps.clone(),
                         s0.sizes.clone(),
                         s0.mats.clone(),
+                        s0.srcs.clone(),
                     )
                 } else if s1.shattered {
-                    (s1.debris.clone(), s1.temps.clone(), s1.sizes.clone(), s1.mats.clone())
+                    (s1.debris.clone(), s1.temps.clone(), s1.sizes.clone(), s1.mats.clone(), s1.srcs.clone())
                 } else {
-                    (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
                 };
             let shattered = if f < 1.0 { s0.shattered } else { s1.shattered };
             let any_debris = !debris.is_empty();
-            (bodies, debris, temps, sizes, mats, shattered || any_debris)
+            (bodies, debris, temps, sizes, mats, srcs, shattered || any_debris)
         }
 
         pub fn render(&mut self) -> Result<(), JsValue> {
             // NO physics here (docs/13): the renderer samples the physics snapshots RENDER_LAG_S behind
             // the live state — every event it draws is already fully resolved. The physics is advanced
             // by `advance(real_dt)`, on wall-clock time, independent of this function's call rate.
-            let (r_bodies, r_debris, r_temps, r_sizes, r_mats, r_shattered) = self.sampled_state();
+            let (r_bodies, r_debris, r_temps, r_sizes, r_mats, r_srcs, r_shattered) =
+                self.sampled_state();
 
             let view_proj = self.view_proj();
 
@@ -3154,8 +3169,23 @@ mod app {
                     let glow = incandescence(r_temps.get(i).copied().unwrap_or(0.0));
                     // Each fragment wears ITS material's reflectance: basalt crust, peridotite mantle,
                     // iron core — the excavated composition is visible, not a uniform gray.
-                    let m = &self.mats[r_mats.get(i).copied().unwrap_or(0)];
-                    let tint = [m.albedo[0], m.albedo[1], m.albedo[2], 1.0];
+                    let _m = &self.mats[r_mats.get(i).copied().unwrap_or(0)];
+                    // PROVENANCE overlay (docs/28 step 1): a DIAGNOSTIC categorical reflectance, not the
+                    // real material albedo — Earth-derived matter reads blue, Theia-derived warm/orange,
+                    // so the disk's origin split is visible AT A GLANCE. The discriminating channel is
+                    // kept low (blue≈0 for Theia, red low for Earth) so the hue survives the strong-sun
+                    // Reinhard tone-map instead of washing to cream. Today the disk is ~100% Theia (all
+                    // orange); Earth-blue specks appearing is how progressive excavation (step 3) proves
+                    // itself on screen. Incandescence (temperature) still glows on top for hot fragments.
+                    let src = r_srcs.get(i).copied().unwrap_or(crate::aggregate::SOURCE_IMPACTOR);
+                    // Low reflectances: under SUN_GAIN×Reinhard, the dominant channel must land ~1–2 in
+                    // radiance to read as a SATURATED hue (higher just washes to cream). Discriminating
+                    // channel near zero so the tone-map can't wash it out.
+                    let tint = if src == crate::aggregate::SOURCE_TARGET {
+                        [0.010f32, 0.045, 0.135, 1.0] // Earth: blue
+                    } else {
+                        [0.110f32, 0.028, 0.006, 1.0] // Theia: warm orange
+                    };
                     // Display radius grows with the ⅓ power of accreted mass — you can SEE the Moon
                     // winning: one fragment swells while the count falls.
                     let size = r_sizes.get(i).copied().unwrap_or(1.0);
