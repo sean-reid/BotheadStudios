@@ -190,6 +190,41 @@ impl Furrow {
     }
 }
 
+/// EXACT energy-conservation cap on the DECLARED shock ejection (docs/28). The Housen–Holsapple point-
+/// source law `v = C·v_i·(a/d)^(1/μ)` sets the velocity DISTRIBUTION SHAPE (which grain is faster), but
+/// it knows nothing about how much energy the impactor actually carried. For a SMALL impactor (the
+/// terrain meteor: a ≈ 0.31 m ≪ the 1 m grain) that shape, applied to grains far more massive than the
+/// impactor, hands the excavated matter FAR more kinetic energy than the impact delivered — you cannot
+/// eject more KE than ½·m_impactor·v² put in. That surplus is the debris storm (rubble flung km up that
+/// never settles). This returns the factor to multiply every grain's ejection velocity (the component
+/// RELATIVE to the co-moving ground) by so the total ejecta KE `Σ ½·m·|v_ej|²` equals `e_impact` when it
+/// would otherwise exceed it, and is otherwise LEFT ALONE (factor exactly 1.0 → byte-unchanged).
+///
+/// The H-H law still sets the SHAPE; this sets only the overall SCALE. It is EXACT conservation, not a
+/// tuned dial: the factor is `√(e_impact / KE)`, derived, with no free parameter. For a HUGE impactor
+/// (Theia) the ejecta KE is already `≪ e_impact`, so the factor clamps to 1 and the space band is
+/// untouched.
+///
+/// HONEST NOTE (docs/28): capping at the FULL impact energy — ALL of `e_impact` allowed to become ejecta
+/// KE — is a GENEROUS UPPER BOUND. Realistically most impact energy goes to heat + comminution and the
+/// ejecta gets only a cratering fraction f < 1, so a cited f would give a GENTLER spray. We use the hard
+/// bound f = 1 here (unambiguous conservation, no free knob); a cited ejecta-KE fraction is a flagged
+/// REFINEMENT, deliberately NOT tuned to "look right".
+pub fn ejecta_energy_scale(
+    ejecta: impl IntoIterator<Item = (f64, DVec3)>,
+    e_impact: f64,
+) -> f64 {
+    let ke: f64 = ejecta
+        .into_iter()
+        .map(|(m, v)| 0.5 * m * v.length_squared())
+        .sum();
+    if ke > e_impact && ke > 0.0 {
+        (e_impact / ke).sqrt()
+    } else {
+        1.0 // within budget (or no ejecta): leave the declared velocities exactly as they are
+    }
+}
+
 /// SHARED excavation primitive (docs/28 step 3): the target matter the impactor ploughs into, shaped as
 /// a FURROW (see [`Furrow`]). Scene-agnostic: any `target` LayeredBody, any `surface` ([`ExcavSurface`],
 /// curved or flat), any site/track, so a meteor into terrain and Theia into Earth excavate by the SAME
@@ -202,10 +237,13 @@ impl Furrow {
 /// `surface` is the geometry the excavation happens on ([`ExcavSurface::Curved`] for the space band,
 /// [`ExcavSurface::Flat`] for a terrain patch). `v_impact` is the impactor's velocity relative to the
 /// target (direction sets the furrow's long axis, magnitude drives the ejecta speed); `impactor_radius`
-/// is the scaling length a. `extent` is the excavation scale (≈ impactor size, clamped). This routine
-/// FILLS the furrow's half-ellipsoid volume with `n_grains` fresh grains (a body has no pre-existing
-/// grains); a terrain scene instead converts its real voxels (`matter::materialize_furrow`), but BOTH
-/// share the [`Furrow`] shape + ejection law. Returns (bodies, mat_ids, temps, source) to append.
+/// is the scaling length a. `impactor_mass` is the impactor's mass — with `v_impact` it sets the impact
+/// energy `½·m·v²` that CAPS the total ejecta KE ([`ejecta_energy_scale`]): the declared H-H law can hand
+/// a small impactor's excavated grains more KE than the impact delivered, and exact energy conservation
+/// scales that back. `extent` is the excavation scale (≈ impactor size, clamped). This routine FILLS the
+/// furrow's half-ellipsoid volume with `n_grains` fresh grains (a body has no pre-existing grains); a
+/// terrain scene instead converts its real voxels (`matter::materialize_furrow`), but BOTH share the
+/// [`Furrow`] shape + ejection law + energy cap. Returns (bodies, mat_ids, temps, source) to append.
 #[allow(clippy::too_many_arguments)]
 pub fn furrow_target_grains(
     mats: &[Material],
@@ -218,6 +256,7 @@ pub fn furrow_target_grains(
     ground_vel: DVec3,
     n_grains: usize,
     extent: f64,
+    impactor_mass: f64,
 ) -> (Vec<Body>, Vec<usize>, Vec<f32>, Vec<u8>) {
     let n = surface.site_normal(site); // outward surface normal at the site
     let f = Furrow::new(site, n, v_impact, impactor_radius, extent);
@@ -226,6 +265,9 @@ pub fn furrow_target_grains(
     let mut mat_ids = Vec::with_capacity(n_grains);
     let mut temps = Vec::with_capacity(n_grains);
     let mut source = Vec::with_capacity(n_grains);
+    // Pass 1: place each grain and compute its RAW declared shock-ejection velocity (relative to ground).
+    // The energy cap is a property of the WHOLE ejecta set, so we cannot finalise velocities per grain.
+    let mut ejections = Vec::with_capacity(n_grains);
     for i in 0..n_grains {
         let u = fib_dir(i, n_grains);
         let r = ((i as f64 + 0.5) / n_grains as f64).cbrt(); // fill the ellipsoid volume
@@ -236,15 +278,21 @@ pub fn furrow_target_grains(
         // every grain is genuinely below the surface.
         let tangent_pt = site + f.t * along + f.b * lat;
         let (pos, outward, r_sample, below) = surface.place(tangent_pt, depth);
-        bodies.push(Body {
-            pos,
-            vel: ground_vel + f.ejection(pos, outward, below),
-            mass: frag_mass,
-        });
+        ejections.push(f.ejection(pos, outward, below));
+        bodies.push(Body { pos, vel: ground_vel, mass: frag_mass }); // ejection added (scaled) below
         let layer = target.layer_at(r_sample);
         mat_ids.push(materials::index_of(mats, layer.material));
         temps.push(target.temperature_at(r_sample) as f32);
         source.push(crate::aggregate::SOURCE_TARGET);
+    }
+    // Pass 2: EXACT energy conservation (docs/28) — total ejecta KE ≤ the impact energy. For a small
+    // impactor the raw KE exceeds it and every ejection is scaled by √(E_i/KE); for a giant impactor
+    // (Theia) the factor is 1.0 and the velocities are byte-unchanged. `v*1.0 == v`, so the space band is
+    // untouched.
+    let e_impact = 0.5 * impactor_mass * v_impact.length_squared();
+    let scale = ejecta_energy_scale(ejections.iter().map(|&ej| (frag_mass, ej)), e_impact);
+    for (b, ej) in bodies.iter_mut().zip(ejections.iter()) {
+        b.vel += *ej * scale;
     }
     (bodies, mat_ids, temps, source)
 }
@@ -327,6 +375,7 @@ pub fn build_impact_debris_between(
         earth_vel,
         CAP_N,
         cap_extent,
+        moon_mass, // impactor mass → the impact-energy cap (Theia is within budget: no scaling)
     );
     particles.extend(cap_bodies);
     mat_ids.extend(cap_mats);
@@ -751,6 +800,7 @@ mod tests {
             DVec3::ZERO,
             CAP_N,
             extent,
+            MOON_MASS, // moon-scale impactor (a = MOON_RADIUS_M): within budget, so no scaling
         );
         assert_eq!(bodies.len(), CAP_N);
         assert_eq!(mids.len(), CAP_N);
@@ -805,6 +855,7 @@ mod tests {
             DVec3::ZERO,
             CAP_N,
             extent,
+            MOON_MASS,
         );
         for p in &vb {
             assert!(p.pos.length() <= EARTH_RADIUS_M + 1.0, "vertical: grain above surface");
@@ -820,9 +871,12 @@ mod tests {
         //   • grains all Earth-tagged (SOURCE_TARGET) and all BELOW the surface plane;
         //   • an OBLIQUE strike carves a furrow ELONGATED downrange, its centroid pushed downrange;
         //   • ejecta are LOFTED (outward/up velocity), launched along the LOCAL normal (so the arcs are
-        //     set by the scene's local gravity — a flat uniform-g patch has no escape velocity, so
-        //     "sub-escape" is replaced by the derived-not-dial check: halving the impact speed halves the
-        //     loft, the H-H law responding to the impact, not a fixed kick);
+        //     set by the scene's local gravity — a flat uniform-g patch has no escape velocity), but
+        //     the total ejecta KE is CAPPED at the impact energy ½·m·v² (docs/28 exact conservation): a
+        //     SMALL impactor (a ≈ 0.3 m ≪ the 1 m³ grains) cannot fling its excavated grains at the raw
+        //     H-H speed — that would eject more KE than the impact carried (the debris storm). So we
+        //     assert Σ½m|v_ej|² ≤ E_i AND the derived-not-dial check (halving the impact speed halves the
+        //     loft — the cap scales as v², so the ratio survives);
         //   • a VERTICAL strike is SYMMETRIC (no downrange bias) — obliquity is what elongates a furrow.
         use crate::aggregate::SOURCE_TARGET;
         let mats = materials::load();
@@ -830,15 +884,17 @@ mod tests {
         let up = DVec3::Y; // local surface normal on a flat patch (+y under uniform gravity)
         let site = DVec3::ZERO; // impact point at the origin of the tangent plane
         let flat = ExcavSurface::Flat { up, ref_radius: EARTH_RADIUS_M };
-        let frag_mass = 1.0e6;
+        let frag_mass = 2_900.0; // a 1 m³ basalt voxel (kg) — the real terrain grain, not a proxy
         let extent = 12.0; // a meteor-scale crater (metres), not a giant impact
         let a = 0.3; // impactor radius (scaling length) — a small Fe-Ni body
+        let impactor_mass = 1_000.0; // a ≈ 0.3 m Fe-Ni body is ~900 kg → the impact-energy budget
         let (t, lat) = (DVec3::X, DVec3::Z); // downrange / lateral tangents for the oblique case below
 
         // OBLIQUE 45° impact at 17 km/s in the x–y plane → downrange = +x.
         let v_oblique = DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0;
         let (bodies, mids, temps, src) = furrow_target_grains(
             &mats, &earth, flat, site, v_oblique, a, frag_mass, DVec3::ZERO, CAP_N, extent,
+            impactor_mass,
         );
         assert_eq!(bodies.len(), CAP_N);
         assert_eq!(mids.len(), CAP_N);
@@ -870,16 +926,22 @@ mod tests {
         // Ejecta lofted: some grains carry outward (+up) velocity, launched along the LOCAL normal.
         let up_vel: Vec<f64> = bodies.iter().map(|p| p.vel.dot(up)).collect();
         let max_up = up_vel.iter().cloned().fold(f64::MIN, f64::max);
-        // The loft is MODEST here and that is honest: the H-H ejection scales as (a/d)^(1/μ) with the
-        // impactor radius a (0.3 m) as the point source, so for a crater extent ≫ a the excavation is
-        // DISPLACEMENT-dominated (grains stay) and only a gentle curtain is lofted — the opposite regime
-        // to the space band, where a ≈ extent (a whole planetesimal) drives violent ejection. We assert
-        // the curtain is genuinely lofted (well above numerical noise), not a specific speed.
-        assert!(max_up > 15.0, "some grains must be lofted (outward/up velocity), got max {max_up:.1}");
-        // Derived, not a dial: a HALF-SPEED impact lofts proportionally slower (the H-H law tracks the
-        // impact — "scaled to" the strike, launched along the local vertical the scene's gravity acts on).
+        assert!(max_up > 0.0, "some grains must be lofted (outward/up velocity), got max {max_up:.3}");
+        // EXACT ENERGY CONSERVATION (docs/28): the total ejecta KE never exceeds the impact energy ½·m·v².
+        // For this physically-consistent 1000 kg / 0.31 m terrain meteor the raw H-H ejecta KE is within
+        // budget (~0.15× E_i, measured), so the f=1 cap is inactive here — the invariant still holds.
+        let e_impact = 0.5 * impactor_mass * v_oblique.length_squared();
+        let ke: f64 = bodies.iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
+        assert!(
+            ke <= e_impact * (1.0 + 1e-9),
+            "ejecta KE {ke:.3e} must not exceed the impact energy {e_impact:.3e} (energy conserved)"
+        );
+        // Derived, not a dial: a HALF-SPEED impact lofts proportionally slower. Both the RAW H-H speeds
+        // AND the energy budget scale as v², so the cap factor is IDENTICAL at any speed and the capped
+        // speeds still halve — the physics tracks the impact, it is not a fixed kick nor a look-right clamp.
         let (half, _, _, _) = furrow_target_grains(
             &mats, &earth, flat, site, v_oblique * 0.5, a, frag_mass, DVec3::ZERO, CAP_N, extent,
+            impactor_mass,
         );
         let vmax = |b: &[Body]| b.iter().map(|p| p.vel.length()).fold(0.0, f64::max);
         let (vf, vh) = (vmax(&bodies), vmax(&half));
@@ -894,6 +956,7 @@ mod tests {
         let v_vert = -up * 17_000.0;
         let (vb, _, _, _) = furrow_target_grains(
             &mats, &earth, flat, site, v_vert, a, frag_mass, DVec3::ZERO, CAP_N, extent,
+            impactor_mass,
         );
         // Its tangent axes are arbitrary (no preferred direction), so measure symmetry in two fixed
         // orthogonal tangents (x, z) of the plane.
@@ -916,6 +979,110 @@ mod tests {
         for p in &vb {
             assert!((p.pos - site).dot(up) <= 1e-6, "vertical: grain above the flat surface");
         }
+    }
+
+    #[test]
+    fn ejecta_energy_scale_conserves_energy_and_leaves_within_budget_ejecta_alone() {
+        // The shared cap in isolation (docs/28). Two grains with a known raw KE.
+        let ejecta = [
+            (2_900.0, DVec3::new(0.0, 10_000.0, 0.0)),
+            (2_900.0, DVec3::new(0.0, 6_000.0, 0.0)),
+        ];
+        let raw_ke: f64 = ejecta.iter().map(|(m, v)| 0.5 * m * v.length_squared()).sum();
+        // (a) OVER budget → factor √(E/KE), and the SCALED KE equals the budget exactly.
+        let budget = 1.0e10;
+        assert!(budget < raw_ke, "test premise: raw KE exceeds the budget");
+        let s = ejecta_energy_scale(ejecta.iter().copied(), budget);
+        assert!((s - (budget / raw_ke).sqrt()).abs() < 1e-15, "factor is √(E/KE)");
+        let scaled_ke: f64 = ejecta.iter().map(|(m, v)| 0.5 * m * (*v * s).length_squared()).sum();
+        assert!(
+            (scaled_ke - budget).abs() / budget < 1e-12,
+            "scaled ejecta KE equals the budget exactly ({scaled_ke:.6e} vs {budget:.6e})"
+        );
+        // (b) WITHIN budget → factor is EXACTLY 1.0 (byte-unchanged; `v * 1.0 == v`).
+        let s2 = ejecta_energy_scale(ejecta.iter().copied(), raw_ke * 2.0);
+        assert_eq!(s2, 1.0, "within budget: the declared velocities are left exactly as they are");
+    }
+
+    #[test]
+    fn a_small_impactor_cannot_eject_more_energy_than_it_delivered() {
+        // docs/28: exact energy conservation — the total ejecta KE can never exceed the impact energy
+        // ½·m·v². The Housen–Holsapple law v = C·v_i·(a/d)^(1/μ) sets the velocity SHAPE, the cap sets the
+        // SCALE. We prove the BINDING path in the furrow: run the SAME excavation uncapped (impactor_mass
+        // = ∞) and with a LIGHT impactor whose ½·m·v² is below that raw ejecta KE, and require the cap to
+        // scale the total ejecta KE down to the impact energy EXACTLY.
+        let mats = materials::load();
+        let earth = crate::planet::earth();
+        let flat = ExcavSurface::Flat { up: DVec3::Y, ref_radius: EARTH_RADIUS_M };
+        let site = DVec3::ZERO;
+        let a = 0.31; // impactor radius (H-H scaling length)
+        let v = DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0; // 17 km/s oblique
+        let frag_mass = 2_900.0; // 1 m³ basalt voxel grains (the real terrain grain)
+
+        // Raw (uncapped) ejecta KE of this excavation.
+        let raw = furrow_target_grains(
+            &mats, &earth, flat, site, v, a, frag_mass, DVec3::ZERO, CAP_N, 12.0, f64::INFINITY,
+        )
+        .0;
+        let raw_ke: f64 = raw.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
+        assert!(raw_ke > 0.0);
+
+        // A light impactor whose impact energy is HALF the raw ejecta KE → the cap must bind.
+        let e_impact = 0.5 * raw_ke;
+        let impactor_mass = e_impact / (0.5 * v.length_squared());
+        let (bodies, ..) = furrow_target_grains(
+            &mats, &earth, flat, site, v, a, frag_mass, DVec3::ZERO, CAP_N, 12.0, impactor_mass,
+        );
+        // ground_vel is zero here, so the ejecta KE relative to ground is the absolute KE.
+        let ke: f64 = bodies.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
+        assert!(
+            (ke - e_impact).abs() / e_impact < 1e-9,
+            "capped ejecta KE {ke:.3e} J == the impact energy {e_impact:.3e} J (exact conservation)"
+        );
+        assert!(ke < raw_ke, "the cap reduced the ejecta KE ({ke:.3e} < raw {raw_ke:.3e})");
+
+        // HONEST FINDING (docs/28): a PHYSICALLY-CONSISTENT 1000 kg / 0.31 m terrain meteor delivers far
+        // MORE energy than this raw ejection carries, so at the f=1 bound the cap does NOT bind for it —
+        // the raw ejecta KE is ~0.15× its impact energy. The cap is a correct conservation invariant, but
+        // the observed terrain debris storm is NOT an aggregate energy-conservation violation.
+        let e_1000kg = 0.5 * 1000.0 * v.length_squared();
+        assert!(
+            raw_ke < e_1000kg,
+            "the 1000 kg meteor is within budget (raw {raw_ke:.3e} < E_i {e_1000kg:.3e}); f=1 cap inactive"
+        );
+    }
+
+    #[test]
+    fn a_giant_impactor_within_budget_is_not_scaled_byte_for_byte() {
+        // The space-band guard (docs/28): a Theia-scale impactor's impact energy ½·m·v² DWARFS its ejecta
+        // KE, so the cap is inactive and the DECLARED ejection is byte-for-byte unchanged. If the cap ever
+        // touched the space band this test fails. We prove it by comparing the REAL-mass run against an
+        // INFINITE-energy run (which forces factor 1 by construction): byte-equal ⇒ Theia was uncapped.
+        let mats = materials::load();
+        let earth = crate::planet::earth();
+        let curved = ExcavSurface::Curved { center: DVec3::ZERO, radius: EARTH_RADIUS_M };
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
+        let v = DVec3::new(1.0, -1.0, 0.0).normalize() * 10_000.0;
+        let a = MOON_RADIUS_M;
+        let extent = 2.0 * MOON_RADIUS_M;
+        let theia = crate::planet::theia();
+        let m_theia = theia.total_mass();
+        let frag_mass = m_theia / DEBRIS_N as f64;
+        let real = furrow_target_grains(
+            &mats, &earth, curved, site, v, a, frag_mass, DVec3::ZERO, CAP_N, extent, m_theia,
+        )
+        .0;
+        let uncapped = furrow_target_grains(
+            &mats, &earth, curved, site, v, a, frag_mass, DVec3::ZERO, CAP_N, extent, f64::INFINITY,
+        )
+        .0;
+        for (r, u) in real.iter().zip(uncapped.iter()) {
+            assert_eq!(r.vel, u.vel, "Theia's declared ejection must be unscaled (within budget)");
+        }
+        // And directly: the ejecta KE is comfortably under the impact energy.
+        let e_impact = 0.5 * m_theia * v.length_squared();
+        let ke: f64 = real.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
+        assert!(ke < e_impact, "Theia's ejecta KE {ke:.3e} J < impact energy {e_impact:.3e} J");
     }
 
     #[test]

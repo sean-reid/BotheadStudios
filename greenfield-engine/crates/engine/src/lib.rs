@@ -768,8 +768,13 @@ mod app {
                 let furrow =
                     crate::impact::Furrow::new(site64, glam::DVec3::Y, v_impact, a, mat_r as f64);
                 let start = self.matter.particle_count();
-                self.matter
-                    .materialize_furrow(&mut self.world, &self.mats, &furrow, Vec3::ZERO);
+                self.matter.materialize_furrow(
+                    &mut self.world,
+                    &self.mats,
+                    &furrow,
+                    Vec3::ZERO,
+                    METEOR_MASS as f64, // impactor mass → the exact energy-conservation cap (docs/28)
+                );
                 // Path B (docs/24): turn any STEEP terrain the ejecta will hit (crater walls, cliffs) into
                 // grains too — a heightfield can't represent a vertical wall conservatively. Now the
                 // terrain the debris touches is either grains or a gentle bilinear surface — both conservative.
