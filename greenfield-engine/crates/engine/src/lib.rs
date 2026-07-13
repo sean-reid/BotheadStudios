@@ -171,6 +171,9 @@ mod app {
 
         world_gpu: GpuMesh,
         world_uni: UniformSlot,
+        /// The horizon ground plane (surface-of-a-planet framing). Reuses `world_uni` (same identity
+        /// model / view_proj / light / material textures) — it is just another mesh in the world pass.
+        ground_gpu: GpuMesh,
 
         // Simulation
         mats: Vec<materials::Material>,
@@ -271,6 +274,15 @@ mod app {
 
             let world_mesh = mesher::build_surface_nets(&world, &mats);
             let world_gpu = upload_mesh(&device, "world", &world_mesh);
+            // Horizon ground plane at the patch's centre surface height (world-centered coords). Extent
+            // just inside the 6 km far plane so it fills down to a true horizon under the sky.
+            let cc = world.center();
+            let surf_y = world
+                .surface_top_voxel(cc.x as i32, cc.z as i32)
+                .map(|t| t as f32 - cc.y)
+                .unwrap_or(0.0);
+            let ground_mesh = ground_plane_mesh(&mats, surf_y, 5800.0);
+            let ground_gpu = upload_mesh(&device, "ground", &ground_mesh);
             log::info!("meshes: world {} tris", world_mesh.indices.len() / 3);
 
             // --- Spawn the probe: a cohesive iron ball of real matter (docs/23) ---
@@ -467,7 +479,9 @@ mod app {
             let max_dim = world.w.max(world.h).max(world.d) as f32;
             let camera = Camera {
                 yaw: 0.7,
-                pitch: 0.5,
+                // Low pitch = a surface-grazing look across the terrain toward the horizon (standing on
+                // a world), instead of the old top-down look at a floating cube.
+                pitch: 0.16,
                 zoom: 1.0,
                 base_distance: max_dim * 1.6,
             };
@@ -481,6 +495,7 @@ mod app {
                 pipeline,
                 world_gpu,
                 world_uni,
+                ground_gpu,
                 mats,
                 world,
                 field,
@@ -946,6 +961,9 @@ mod app {
                     occlusion_query_set: None,
                 });
                 pass.set_pipeline(&self.pipeline);
+                // Horizon ground plane first (shares world_uni), then the detailed patch on top of it —
+                // the plane hides the patch's floating side walls and carries the ground to the horizon.
+                draw(&mut pass, &self.world_uni, &self.ground_gpu);
                 draw(&mut pass, &self.world_uni, &self.world_gpu);
 
                 // Particle pipeline: the probe (cohesive ball, its particles) + the GPU debris.
@@ -1045,7 +1063,11 @@ mod app {
                 cp * self.camera.yaw.cos(),
             );
             let eye = dir * (self.camera.base_distance * self.camera.zoom);
-            let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+            // Aim near eye height (not down at the world centre) so the gaze is nearly horizontal: the
+            // ground plane recedes to a HORIZON with sky above — a surface-of-a-planet view. A little
+            // below eye height keeps a gentle downward tilt so the terrain patch stays in frame.
+            let target = Vec3::new(0.0, eye.y * 0.82, 0.0);
+            let view = Mat4::look_at_rh(eye, target, Vec3::Y);
             (proj * view, eye)
         }
 
@@ -1641,6 +1663,31 @@ mod app {
         // Surface gravity is the field of the WHOLE planet below (matter all the way down), ~uniform over
         // this small patch — passed in, computed from planet::earth(), not a hardcoded constant.
         probe.with_gravity(glam::DVec3::new(0.0, -surface_g, 0.0))
+    }
+
+    /// A large flat ground quad at surface level (world-centered coords), meshed with the surface
+    /// material. It continues the detailed terrain patch out to the horizon and occludes the patch's
+    /// exposed side walls — so the scene reads as a surface OF a planet, not a floating cube. Flat is
+    /// honest for an Earth-sized world: the curvature drop over the visible ~km is a couple of metres.
+    fn ground_plane_mesh(materials: &[materials::Material], surf_y: f32, extent: f32) -> Mesh {
+        let grass = materials::index_of(materials, "grass");
+        let col = materials[grass].albedo;
+        let n = [0.0f32, 1.0, 0.0];
+        let v = |x: f32, z: f32| mesher::Vertex {
+            pos: [x, surf_y, z],
+            nrm: n,
+            col,
+            mat: grass as u32,
+        };
+        // Corners CCW seen from above (+Y up); triplanar sampling tiles the material across it.
+        let vertices = vec![
+            v(-extent, -extent),
+            v(extent, -extent),
+            v(extent, extent),
+            v(-extent, extent),
+        ];
+        let indices = vec![0u32, 1, 2, 0, 2, 3];
+        Mesh { vertices, indices }
     }
 
     fn upload_mesh(device: &wgpu::Device, label: &str, mesh: &Mesh) -> GpuMesh {
