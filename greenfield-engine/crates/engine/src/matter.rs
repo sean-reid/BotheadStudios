@@ -30,8 +30,13 @@ pub const PARTICLE_HALF: f32 = 0.45; // rendered/collision half-extent (voxel-is
 // particle in vacuum correctly keeps its momentum (no atmosphere is modelled; when one is, drag emerges
 // from real gas dynamics, not a constant). See docs/16 (no-fakery), docs/15 (honesty invariant).
 pub const DRAG: f32 = 1.0;
-pub const CONTACT_DAMP: f32 = 0.35; // energy kept after touching ground
-pub const SETTLE_SPEED: f32 = 0.02; // below this, a grounded particle deposits into the grid
+pub const CONTACT_DAMP: f32 = 0.15; // fraction of velocity kept after touching ground. Loose rock rubble
+//                                    is highly inelastic (coefficient of restitution ~0.1–0.2); 0.35 was
+//                                    too bouncy and, combined with Earth g, left grains jittering forever.
+pub const SETTLE_SPEED: f32 = 0.02; // below this HORIZONTAL speed, a grounded particle deposits into the
+//                                    grid. NB the check is on horizontal speed only: a grounded grain's
+//                                    vertical velocity is the explicit snap-contact's numerical jitter
+//                                    (~g·dt residual), NOT real motion, so it must not block deposition.
 const SETTLE_FRAMES: u32 = 10; // ...or after this many consecutive grounded steps
 const MAX_EJECT: f32 = 0.045; // cap ejection speed below the world's ~7 cm/s escape velocity
 const VAPOR_EXPANSION: f32 = 3.0; // vaporized ejecta expand away faster (gas/plasma) — docs/20
@@ -742,7 +747,12 @@ impl MatterSim {
                 p.pos.y = ground_y + PARTICLE_HALF;
                 p.vel *= CONTACT_DAMP;
                 p.resting_frames += 1;
-                if p.vel.length() < SETTLE_SPEED || p.resting_frames > SETTLE_FRAMES {
+                // "At rest" = stopped sliding HORIZONTALLY. The remaining vertical velocity of a grounded
+                // grain is the snap-contact's per-step jitter (gravity pulls it a hair below the surface,
+                // the contact snaps it back), a numerical artifact under Earth g — checking full speed
+                // left grains bouncing above SETTLE_SPEED forever and never depositing.
+                let horiz = (p.vel.x * p.vel.x + p.vel.z * p.vel.z).sqrt();
+                if horiz < SETTLE_SPEED || p.resting_frames > SETTLE_FRAMES {
                     // Deposit into the column's air-start voxel (stacks / refills the crater) — unless
                     // a dynamic body occupies that cell, in which case the debris stays a particle and
                     // rests on the body (coupling resolves the contact); we never inject matter inside
