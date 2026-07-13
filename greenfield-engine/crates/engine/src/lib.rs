@@ -62,8 +62,8 @@ mod app {
     const GRAVITY_SOFTENING: f32 = 6.0; // ~ mass-aggregation block size
                                         // The terrain slab is a patch of a planet, so it feels the planet's ~uniform surface gravity
                                         // (down), not the slab's own micro-g self-gravity (docs/22). Self-gravity is demonstrated at
-                                        // planetary scale in the space band; here it is negligible vs the planet below.
-    const SURFACE_GRAVITY: f32 = 9.81; // m/s² (Earth-like)
+                                        // planetary scale in the space band; here it is negligible vs the planet below. That surface
+                                        // gravity is now COMPUTED from planet::earth() (g = GM/R²) at create() — no hardcoded constant.
     const GRAVITY_BLOCK: usize = 8; // voxel aggregation for the mass field (coarser = cheaper queries)
     /// Debris substeps per frame. Higher = densely-packed grains settle cleanly (less residual energy
     /// leak from the explicit integrator) at a proportional GPU cost (docs/23). The probe substeps
@@ -185,6 +185,13 @@ mod app {
         matter: matter::MatterSim,
         spawn: Vec3,
         time_scale: f32,
+        /// The planet this terrain is a surface patch of: real Earth matter (planet::earth()). Its mass,
+        /// radius, and the surface gravity the patch feels all EMERGE from that body — no magic 9.81
+        /// (docs/22, docs/25). "Matter all the way down": the bulk planet below is matter summarized as a
+        /// field, the patch is resolved matter sampling its surface.
+        planet_mass: f64,
+        planet_radius: f64,
+        surface_g: f32,
 
         // Debris (particle) rendering
         cube_gpu: GpuMesh,
@@ -273,7 +280,13 @@ mod app {
                 .map(|t| t as f32 - c.y)
                 .unwrap_or(0.0);
             let spawn = Vec3::new(0.0, surf + SPHERE_RADIUS + SPAWN_HEIGHT, 0.0);
-            let mut probe = build_probe(&mats, spawn);
+            // The terrain is a surface patch of the SAME declared Earth as the space band (planet::earth()).
+            // Surface gravity EMERGES from that body's mass and radius (g = GM/R²), not a hardcoded 9.81.
+            let planet = crate::planet::earth();
+            let planet_mass = planet.total_mass();
+            let planet_radius = planet.radius();
+            let surface_g = planet.gravity_at(planet_radius) as f32;
+            let mut probe = build_probe(&mats, spawn, surface_g as f64);
             let probe_acc = probe.accelerations();
             let probe_instances = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("probe-instances"),
@@ -283,9 +296,10 @@ mod app {
             });
 
             log::info!(
-                "greenfield-engine: world mass = {:.3e} kg, surface g = {} m/s^2 (planetary)",
-                field.total_mass,
-                SURFACE_GRAVITY
+                "greenfield-engine: planet mass = {:.3e} kg (r = {:.0} km), emergent surface g = {:.2} m/s^2",
+                planet_mass,
+                planet_radius / 1000.0,
+                surface_g
             );
 
             // --- Procedural material textures (Phase 4): a mip-mapped array, one layer per material.
@@ -476,6 +490,9 @@ mod app {
                 matter,
                 spawn,
                 time_scale: DEFAULT_TIME_SCALE,
+                planet_mass,
+                planet_radius,
+                surface_g,
                 cube_gpu,
                 particle_pipeline,
                 particle_instances,
@@ -503,12 +520,23 @@ mod app {
         }
 
         // --- Live stats for the HUD ---
+        /// Mass of the resolved terrain patch (its own matter) — the self-gravity-field total. Tiny next
+        /// to the planet; kept as a diagnostic. See `planet_mass` for the world it sits on.
         pub fn total_mass(&self) -> f64 {
             self.field.total_mass as f64
         }
-        /// The planetary surface gravity the probe feels (m/s²) — the "measured g".
+        /// Mass of the PLANET this terrain is a patch of (kg) — real Earth matter (planet::earth()).
+        pub fn planet_mass(&self) -> f64 {
+            self.planet_mass
+        }
+        /// Radius of that planet (km).
+        pub fn planet_radius_km(&self) -> f64 {
+            self.planet_radius / 1000.0
+        }
+        /// The surface gravity the probe feels (m/s²) — EMERGES from the planet's mass and radius
+        /// (g = GM/R²), not a hardcoded constant.
         pub fn surface_gravity(&self) -> f32 {
-            SURFACE_GRAVITY
+            self.surface_g
         }
         pub fn sphere_altitude(&self) -> f32 {
             // Lowest particle of the ball above the terrain directly under its centre of mass.
@@ -552,7 +580,7 @@ mod app {
         }
         /// Re-drop a fresh probe from its spawn point (re-forms a whole ball).
         pub fn reset_drop(&mut self) {
-            self.probe = build_probe(&self.mats, self.spawn);
+            self.probe = build_probe(&self.mats, self.spawn, self.surface_g as f64);
             self.probe_acc = self.probe.accelerations();
         }
 
@@ -823,7 +851,7 @@ mod app {
             let c_cohesion =
                 bulk.cohesion.min(GRANULAR_COHESION_CEIL) * grain_area / bulk.density.max(1.0);
             GpuStepParams {
-                gravity: [0.0, -SURFACE_GRAVITY, 0.0],
+                gravity: [0.0, -self.surface_g, 0.0],
                 dt,
                 center: [c.x, c.y, c.z],
                 c_cohesion,
@@ -1567,7 +1595,7 @@ mod app {
     /// iron's real Young's modulus (capped at `PROBE_STIFFNESS_CAP` for explicit-integration stability
     /// — true steel needs implicit integration, flagged), damped sub-critically and substepped so it
     /// stays rigid without detonating.
-    fn build_probe(mats: &[materials::Material], spawn: Vec3) -> aggregate::Aggregate {
+    fn build_probe(mats: &[materials::Material], spawn: Vec3, surface_g: f64) -> aggregate::Aggregate {
         let iron = materials::index_of(mats, "iron");
         let density = mats[iron].density as f64; // ~7870 kg/m³
         let radius = SPHERE_RADIUS as f64;
@@ -1610,7 +1638,9 @@ mod app {
         // explicit integrator exploding (the detonation bug: √(k·m) alone over-damped each particle
         // ~√(bonds)× past critical). See Aggregate::critically_damped (docs/23).
         probe.damping = probe.critically_damped(0.4);
-        probe.with_gravity(glam::DVec3::new(0.0, -SURFACE_GRAVITY as f64, 0.0))
+        // Surface gravity is the field of the WHOLE planet below (matter all the way down), ~uniform over
+        // this small patch — passed in, computed from planet::earth(), not a hardcoded constant.
+        probe.with_gravity(glam::DVec3::new(0.0, -surface_g, 0.0))
     }
 
     fn upload_mesh(device: &wgpu::Device, label: &str, mesh: &Mesh) -> GpuMesh {

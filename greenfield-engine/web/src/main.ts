@@ -269,7 +269,7 @@ async function main(): Promise<void> {
     const updateStats = () => {
       if (!stats) return;
       stats.innerHTML =
-        `world mass <b>${fmt(engine.total_mass())}</b> kg · g <b>${fmt(engine.surface_gravity())}</b> m/s² (micro-g)<br>` +
+        `planet <b>Earth</b> · mass <b>${fmt(engine.planet_mass())}</b> kg · r <b>${engine.planet_radius_km().toLocaleString(undefined, { maximumFractionDigits: 0 })}</b> km · surface g <b>${engine.surface_gravity().toFixed(2)}</b> m/s²<br>` +
         `probe (iron ball): alt <b>${engine.sphere_altitude().toFixed(1)}</b> m · integrity <b>${(engine.probe_integrity() * 100).toFixed(0)}%</b><br>` +
         `debris <b>${engine.particle_count()}</b> · time ×<b>${engine.time_scale().toFixed(0)}</b> · <b>${fps}</b> fps<br>` +
         `tap dig · long-press blast · ☄/m meteor · drag orbit · pinch zoom`;
