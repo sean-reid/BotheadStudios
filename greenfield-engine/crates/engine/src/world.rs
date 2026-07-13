@@ -17,6 +17,22 @@ pub const D: usize = 96;
 
 const GRASS_THICKNESS: usize = 1; // thin fragile biosphere skin over the crust
 
+/// Highest possible surface top (voxel-y ≈ metres): leaves 8 voxels of headroom above the terrain.
+const BASE_TOP: f32 = (H - 8) as f32;
+/// Peak-to-valley relief of the procedural heightfield (voxels ≈ metres): real rolling hills, not a slab.
+const AMPLITUDE: f32 = 34.0;
+
+/// Sea-level datum (voxel-y, metres in the patch's own frame): the reference height the upcoming oceans
+/// work will fill water BELOW (water above the seabed, up to this level). Land is ABOVE this datum,
+/// potential seabed below it. No water is simulated yet — this only DECLARES the datum honestly.
+///
+/// NOTE (current coarse map): this patch sits on a CONTINENT — `planet::is_land` is true for its 10°
+/// landmask cell — so every procedural surface top here is above sea level: it is ALL LAND at this LOD.
+/// The seabed side of the datum is exercised elsewhere / once a finer real elevation map (ETOPO) drops
+/// into `terrain_height` (see its TODO). Chosen below the deepest procedural valley (`BASE_TOP -
+/// AMPLITUDE`) so the whole patch is honestly land, not fudged above a hidden ocean.
+pub const SEA_LEVEL_Y: f32 = 40.0;
+
 pub struct World {
     pub w: usize,
     pub h: usize,
@@ -441,11 +457,31 @@ fn sign(x: f32) -> i32 {
     }
 }
 
+/// Continuous surface elevation of the Earth at patch coordinates `(world_x, world_z)` — the SINGLE
+/// heightfield that BOTH the resolved voxel patch and the distant curved cap sample, so they are ONE
+/// surface (killing the old flat-cap-above-a-valley step where rubble read as hovering). Coordinates and
+/// the returned height are in the patch's own frame (voxel units; 1 voxel = 1 m). It is deterministic and
+/// seedless (multi-octave value noise) and defined over the WHOLE plane, so the cap can sample it
+/// arbitrarily far out — near the patch it equals the patch surface; far out it is the same field, just
+/// sampled coarsely by the cap's ring spacing (that coarse far sampling is OPTIMIZATION, not a fudge).
+///
+/// TODO(ETOPO): this is procedural relief only. A real Earth elevation map drops in HERE, behind this
+/// exact interface — add the map's elevation at the (lat, lon) for `(world_x, world_z)` to (or in place
+/// of) the procedural term. At the 96 m patch scale `planet::is_land`'s 10° cell is uniform, so
+/// map-driven land/ocean contrast isn't visible locally until that finer dataset arrives (docs/28). Do
+/// not fake continents in the meantime.
+pub fn terrain_height(world_x: f32, world_z: f32) -> f32 {
+    let n = fbm(world_x, world_z); // 0..1 procedural relief
+    let top = BASE_TOP - AMPLITUDE * (1.0 - n);
+    top.clamp(GRASS_THICKNESS as f32 + 1.0, (H - 1) as f32)
+}
+
 /// Generate the world as a surface patch of the REAL layered Earth (planet::earth()): a grass skin over
 /// basalt crust, peridotite mantle, iron core — Earth's true radial column as a declared VERTICAL LOD
 /// (material order real; layer thicknesses compressed into the patch so the strata are visible when a
-/// dig or impact excavates). A deterministic multi-octave value-noise heightfield gives the grassy
-/// surface real rolling relief — hills and valleys, not a flat plateau.
+/// dig or impact excavates). The grassy surface top follows [`terrain_height`] — the SAME continuous
+/// heightfield the distant Earth cap samples — giving real rolling relief (hills and valleys) that joins
+/// the cap without a step.
 pub fn generate(materials: &[Material]) -> World {
     // Real Earth column (planet::earth(), docs/25/28): a biosphere skin over basalt CRUST, peridotite
     // MANTLE, iron CORE. This is a DECLARED VERTICAL LOD: the material order is Earth's real radial
@@ -459,9 +495,8 @@ pub fn generate(materials: &[Material]) -> World {
     let core = index_of(materials, "iron") as u16 + 1;
 
     let mut voxels = vec![0u16; W * H * D];
-    let base_top = H as i32 - 8; // highest possible surface; leaves headroom above the terrain
-    let amplitude = 34.0f32; // peak-to-valley relief in voxels (≈ m): real rolling hills, not a plateau
-    let valley_floor = base_top - amplitude as i32; // the LOWEST any surface top can reach
+    let base_top = BASE_TOP as i32; // highest possible surface; leaves headroom above the terrain
+    let valley_floor = base_top - AMPLITUDE as i32; // the LOWEST any surface top can reach
 
     // Flat strata boundaries (real geology is horizontal), anchored BENEATH the deepest valley so every
     // column — hilltop or valley bottom — carries the full grass → crust → mantle → core column. The
@@ -475,9 +510,9 @@ pub fn generate(materials: &[Material]) -> World {
     let mut max_top = 0usize;
     for z in 0..D {
         for x in 0..W {
-            let n = fbm(x as f32, z as f32); // 0..1
-            let top = (base_top as f32 - amplitude * (1.0 - n)).round() as i32;
-            let top = top.clamp(GRASS_THICKNESS as i32 + 1, H as i32 - 1);
+            // Fill up to the SHARED continuous heightfield (the same function the Earth cap samples).
+            let top = (terrain_height(x as f32, z as f32).round() as i32)
+                .clamp(GRASS_THICKNESS as i32 + 1, H as i32 - 1);
             let grass_start = top - GRASS_THICKNESS as i32;
             for y in 0..top {
                 let v = if y >= grass_start {
@@ -668,6 +703,48 @@ mod tests {
             w.find_structurally_unsupported(&mats, g).into_iter().collect();
         for e in expected {
             assert!(unsup.contains(&e), "floating chunk voxel {e:?} must collapse");
+        }
+    }
+
+    #[test]
+    fn patch_surface_equals_the_shared_terrain_height() {
+        // The refactor's contract: generate() fills each column up to terrain_height — the SAME function
+        // the distant Earth cap samples. So the resolved patch top must equal round(terrain_height)
+        // everywhere: ONE surface sampled at the fine (patch) resolution. This guards against the patch
+        // and the cap ever drifting apart again (the hovering-rubble bug).
+        let mats = materials::load();
+        let w = generate(&mats);
+        for z in 0..D as i32 {
+            for x in 0..W as i32 {
+                let top = w.surface_top_voxel(x, z).expect("solid column");
+                let th = (terrain_height(x as f32, z as f32).round() as i32)
+                    .clamp(GRASS_THICKNESS as i32 + 1, H as i32 - 1);
+                assert_eq!(top, th, "patch top disagrees with terrain_height at ({x},{z})");
+            }
+        }
+    }
+
+    #[test]
+    fn terrain_here_is_all_land_above_the_sea_level_datum() {
+        // SEA_LEVEL_Y is the declared datum for the upcoming oceans (water fills below it). At this coarse
+        // landmask cell the patch is a CONTINENT, so every surface top must sit ABOVE sea level — all
+        // land, no seabed exposed locally. Also pins the datum honest: below the deepest valley floor, so
+        // it isn't fudged above a hidden ocean.
+        let mats = materials::load();
+        let w = generate(&mats);
+        assert!(
+            SEA_LEVEL_Y < BASE_TOP - AMPLITUDE,
+            "sea level {SEA_LEVEL_Y} must sit below the valley floor {} (all-land patch)",
+            BASE_TOP - AMPLITUDE
+        );
+        for z in 0..D as i32 {
+            for x in 0..W as i32 {
+                let top = w.surface_top_voxel(x, z).expect("solid column") as f32;
+                assert!(
+                    top > SEA_LEVEL_Y,
+                    "column ({x},{z}) top {top} must be land (above SEA_LEVEL_Y {SEA_LEVEL_Y})"
+                );
+            }
         }
     }
 

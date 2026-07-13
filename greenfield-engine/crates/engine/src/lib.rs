@@ -301,12 +301,9 @@ mod app {
 
             let world_mesh = mesher::build_surface_nets(&world, &mats);
             let world_gpu = upload_mesh(&device, "world", &world_mesh);
-            // The patch centre surface height (world-centered coords) — where the real Earth cap touches.
-            let cc = world.center();
-            let surf_y = world
-                .surface_top_voxel(cc.x as i32, cc.z as i32)
-                .map(|t| t as f32 - cc.y)
-                .unwrap_or(0.0);
+            // World centre (world-centered frame) — the cap samples the SHARED terrain_height about it, so
+            // it joins the resolved patch as ONE continuous rolling surface (no flat-cap-above-valley step).
+            let world_center = world.center();
             log::info!("meshes: world {} tris", world_mesh.indices.len() / 3);
 
             // --- Spawn the probe: a cohesive iron ball of real matter (docs/23) ---
@@ -327,7 +324,7 @@ mod app {
             // decorative plane): it curves DOWN to a real horizon a few km out under the Rayleigh sky.
             // Same body the space band draws; the resolved voxel patch sits flush at the top of the cap.
             let earth_cap_mesh =
-                mesher::build_earth_cap(&mats, surf_y, planet_radius as f32, EARTH_CAP_RADIUS);
+                mesher::build_earth_cap(&mats, world_center, planet_radius as f32, EARTH_CAP_RADIUS);
             let earth_cap_gpu = upload_mesh(&device, "earth-cap", &earth_cap_mesh);
 
             let mut probe = build_probe(&mats, spawn, surface_g as f64);

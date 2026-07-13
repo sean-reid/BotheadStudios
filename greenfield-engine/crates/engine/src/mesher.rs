@@ -192,75 +192,115 @@ pub fn build_uv_sphere(
     Mesh { vertices, indices }
 }
 
-/// Build the REAL bulk-Earth surface as a curved spherical CAP (NOT a flat decorative plane): a
-/// tessellated polar disk at Earth's true radius, so it curves DOWN to a horizon at a finite (~km)
-/// distance — the honest replacement for a flat ground skirt whose horizon would be at infinity.
+/// Build the REAL bulk-Earth surface as a curved CAP that FOLLOWS the same terrain relief as the voxel
+/// patch (NOT a flat decorative plane, and NOT a smooth shelf pinned at one height above the valleys):
+/// a tessellated polar disk that samples the SHARED [`crate::world::terrain_height`] at every vertex AND
+/// curves DOWN to a finite (~km) horizon — the honest replacement for a flat ground skirt whose horizon
+/// would be at infinity, and the fix for the flat-cap-above-a-valley step that made resting rubble read
+/// as hovering.
 ///
-/// Geometry: in the terrain's local frame "down" (−Y under the uniform surface gravity) is toward the
-/// Earth's centre, which sits at `(0, surf_y − radius, 0)` (a full Earth radius below the patch's local
-/// surface height `surf_y`). A cap vertex at horizontal distance `d` from the patch centre drops to
-/// `y = surf_y − d²/(2·radius)` — the parabolic approximation of the sphere (accurate to <1 m over the
-/// visible ~km, and cheaper than a trig sphere). Its per-vertex normal is the true outward sphere
-/// normal `(pos − earth_centre)`, so the curvature also shades: the ground bends away from the sun.
+/// Geometry (centered coords; `center` is the world's `center()`): "down" (−Y under the uniform surface
+/// gravity) is toward the Earth's centre. A cap vertex at centered `(cx, cz)` — horizontal distance `d`
+/// from the patch centre — sits at
+///   `y = terrain_height(cx + center.x, cz + center.z) − center.y  −  d²/(2·radius)`
+/// i.e. the SAME continuous heightfield the patch fills to (converted centered→voxel frame), MINUS the
+/// sphere's parabolic curvature drop `d²/(2R)` (accurate to <1 m over the visible ~km, cheaper than
+/// trig). Near the patch this equals the patch surface exactly — continuous, no step. Far out it is the
+/// same field sampled coarsely by the geometric ring spacing (OPTIMIZATION, not a fudge — the model is
+/// authoritative, only the far sampling is coarse). `earth_c` is a full radius below the patch-centre
+/// surface height, so the surface-gravity "down" and the cap's fall-away agree.
 ///
-/// This is the SUMMARIZED bulk planet — smooth, because fine relief is only resolved inside the voxel
-/// patch (which sits flush at the top of the cap). That is honest LOD, not a painted skirt: it is the
-/// same `planet::earth()` matter the space band draws and the surface gravity emerges from, zoomed in.
-/// Tessellation is fine near the patch and geometrically coarser toward the horizon.
-pub fn build_earth_cap(materials: &[Material], surf_y: f32, radius: f32, r_max: f32) -> Mesh {
+/// The per-vertex normal is the TRUE normal of the surface it follows — `normalize(−∂h/∂x, 1, −∂h/∂z)`
+/// of the shared height `h = cap_y` (relief PLUS the sphere's curvature) by central difference — so the
+/// distant terrain shades as real rolling hills (not a flat sheet) and joins the voxel patch's shading
+/// without a tonal seam, while the planetary curvature (`∂/∂d = d/R`) still tilts the far ground away
+/// from the sun. Tessellation is dense near the patch (where the eye is) and coarser toward the horizon.
+///
+/// ANNULUS, not a full disk: the cap leaves a HOLE exactly over the resolved patch's (x,z) footprint —
+/// its innermost ring follows the patch's square perimeter — and fills ONLY beyond it. Inside the
+/// footprint ONLY the voxel patch renders, so a crater/dig excavated BELOW the surface stays visible as a
+/// real bowl instead of being hidden under a cap lid (Robin: "a plain level floor... debris disappearing
+/// beneath the texture" — that flat floor WAS the old cap drawn over the patch). The seam ring sits on
+/// the footprint boundary at the shared `terrain_height`, so it joins the patch edge continuously.
+pub fn build_earth_cap(materials: &[Material], center: glam::Vec3, radius: f32, r_max: f32) -> Mesh {
+    use crate::world::terrain_height;
     use std::f32::consts::TAU;
     let grass = index_of(materials, "grass"); // the SAME surface skin the voxel patch wears
     let col = materials[grass].albedo;
-    let earth_c = glam::Vec3::new(0.0, surf_y - radius, 0.0);
-    let cap_y = |d: f32| -> f32 { surf_y - d * d / (2.0 * radius) };
-
-    // Geometric radial rings: dense near the patch (where the eye is), coarse toward the horizon.
-    let mut radii: Vec<f32> = vec![0.0];
-    let mut step = 8.0f32;
-    let mut r = step;
-    while r < r_max {
-        radii.push(r);
-        step *= 1.12;
-        r += step;
-    }
-    if *radii.last().unwrap() < r_max {
-        radii.push(r_max);
-    }
+    // Patch-centre surface height in centered coords — where the resolved voxel patch touches the cap.
+    // Surface height (centered coords) at cap point (cx, cz): shared relief minus the sphere drop.
+    let cap_y = |cx: f32, cz: f32| -> f32 {
+        let d = (cx * cx + cz * cz).sqrt();
+        terrain_height(cx + center.x, cz + center.z) - center.y - d * d / (2.0 * radius)
+    };
+    // True surface normal of y = cap_y(x, z): central difference of the shared heightfield (relief +
+    // curvature), so the cap shades as real rolling hills that join the patch without a seam.
+    let cap_nrm = |cx: f32, cz: f32| -> glam::Vec3 {
+        const E: f32 = 1.0; // 1 m finite-difference step
+        let dh_dx = (cap_y(cx + E, cz) - cap_y(cx - E, cz)) / (2.0 * E);
+        let dh_dz = (cap_y(cx, cz + E) - cap_y(cx, cz - E)) / (2.0 * E);
+        glam::Vec3::new(-dh_dx, 1.0, -dh_dz).normalize()
+    };
 
     const SEG: usize = 96; // angular segments — enough for a smooth horizon circle
     let vert = |x: f32, z: f32| -> Vertex {
-        let d = (x * x + z * z).sqrt();
-        let pos = glam::Vec3::new(x, cap_y(d), z);
-        let nrm = (pos - earth_c).normalize_or_zero();
+        let pos = glam::Vec3::new(x, cap_y(x, z), z);
         Vertex {
             pos: pos.into(),
-            nrm: nrm.into(),
+            nrm: cap_nrm(x, z).into(),
             col,
             mat: grass as u32,
         }
     };
 
+    // Inner seam follows the patch footprint SQUARE (half-extents = the world centre offset, since the
+    // patch is centred on the origin): a ray at angle `a` meets the square at distance
+    // `min(hx/|cos a|, hz/|sin a|)`, so the seam polygon lies exactly on the footprint edges — the hole
+    // is the footprint, no cap triangle covers the patch.
+    let (hx, hz) = (center.x, center.z);
+    let r_square = |a: f32| -> f32 {
+        let (ca, sa) = (a.cos().abs(), a.sin().abs());
+        let tx = if ca > 1e-6 { hx / ca } else { f32::INFINITY };
+        let tz = if sa > 1e-6 { hz / sa } else { f32::INFINITY };
+        tx.min(tz)
+    };
+    // Circular rings begin just OUTSIDE the square's far corner (its half-diagonal) so no circle ever dips
+    // into the footprint, then grow geometrically to the horizon.
+    let r_inner_circle = (hx * hx + hz * hz).sqrt() + 1.0;
+    let mut circ_radii: Vec<f32> = Vec::new();
+    let mut step = 8.0f32;
+    let mut r = r_inner_circle;
+    while r < r_max {
+        circ_radii.push(r);
+        step *= 1.12;
+        r += step;
+    }
+    if circ_radii.last().copied().unwrap_or(0.0) < r_max {
+        circ_radii.push(r_max);
+    }
+
+    let angle = |s: usize| s as f32 / SEG as f32 * TAU;
     let mut vertices: Vec<Vertex> = Vec::new();
-    // Ring 0 (radii[0] == 0) is the single centre vertex; every further ring has SEG vertices.
-    vertices.push(vert(0.0, 0.0));
-    for &rr in &radii[1..] {
+    // Ring 0 = the square seam (per-angle radius on the footprint boundary); then the circular rings.
+    for s in 0..SEG {
+        let a = angle(s);
+        let rr = r_square(a);
+        vertices.push(vert(rr * a.cos(), rr * a.sin()));
+    }
+    for &rr in &circ_radii {
         for s in 0..SEG {
-            let a = s as f32 / SEG as f32 * TAU;
+            let a = angle(s);
             vertices.push(vert(rr * a.cos(), rr * a.sin()));
         }
     }
 
     let mut indices: Vec<u32> = Vec::new();
-    // Fan from the centre vertex out to the first real ring.
-    for s in 0..SEG {
-        let a = 1 + s as u32;
-        let b = 1 + ((s + 1) % SEG) as u32;
-        indices.extend_from_slice(&[0, a, b]);
-    }
-    // Quad strips between successive rings.
-    for k in 1..radii.len() - 1 {
-        let base_in = 1 + (k - 1) * SEG;
-        let base_out = 1 + k * SEG;
+    // Quad strips between successive rings (seam → circle 0 → circle 1 → … → horizon). All rings are
+    // SEG-aligned by angle, so strips connect vertex s to vertex s in the next ring.
+    let ring_count = 1 + circ_radii.len();
+    for k in 0..ring_count - 1 {
+        let base_in = k * SEG;
+        let base_out = (k + 1) * SEG;
         for s in 0..SEG {
             let s1 = (s + 1) % SEG;
             let i0 = (base_in + s) as u32;
@@ -460,74 +500,137 @@ mod tests {
     use crate::planet;
 
     #[test]
-    fn earth_cap_is_curved_not_a_flat_plane() {
-        // The distant ground is the REAL Earth surface, a spherical cap at Earth's true radius — it must
-        // CURVE DOWN to a finite horizon, NOT sit flat (a flat plane's horizon is at infinity, the fudge
-        // this scene exists to kill). We assert the cap's vertex height falls as ≈ d²/(2R) with horizontal
-        // distance d — and, as a guard against a regressed flat plane, that the far edge drops by MANY
-        // metres (a flat quad would drop 0).
+    fn earth_cap_follows_the_shared_terrain_and_curves_to_a_horizon() {
+        // The distant ground is the REAL Earth surface, sampled from the SAME heightfield as the voxel
+        // patch (crate::world::terrain_height) — so it (a) FOLLOWS the rolling relief (NOT a flat shelf
+        // pinned at one height, the bug that made valley rubble read as hovering) and (b) still CURVES
+        // DOWN to a finite horizon by the sphere drop d²/(2R) (NOT a flat plane whose horizon is at
+        // infinity, the fudge this scene exists to kill).
+        use crate::world::{self, terrain_height};
         let mats = materials::load();
         let radius = planet::earth().radius() as f32; // ≈6.371e6 m, the same body the space band draws
-        let surf_y = 20.0f32;
+        let w = world::generate(&mats);
+        let center = w.center();
         let r_max = 26_000.0f32;
-        let mesh = build_earth_cap(&mats, surf_y, radius, r_max);
+        let mesh = build_earth_cap(&mats, center, radius, r_max);
 
-        // The centre vertex sits at the patch surface height; height must decrease monotonically with
-        // horizontal distance, matching the sphere's parabolic drop d²/(2R).
+        // (a) Every vertex sits EXACTLY on the shared heightfield minus the sphere drop — proving the cap
+        //     is the same terrain_height surface, not an independent flat plane.
+        let mut relief_vals: Vec<f32> = Vec::with_capacity(mesh.vertices.len());
         let mut max_d = 0.0f32;
-        let mut min_y = f32::INFINITY;
+        let mut drop_at_far = 0.0f32;
         for v in &mesh.vertices {
             let [x, y, z] = v.pos;
             let d = (x * x + z * z).sqrt();
-            // Every vertex must lie on the sphere drop (parabolic approx) to sub-metre tolerance.
-            let expected = surf_y - d * d / (2.0 * radius);
+            let curvature = d * d / (2.0 * radius);
+            let expected = terrain_height(x + center.x, z + center.z) - center.y - curvature;
             assert!(
-                (y - expected).abs() < 1.0,
-                "cap vertex off the sphere at d={d:.0}: y={y:.3} expected {expected:.3}"
+                (y - expected).abs() < 0.01,
+                "cap vertex off the shared heightfield at d={d:.0}: y={y:.3} expected {expected:.3}"
             );
+            relief_vals.push(y + curvature); // remove curvature → the terrain relief component
             if d > max_d {
                 max_d = d;
-                min_y = y;
+                drop_at_far = curvature;
             }
         }
-        // The centre (d≈0) is at surf_y; the far edge is well below it — a real curve, not a flat plane.
-        let centre = mesh.vertices[0].pos[1];
-        assert!((centre - surf_y).abs() < 0.01, "cap centre at the surface height");
-        let drop = surf_y - min_y;
-        let expected_drop = max_d * max_d / (2.0 * radius);
+
+        // Curvature: the far edge drops many metres (a flat plane would drop 0), matching d²/2R.
         assert!(
-            drop > 20.0,
-            "far cap edge must drop many metres (curved), got {drop:.2} m — a flat plane would be 0"
-        );
-        assert!(
-            (drop - expected_drop).abs() < 1.0,
-            "far drop must match the sphere's d²/2R (got {drop:.2}, sphere {expected_drop:.2})"
+            drop_at_far > 20.0,
+            "far cap must drop many metres (curved), got {drop_at_far:.2} m — a flat plane would be 0"
         );
 
-        // Per-vertex normals must TILT away from straight-up as the cap curves (a flat plane's normals are
-        // all EXACTLY +Y — zero horizontal component). The tilt is honestly tiny because Earth is huge:
-        // the outward sphere normal leans by ≈ d/R from vertical. We assert the far normal's horizontal
-        // lean is strictly non-zero AND matches the sphere geometry d/R — a flat plane would give 0.
-        let far = mesh
-            .vertices
-            .iter()
-            .max_by(|a, b| {
-                let da = a.pos[0] * a.pos[0] + a.pos[2] * a.pos[2];
-                let db = b.pos[0] * b.pos[0] + b.pos[2] * b.pos[2];
-                da.partial_cmp(&db).unwrap()
-            })
-            .unwrap();
-        let n = far.nrm;
-        let horiz = (n[0] * n[0] + n[2] * n[2]).sqrt();
-        let d_far = (far.pos[0] * far.pos[0] + far.pos[2] * far.pos[2]).sqrt();
-        let expected_lean = d_far / radius; // sphere: tan(tilt) = d/R, small-angle ≈ sin ≈ horiz
+        // FOLLOWS relief (guard against a flat cap pinned at one height): with curvature removed, the
+        // per-vertex terrain component must show real spread — the patch amplitude is 34 m, so a flat
+        // shelf (constant relief, std≈0) fails here.
+        let n = relief_vals.len() as f32;
+        let mean = relief_vals.iter().sum::<f32>() / n;
+        let std = (relief_vals.iter().map(|r| (r - mean).powi(2)).sum::<f32>() / n).sqrt();
         assert!(
-            horiz > 1e-4,
-            "cap normals must tilt with curvature, not stay flat +Y (horizontal lean {horiz:.6})"
+            std > 3.0,
+            "cap must FOLLOW the rolling relief, not sit flat above the valleys (relief std {std:.2} m)"
         );
+
+        // Per-vertex normals must be the TRUE normal of the surface the cap follows — `(−∂h/∂x, 1,
+        // −∂h/∂z)` of the shared height (relief + curvature) — so the distant ground shades as rolling
+        // hills (a flat plane's normals are all EXACTLY +Y). We verify each stored normal against the
+        // finite-difference normal of the SAME cap_y the mesher uses, and that the normals genuinely TILT
+        // (real hillslopes), not stay vertical.
+        let cap_y = |cx: f32, cz: f32| -> f32 {
+            let d = (cx * cx + cz * cz).sqrt();
+            terrain_height(cx + center.x, cz + center.z) - center.y - d * d / (2.0 * radius)
+        };
+        let mut max_lean = 0.0f32;
+        for v in &mesh.vertices {
+            let (cx, cz) = (v.pos[0], v.pos[2]);
+            let e = 1.0f32;
+            let dh_dx = (cap_y(cx + e, cz) - cap_y(cx - e, cz)) / (2.0 * e);
+            let dh_dz = (cap_y(cx, cz + e) - cap_y(cx, cz - e)) / (2.0 * e);
+            let expected = glam::Vec3::new(-dh_dx, 1.0, -dh_dz).normalize();
+            let n = glam::Vec3::from(v.nrm);
+            assert!(n.y > 0.0, "cap normal must point up (got {n:?})");
+            assert!(
+                n.dot(expected) > 0.999,
+                "cap normal must follow the surface slope at ({cx:.0},{cz:.0}): {n:?} vs {expected:?}"
+            );
+            max_lean = max_lean.max((n.x * n.x + n.z * n.z).sqrt());
+        }
+        // Genuinely NOT a flat plane: some normals lean well off vertical (real hillslopes tilt the light).
         assert!(
-            (horiz - expected_lean).abs() < 0.2 * expected_lean,
-            "normal lean must match the sphere's d/R (got {horiz:.6}, sphere {expected_lean:.6})"
+            max_lean > 0.1,
+            "cap normals must tilt with the rolling relief, not stay flat +Y (max lean {max_lean:.3})"
         );
+    }
+
+    #[test]
+    fn earth_cap_leaves_a_hole_over_the_patch_and_joins_it_at_the_boundary() {
+        // The cap is an ANNULUS: it must (1) leave a HOLE exactly over the resolved patch footprint so a
+        // crater/dig excavated below the surface stays visible (no cap lid drawn over it), and (2) meet
+        // the patch edge CONTINUOUSLY at the footprint boundary (no step, no gap → one surface).
+        use crate::world::{self, D, W};
+        let mats = materials::load();
+        let radius = planet::earth().radius() as f32;
+        let w = world::generate(&mats);
+        let center = w.center();
+        let mesh = build_earth_cap(&mats, center, radius, 26_000.0);
+
+        // (1) HOLE: NO cap vertex may lie strictly inside the patch footprint (voxel (x,z) in 0..W, 0..D).
+        //     A cap vertex there would be a lid drawn over the patch, hiding craters/digs beneath it.
+        for v in &mesh.vertices {
+            let (vx, vz) = (v.pos[0] + center.x, v.pos[2] + center.z); // centered → voxel frame
+            let inside = vx > 0.5 && vx < W as f32 - 0.5 && vz > 0.5 && vz < D as f32 - 0.5;
+            assert!(
+                !inside,
+                "cap vertex inside the patch footprint at voxel ({vx:.1},{vz:.1}) — it would hide craters"
+            );
+        }
+
+        // (2) CONTINUOUS: the seam ring (the FIRST SEG=96 vertices) lies ON the footprint boundary; each
+        //     must match the patch's edge surface there. Tolerance covers the patch's integer rounding
+        //     (≤0.5 m), the ≤1-voxel offset from the boundary to the nearest resolved column, and the
+        //     (sub-mm) sphere drop across the 96 m patch — a genuine no-step bound against 34 m of relief.
+        const SEG: usize = 96;
+        assert!(mesh.vertices.len() >= SEG, "cap has no seam ring");
+        let mut checked = 0;
+        for v in &mesh.vertices[..SEG] {
+            let y = v.pos[1];
+            let (vx, vz) = (v.pos[0] + center.x, v.pos[2] + center.z);
+            // Sanity: a seam vertex sits on the footprint boundary (one axis at 0 or W, the other within).
+            let on_boundary = (vx.abs() < 0.5 || (vx - W as f32).abs() < 0.5 || vz.abs() < 0.5
+                || (vz - D as f32).abs() < 0.5)
+                && (-0.5..=W as f32 + 0.5).contains(&vx)
+                && (-0.5..=D as f32 + 0.5).contains(&vz);
+            assert!(on_boundary, "seam vertex off the footprint boundary at ({vx:.1},{vz:.1})");
+            let xi = (vx.round() as i32).clamp(0, W as i32 - 1);
+            let zi = (vz.round() as i32).clamp(0, D as i32 - 1);
+            let patch = w.surface_top_voxel(xi, zi).expect("edge column solid") as f32 - center.y;
+            assert!(
+                (y - patch).abs() < 2.0,
+                "cap seam steps off the patch at edge voxel ({xi},{zi}): cap {y:.2} vs patch {patch:.2}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, SEG, "the whole seam ring must be continuity-checked");
     }
 }
