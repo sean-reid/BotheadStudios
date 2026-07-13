@@ -727,20 +727,60 @@ mod tests {
         let n_soft = soft.dig(&mut w1, &mats, Vec3::new(0.0, surf - 1.5, 0.0), 3.0, 1.0e6);
         assert!(n_soft > 0, "soil/grass should detach under a 1e6 Pa tool");
 
-        // The same tool deep in granite (1.2e7 Pa) removes nothing.
+        // The same tool deep in the rock strata (basalt crust ~1.45e7 Pa / peridotite mantle ~1.0e7 Pa)
+        // removes nothing — the real layered column, not a granite proxy (docs/28).
         let mut w2 = world::generate(&mats);
         let mut hard = MatterSim::new(50_000);
         let n_rock = hard.dig(&mut w2, &mats, Vec3::new(0.0, surf - 30.0, 0.0), 3.0, 1.0e6);
         assert_eq!(
             n_rock, 0,
-            "granite resists a tool weaker than its fracture strength"
+            "the rock strata resist a tool weaker than their fracture strength"
         );
 
-        // A stronger blast (2e7 Pa) *does* break the rock.
+        // A stronger blast (2e7 Pa) *does* break the rock (above basalt's ~1.45e7 Pa).
         let mut w3 = world::generate(&mats);
         let mut blast = MatterSim::new(50_000);
         let n_blast = blast.dig(&mut w3, &mats, Vec3::new(0.0, surf - 30.0, 0.0), 3.0, 2.0e7);
-        assert!(n_blast > 0, "a strong enough blast breaks granite");
+        assert!(n_blast > 0, "a strong enough blast breaks the crust rock");
+    }
+
+    /// The dig/fracture THRESHOLD is each voxel's OWN material strength — the terrain is real layered
+    /// strata (grass → basalt → peridotite → iron; docs/28), NOT one bulk-rock proxy. A tool set
+    /// strictly BETWEEN grass's and iron's real DB fracture strengths breaks the SOFT voxel but leaves
+    /// the HARD one intact: the threshold genuinely tracks the matter actually there. This refutes a
+    /// single-material proxy — the old hardcoded granite (1.2e7 Pa) would break NEITHER (the tool, the
+    /// geometric mean ~2.57e6 Pa, is below granite), so `dig_one(grass) > 0` would fail under the fudge.
+    #[test]
+    fn dig_threshold_tracks_each_voxels_real_material() {
+        let mats = materials::load();
+        let grass = materials::index_of(&mats, "grass"); // ~1.5e4 Pa
+        let iron = materials::index_of(&mats, "iron"); //   ~4.4e8 Pa
+        let soft_sigma = mats[grass].fracture_strength;
+        let hard_sigma = mats[iron].fracture_strength;
+        assert!(soft_sigma < hard_sigma, "grass is far weaker than iron (real DB)");
+        // A tool strictly between the two real strengths (geometric mean).
+        let tool = (soft_sigma * hard_sigma).sqrt();
+        assert!(
+            soft_sigma < tool && tool < hard_sigma,
+            "the tool sits between the two materials' real fracture strengths"
+        );
+
+        // Dig a single voxel of `mat` (an 8³ air world with one solid cell) and count detached grains.
+        let dig_one = |mat: usize| -> usize {
+            let mut w = World {
+                w: 8,
+                h: 8,
+                d: 8,
+                voxels: vec![0; 8 * 8 * 8],
+                max_top: 4,
+            };
+            w.set_voxel(4, 3, 4, Some(mat));
+            let hit = Vec3::new(4.5, 3.5, 4.5) - w.center(); // centered coords of that voxel
+            let mut sim = MatterSim::new(64);
+            sim.dig(&mut w, &mats, hit, 1.5, tool)
+        };
+        assert!(dig_one(grass) > 0, "the soft grass voxel fractures under the tool");
+        assert_eq!(dig_one(iron), 0, "the hard iron voxel resists the same tool");
     }
 
     #[test]

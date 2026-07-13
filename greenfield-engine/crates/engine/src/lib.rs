@@ -709,7 +709,7 @@ mod app {
                 let dir_d =
                     glam::DVec3::new(dir.x as f64, dir.y as f64, dir.z as f64).normalize_or_zero();
                 let hit_d = glam::DVec3::new(hit.x as f64, hit.y as f64, hit.z as f64);
-                self.couple_impact_to_bodies(eye_d, dir_d, hit_d, energy as f64);
+                self.couple_impact_to_bodies(eye_d, dir_d, hit_d, energy as f64, strength as f64);
             }
         }
 
@@ -727,11 +727,15 @@ mod app {
             dir: glam::DVec3,
             ground: glam::DVec3,
             energy: f64,
+            sigma: f64,
         ) {
             const RAY_CAPTURE: f64 = 0.6; // ~ a body's particle spacing
             let terrain_t = (ground - eye).dot(dir); // along-ray distance to the ground
             let momentum_mag = (METEOR_MASS * METEOR_SPEED) as f64;
-            let sigma = self.mats[materials::index_of(&self.mats, "granite")].fracture_strength as f64;
+            // `sigma` is the REAL fracture strength of the material the meteor actually struck (read from
+            // the hit voxel in `meteor`, not a hardcoded bulk-rock proxy) — so the crater reach that sets
+            // the blast falloff to nearby bodies uses the true strength of the strata that were hit
+            // (basalt crust vs peridotite mantle vs iron core), faithful to the layered terrain (docs/28).
             let reach =
                 crate::damage::crater_radius(crate::damage::crater_volume(energy, sigma)).max(1.0);
             let mats = &self.mats;
@@ -844,10 +848,18 @@ mod app {
         /// `matter.rs`, the single source of truth).
         fn gpu_step_params(&self, dt: f32) -> GpuStepParams {
             let c = self.world.center();
-            // Debris friction comes from the REAL material (granite — the bulk rock), not a tuned
-            // number: the angle of repose emerges from it (docs/23). Mixed-material debris using one
-            // representative μ is a flagged approximation (a per-particle μ is a later refinement).
-            let bulk = &self.mats[materials::index_of(&self.mats, "granite")];
+            // Debris friction comes from the REAL material, not a tuned number: the angle of repose
+            // emerges from it (docs/23). The representative rock is BASALT — this world's actual crust,
+            // the bulk of what a dig/blast excavates (docs/28) — NOT the old hardcoded `granite`, which
+            // is not even present in the layered strata (grass → basalt → peridotite → iron).
+            // FLAGGED APPROXIMATION (IOU): the GPU debris step takes ONE friction/restitution/cohesion
+            // for the whole buffer, so mixed-material debris (iron shrapnel from a deep blast, peridotite
+            // from the mantle) piles with basalt's μ. The honest fix is PER-PARTICLE material in
+            // particle_step.wgsl (each grain already carries its `material` index; it needs a per-material
+            // property table + a pair-combining rule, plus a gpu-verify momentum-conservation pass). That
+            // is the deferred, non-tractable-tonight half; the CPU-side dig/fracture threshold below and
+            // in `matter::dig`/`meteor` already reads each voxel's own material.
+            let bulk = &self.mats[materials::index_of(&self.mats, "basalt")];
             let friction = bulk.friction_coefficient;
             // Normal damping DERIVED from the material's coefficient of restitution (docs/24 Stage 1):
             // how bouncy debris is — and how strongly an impact rebounds into ejecta — is a material
