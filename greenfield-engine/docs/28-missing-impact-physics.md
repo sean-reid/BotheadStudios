@@ -15,8 +15,13 @@ of the mass deficit.
 **CRITICAL — the target cannot participate**
 1. Target cannot deform/crater/flow: bulk Earth is `boundary` = sphere-minus-one-hole with monopole
    gravity (`aggregate.rs`), sheds mass only via the one-shot cap.
-2. No shock→rarefaction ejection: target matter has no channel to loft → disk is ~100% impactor
-   material (the real Moon is Earth-like — structurally impossible here).
+2. No shock→rarefaction ejection: target matter is lofted only by direct contact with the impactor.
+   **CORRECTION (2026-07-12, measured once the provenance tag existed — step 1):** the disk is NOT
+   ~100% impactor as first audited. The live split reads ~0.6 M☾ Earth-derived vs ~0.1–0.7 Theia in the
+   bound disk — the slow Earth *cap* stays bound while fast Theia escapes (~5.5 M☾). BUT that Earth mass
+   comes from the one-shot 2×-impactor cap (item 4's bookkeeping fudge), not a physical furrow. So the
+   real deficits are (a) most of Theia escapes/isn't captured, and (b) the Earth contribution is an
+   arbitrary cap, not shock-driven excavation along the track.
 3. Excavation is one-shot at t=0, isotropic half-ball; no furrow along the oblique track, no
    re-materialization on the second pass.
 4. Cap mass is bookkeeping (2× impactor by particle count), not ρ·V of the excavated region; ignores

@@ -3,20 +3,28 @@ const out = '/tmp/claude-1000/-home-ratwood/b8643c15-d933-437e-8ec8-236cf9ecf634
 const browser = await chromium.launch({ headless: false,
   args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=vulkan', '--no-sandbox'] });
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-const hud = async () => (await page.locator('#hud').innerText()).replace(/\s+/g, ' ').trim();
-const grab = async (name) => { await page.screenshot({ path: `${out}/${name}.png` }); console.log('grabbed', name, '::', await hud()); };
+// The sim readout lives in #stats (bottom bar), not #hud (top banner).
+const readout = async () => {
+  const s = await page.locator('#stats').innerText().catch(() => '');
+  return s.replace(/\s+/g, ' ').trim();
+};
+const grab = async (name) => { await page.screenshot({ path: `${out}/${name}.png` }); console.log('---', name, '\n', await readout()); };
+const zoomOut = async (n) => {
+  const c = page.locator('#gpu-canvas');
+  const box = await c.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  for (let i = 0; i < n; i++) { await page.mouse.wheel(0, 240); await page.waitForTimeout(120); }
+};
 
 await page.goto('http://127.0.0.1:5280/birth.html', { waitUntil: 'load' });
-await page.waitForTimeout(4500);
-await grab('g1-pre-impact');
-await page.waitForTimeout(9000);           // let Theia strike + disk begin
-await grab('g2-post-impact');
-// Enter geologic time — this is where the Theia ghost used to appear.
+await page.waitForTimeout(13500);          // through the ~5s countdown + impact + disk
+await grab('h1-post-impact');
 await page.getByText('Geologic').click().catch(e => console.log('no geologic btn', e.message));
-await page.waitForTimeout(6000);
-await grab('g3-geologic');
-// Replay/Reset — must restore the pristine (non-spinning proto-Earth) state, no residual spin.
-await page.getByText('Replay').click().catch(e => console.log('no replay btn', e.message));
+await page.waitForTimeout(3000);
+await grab('h2-geologic-near');
+await zoomOut(12);                          // pull back to reveal any moonlet at orbital radius
 await page.waitForTimeout(1500);
-await grab('g4-after-replay');
+await grab('h3-geologic-wide');
+await page.waitForTimeout(4000);
+await grab('h4-geologic-wide-later');
 await browser.close();
