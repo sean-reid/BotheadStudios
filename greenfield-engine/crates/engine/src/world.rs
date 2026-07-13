@@ -2,8 +2,9 @@
 //!
 //! Each voxel holds a material index (0 = empty/air, else `material_index + 1`). This is the
 //! authoritative "matter store" — later phases attach per-voxel density = material.density (so
-//! summed mass drives gravity) and activate voxels into MPM particles under stress. For Phase 1 we
-//! generate a layered plateau — rock, ~10 m of dirt, a skin of grass — and render it.
+//! summed mass drives gravity) and activate voxels into MPM particles under stress. The generator
+//! lays a surface patch of the REAL layered Earth — grass skin, basalt crust, peridotite mantle, iron
+//! core — as a declared vertical LOD (real materials/order, compressed depths; docs/25/28).
 
 use crate::materials::{index_of, Material};
 use glam::{IVec3, Vec3};
@@ -13,8 +14,7 @@ pub const W: usize = 96;
 pub const H: usize = 56;
 pub const D: usize = 96;
 
-const DIRT_THICKNESS: usize = 10; // "10 m of dirt", per the project brief
-const GRASS_THICKNESS: usize = 1; // thin fragile skin
+const GRASS_THICKNESS: usize = 1; // thin fragile biosphere skin over the crust
 
 pub struct World {
     pub w: usize,
@@ -240,37 +240,50 @@ fn sign(x: f32) -> i32 {
     }
 }
 
-/// Generate the layered Phase 1 world using materials resolved from the seed database.
-/// Rock forms the bulk; `dirt` sits on top; `grass` is the surface skin. A gentle value-noise
-/// heightfield makes the surface undulate a few metres so it reads as terrain, not a slab — and
-/// the layers follow the terrain, visible on the exposed side walls.
+/// Generate the world as a surface patch of the REAL layered Earth (planet::earth()): a grass skin over
+/// basalt crust, peridotite mantle, iron core — Earth's true radial column as a declared VERTICAL LOD
+/// (material order real; layer thicknesses compressed into the patch so the strata are visible when a
+/// dig or impact excavates). A gentle value-noise heightfield undulates the grassy surface.
 pub fn generate(materials: &[Material]) -> World {
-    let rock = index_of(materials, "granite") as u16 + 1;
-    let dirt = index_of(materials, "dirt") as u16 + 1;
+    // Real Earth column (planet::earth(), docs/25/28): a biosphere skin over basalt CRUST, peridotite
+    // MANTLE, iron CORE. This is a DECLARED VERTICAL LOD: the material order is Earth's real radial
+    // structure, but the layer THICKNESSES are rebalanced into the ~48-voxel patch (real crust is 0.4%
+    // of the radius — invisible at true scale), so a dig or a giant impact exposes honest strata from
+    // this surface frame (Robin: "see Theia impact from this perspective"). Depths are compressed —
+    // flagged; 1 voxel = 1 m holds only for the near-surface probe/dig physics.
     let grass = index_of(materials, "grass") as u16 + 1;
+    let crust = index_of(materials, "basalt") as u16 + 1;
+    let mantle = index_of(materials, "peridotite") as u16 + 1;
+    let core = index_of(materials, "iron") as u16 + 1;
 
     let mut voxels = vec![0u16; W * H * D];
     let base_top = H as i32 - 8; // leave headroom above the terrain
     let amplitude = 6.0f32;
+
+    // Flat strata boundaries (real geology is horizontal), measured down from the nominal surface. The
+    // grass skin follows the undulating terrain top; the crust/mantle/core boundaries are level, so a
+    // dig anywhere hits the same layer at the same depth.
+    const CRUST_VOX: i32 = 12; // basalt crust band (LOD-inflated from ~25 km)
+    const MANTLE_VOX: i32 = 22; // peridotite mantle band
+    let crust_bottom = base_top - CRUST_VOX;
+    let mantle_bottom = crust_bottom - MANTLE_VOX;
 
     let mut max_top = 0usize;
     for z in 0..D {
         for x in 0..W {
             let n = fbm(x as f32, z as f32); // 0..1
             let top = (base_top as f32 - amplitude * (1.0 - n)).round() as i32;
-            let top = top.clamp(
-                DIRT_THICKNESS as i32 + GRASS_THICKNESS as i32 + 1,
-                H as i32 - 1,
-            );
+            let top = top.clamp(GRASS_THICKNESS as i32 + 1, H as i32 - 1);
             let grass_start = top - GRASS_THICKNESS as i32;
-            let dirt_start = grass_start - DIRT_THICKNESS as i32;
             for y in 0..top {
                 let v = if y >= grass_start {
                     grass
-                } else if y >= dirt_start {
-                    dirt
+                } else if y >= crust_bottom {
+                    crust
+                } else if y >= mantle_bottom {
+                    mantle
                 } else {
-                    rock
+                    core
                 };
                 let i = (y as usize * D + z) * W + x;
                 voxels[i] = v;
@@ -321,4 +334,40 @@ fn value_noise(x: f32, z: f32, freq: f32) -> f32 {
 fn fbm(x: f32, z: f32) -> f32 {
     let n = 0.65 * value_noise(x, z, 0.045) + 0.35 * value_noise(x, z, 0.11);
     n.clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::materials;
+
+    #[test]
+    fn column_is_earths_real_layers_top_to_bottom() {
+        // docs/28 A: the terrain is a surface patch of the REAL layered Earth (planet::earth()) as a
+        // declared vertical LOD — grass skin, basalt CRUST, peridotite MANTLE, iron CORE, in that order
+        // down a column. Asserts the strata (not game grass/dirt/granite) so a dig/impact exposes honest
+        // composition. Depths are LOD-compressed; the ORDER and MATERIALS are Earth's.
+        let mats = materials::load();
+        let w = generate(&mats);
+        let id = |name| materials::index_of(&mats, name);
+        let (cx, cz) = (W as i32 / 2, D as i32 / 2);
+        let top = w.surface_top_voxel(cx, cz).expect("solid column at centre");
+
+        // Surface skin is grass; the first solid below it is basalt crust.
+        assert_eq!(w.material_at(cx, top - 1, cz), Some(id("grass")), "surface skin");
+        // Walk down and record the sequence of DISTINCT materials encountered.
+        let mut seq: Vec<usize> = Vec::new();
+        for y in (0..top).rev() {
+            if let Some(m) = w.material_at(cx, y, cz) {
+                if seq.last() != Some(&m) {
+                    seq.push(m);
+                }
+            }
+        }
+        assert_eq!(
+            seq,
+            vec![id("grass"), id("basalt"), id("peridotite"), id("iron")],
+            "column must be Earth's real radial order: grass → crust → mantle → core"
+        );
+    }
 }
