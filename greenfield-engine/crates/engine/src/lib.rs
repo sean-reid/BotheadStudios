@@ -630,13 +630,36 @@ mod app {
         /// Fire a **meteor** at a screen point: a high-energy `impact` that carves a crater and throws
         /// incandescent ejecta — the centre melts and glows, the rim is cold rubble (`docs/20`). Same
         /// operator as a bullet or a moon, just more energy.
+        /// When the meteor's screen ray misses the voxel patch, pick a real strike ON the patch: a spot
+        /// driven by the live camera yaw (so repeated strikes vary and walk around — "anywhere on the
+        /// globe") arriving OBLIQUELY at ~45° (so the shared furrow shows its downrange elongation, not a
+        /// dead-centre bowl). Returns (site in centered coords, incoming unit direction).
+        fn fallback_meteor_aim(&self) -> (Vec3, Vec3) {
+            let ang = self.camera.yaw * 1.7; // walks as the scene turns
+            let half = (world::W.min(world::D) as f32) * 0.30; // stay well inside the patch
+            let (sx, sz) = (ang.cos() * half, ang.sin() * half);
+            let sy = self.ground_under(sx, sz); // surface height at that spot (centered coords)
+            let az = self.camera.yaw * 2.3; // downrange azimuth, also varied
+            let dir = Vec3::new(az.cos() * 0.7071, -0.7071, az.sin() * 0.7071).normalize_or_zero();
+            (Vec3::new(sx, sy, sz), dir)
+        }
+
         pub fn meteor(&mut self, ndc_x: f32, ndc_y: f32) {
             let (view_proj, eye) = self.view_proj();
             let inv = view_proj.inverse();
             let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
             let far = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
-            let dir = (far - near).normalize_or_zero();
-            if let Some((_x, _y, _z, hit)) = self.world.raycast(eye, dir, 6000.0) {
+            let ray_dir = (far - near).normalize_or_zero();
+            // Aim where the screen ray strikes the terrain; if it misses (the button/​'m' key aim at
+            // screen-centre, which from the horizon-facing surface camera flies over the patch), FALL
+            // BACK to a varied OBLIQUE strike ON the patch — so a meteor always lands a real, angled hit
+            // ("a meteor could strike anywhere on the globe"). Same shared physics either way.
+            let (hit, dir) = self
+                .world
+                .raycast(eye, ray_dir, 6000.0)
+                .map(|(_, _, _, h)| (h, ray_dir))
+                .unwrap_or_else(|| self.fallback_meteor_aim());
+            {
                 // The meteor is a real Fe-Ni body: its impact energy is its kinetic energy, ½·m·v².
                 let energy = 0.5 * METEOR_MASS * METEOR_SPEED * METEOR_SPEED;
 
