@@ -392,7 +392,7 @@ pub fn build_surface_nets(world: &World, materials: &[Material]) -> Mesh {
         // Padded coords → voxel coords → centered world coords (matching the other meshes).
         let pad = PAD as f32;
         let (wx, wy, wz) = (p[0] - pad, p[1] - pad, p[2] - pad);
-        let mat = nearest_material(world, wx, wy, wz);
+        let mat = surface_material(world, wx, wy, wz);
         vertices.push(Vertex {
             pos: [wx - center.x, wy - center.y, wz - center.z],
             nrm: *nrm,
@@ -553,6 +553,37 @@ fn smooth_field(field: &mut [f32], px: u32, py: u32, pz: u32, passes: u32) {
         }
         field.copy_from_slice(&tmp);
     }
+}
+
+/// Material a surface-nets vertex should wear — the HONEST surface tag.
+///
+/// The rule mirrors real ground: a TOP surface wears the column's surface skin — the material of its
+/// topmost solid voxel: grass on undisturbed ground, or the deeper stratum a dig/crater has EXPOSED as
+/// the new top. An exposed SIDE/wall below the surface (a cliff, a crater wall, the patch's cut edge)
+/// wears the real stratum at that depth.
+///
+/// This fixes the dark-basalt-tiles-on-grass-slopes bug: the biosphere skin is only one voxel thick, so
+/// a plain nearest-solid sample ([`nearest_material`]) on a slope grabbed the basalt crust one voxel
+/// beneath the skin and painted the hillside dark rock. Keying the TOP to the column's own topmost solid
+/// voxel is independent of slope steepness (we compare against the top of the column directly under the
+/// vertex), so undisturbed slopes read uniform grass while a genuine dig still exposes the real basalt.
+fn surface_material(world: &World, wx: f32, wy: f32, wz: f32) -> usize {
+    let (bx, bz) = (wx.round() as i32, wz.round() as i32);
+    // How far below its column's top a vertex may sit and still count as the TOP cap (not an exposed
+    // wall): the smoothed iso-surface offset (~1 voxel above the topmost solid centre) plus the small
+    // drop of a natural slope across the rounding cell. A near-vertical cliff/crater wall sits FAR below
+    // its column top, so it correctly falls through to the exposed-strata branch.
+    const TOP_BAND: f32 = 2.0;
+    if let Some(top_air) = world.surface_top_voxel(bx, bz) {
+        let top_solid = top_air - 1; // the surface skin voxel (grass, unless a dig exposed a stratum)
+        if wy >= top_solid as f32 - TOP_BAND {
+            if let Some(m) = world.material_at(bx, top_solid, bz) {
+                return m;
+            }
+        }
+    }
+    // Exposed side/wall (a cliff, crater wall, or the patch's cut edge): the real stratum at this depth.
+    nearest_material(world, wx, wy, wz)
 }
 
 /// Material of the solid voxel nearest to a (boundary) point, for coloring a surface-nets vertex.
@@ -765,4 +796,135 @@ mod tests {
         }
         assert_eq!(checked, SEG, "the whole seam ring must be continuity-checked");
     }
+
+    #[test]
+    fn undisturbed_slope_surface_wears_grass_not_the_basalt_beneath() {
+        // BUG 1: the terrain surface-nets mesh tagged slope vertices with the basalt CRUST one voxel
+        // under the 1-voxel grass skin, so undisturbed green hills rendered as dark rock tiles. The honest
+        // surface must wear its TOP material (grass) uniformly on every undisturbed slope — deeper strata
+        // only show where actually EXPOSED (a dig/crater), tested separately below.
+        use crate::world::{self, D, W};
+        let mats = materials::load();
+        let w = world::generate(&mats);
+        let grass = materials::index_of(&mats, "grass");
+        let basalt = materials::index_of(&mats, "basalt");
+        let mesh = build_surface_nets(&w, &mats);
+        let center = w.center();
+
+        // TOP-facing surface vertices over the INTERIOR (away from the patch's cut edges, which legitimately
+        // expose strata) must be grass — never the basalt crust beneath the skin.
+        let mut tops = 0usize;
+        for v in &mesh.vertices {
+            // Surface Nets emits raw (un-normalized) gradient normals; the shader normalizes them. Do the
+            // same here, then keep only clearly upward-facing top surface (skip walls / patch-edge cuts).
+            let n = glam::Vec3::from(v.nrm).normalize_or_zero();
+            if n.y < 0.5 {
+                continue;
+            }
+            let (vx, vz) = (v.pos[0] + center.x, v.pos[2] + center.z); // centered → voxel frame
+            if vx < 4.0 || vx > W as f32 - 4.0 || vz < 4.0 || vz > D as f32 - 4.0 {
+                continue; // stay off the patch boundary walls
+            }
+            tops += 1;
+            assert_ne!(
+                v.mat as usize, basalt,
+                "undisturbed top vertex at voxel ({vx:.1},{vz:.1}) tagged BASALT — the slope-tiles bug"
+            );
+            assert_eq!(
+                v.mat as usize, grass,
+                "undisturbed top vertex at voxel ({vx:.1},{vz:.1}) must wear grass, got {}",
+                mats[v.mat as usize].id
+            );
+        }
+        assert!(tops > 200, "expected many interior top vertices to check, got {tops}");
+    }
+
+    #[test]
+    fn a_dig_through_the_grass_skin_exposes_the_real_basalt_beneath() {
+        // The counterpart to the slope test: where the grass skin is actually CUT AWAY (a dig/crater), the
+        // surface must honestly wear the EXPOSED stratum (basalt), not be blanket-recoloured green. This is
+        // the invariant that keeps the fix honest — surface = skin, but a real excavation shows real rock.
+        use crate::world::{self, D, W};
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let grass = materials::index_of(&mats, "grass");
+        let basalt = materials::index_of(&mats, "basalt");
+        let (cx, cz) = (W as i32 / 2, D as i32 / 2);
+        let top = w.surface_top_voxel(cx, cz).expect("solid column at centre");
+
+        // Excavate a pit at the centre: strip the grass skin AND several crust voxels over a 7×7 area, so
+        // the new column top is exposed basalt.
+        for y in (top - 6)..top {
+            for dz in -3..=3 {
+                for dx in -3..=3 {
+                    let (x, z) = (cx + dx, cz + dz);
+                    if x >= 0 && x < W as i32 && z >= 0 && z < D as i32 && y >= 0 {
+                        let i = w.idx(x as usize, y as usize, z as usize);
+                        w.voxels[i] = 0; // dig to air
+                    }
+                }
+            }
+        }
+        let new_top = w.surface_top_voxel(cx, cz).expect("pit floor still solid");
+        assert_eq!(
+            w.material_at(cx, new_top - 1, cz),
+            Some(basalt),
+            "the dig must expose real basalt crust as the new column top"
+        );
+
+        // The meshed pit floor (upward-facing vertices over the dug column) must be tagged basalt — the
+        // real exposed stratum — and NOT grass.
+        let mesh = build_surface_nets(&w, &mats);
+        let center = w.center();
+        let mut floor: Option<&Vertex> = None;
+        for v in &mesh.vertices {
+            let n = glam::Vec3::from(v.nrm).normalize_or_zero();
+            if n.y < 0.5 {
+                continue;
+            }
+            let (vx, vz) = (v.pos[0] + center.x, v.pos[2] + center.z);
+            if (vx - cx as f32).abs() <= 1.5 && (vz - cz as f32).abs() <= 1.5 {
+                // the lowest such vertex is the pit floor
+                if floor.map_or(true, |f| v.pos[1] < f.pos[1]) {
+                    floor = Some(v);
+                }
+            }
+        }
+        let floor = floor.expect("a pit-floor surface vertex over the dug column");
+        assert_eq!(
+            floor.mat as usize, basalt,
+            "the dug pit floor must expose real basalt, got {}",
+            mats[floor.mat as usize].id
+        );
+    }
+
+    #[test]
+    fn the_land_surface_mesh_is_a_closed_watertight_manifold() {
+        // BUG 2: Robin saw white lines on ridge crests "like peeking THROUGH the terrain". If real, that is
+        // an open crack — a boundary edge belonging to only ONE triangle — through which the background
+        // shows. The solid land mesh must be a CLOSED manifold: every edge shared by exactly two triangles,
+        // so the ground is genuinely opaque matter from every angle (the sea is meshed separately as a
+        // legitimately-open shell, so this checks only the solid land).
+        use crate::world;
+        use std::collections::HashMap;
+        let mats = materials::load();
+        let w = world::generate(&mats);
+        let mesh = build_surface_nets(&w, &mats);
+        assert!(mesh.indices.len() >= 3, "empty land mesh");
+        assert_eq!(mesh.indices.len() % 3, 0, "indices are not whole triangles");
+
+        let mut edges: HashMap<(u32, u32), i32> = HashMap::new();
+        for tri in mesh.indices.chunks(3) {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edges.entry(key).or_insert(0) += 1;
+            }
+        }
+        let open = edges.iter().filter(|(_, &c)| c != 2).count();
+        assert_eq!(
+            open, 0,
+            "{open} open / non-manifold edges — the ground has cracks the sky can show through"
+        );
+    }
 }
+
