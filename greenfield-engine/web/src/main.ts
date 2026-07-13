@@ -6,6 +6,7 @@
 
 import init, { Engine } from "./wasm/engine.js";
 import "./scene-nav";
+import { createSimHud } from "./sim-hud";
 
 // --- Log relay: mirror console + global errors to the dev server ---
 function report(level: string, msg: string): void {
@@ -261,18 +262,28 @@ async function main(): Promise<void> {
       }
     });
 
-    // --- Live HUD ---
+    // --- Live HUD (the canonical shared Sim HUD — same banner/frame/sim-line as every scene) ---
+    const hud = createSimHud("terrain");
     const fmt = (x: number) => x.toExponential(2);
     let fps = 0;
     let framesSinceFps = 0;
     let lastFpsTime = performance.now();
     const updateStats = () => {
       if (!stats) return;
-      stats.innerHTML =
-        `planet <b>Earth</b> · mass <b>${fmt(engine.planet_mass())}</b> kg · r <b>${engine.planet_radius_km().toLocaleString(undefined, { maximumFractionDigits: 0 })}</b> km · surface g <b>${engine.surface_gravity().toFixed(2)}</b> m/s²<br>` +
-        `probe (iron ball): alt <b>${engine.sphere_altitude().toFixed(1)}</b> m · integrity <b>${(engine.probe_integrity() * 100).toFixed(0)}%</b><br>` +
-        `debris <b>${engine.particle_count()}</b> · time ×<b>${engine.time_scale().toFixed(0)}</b> · <b>${fps}</b> fps<br>` +
-        `tap dig · long-press blast · ☄/m meteor · drag orbit · pinch zoom`;
+      // Scene-specific physics: the planet it's a patch of, and the falling iron probe. The universal
+      // time/fps/build/scale line and the banner are supplied by the shared HUD.
+      hud.update({
+        title: `<b>Terrain</b> · Earth`,
+        physics: [
+          `mass <b>${fmt(engine.planet_mass())}</b> kg · r <b>${engine.planet_radius_km().toLocaleString(undefined, { maximumFractionDigits: 0 })}</b> km · surface g <b>${engine.surface_gravity().toFixed(2)}</b> m/s²`,
+          `probe (iron ball): alt <b>${engine.sphere_altitude().toFixed(1)}</b> m · integrity <b>${(engine.probe_integrity() * 100).toFixed(0)}%</b>`,
+          `debris <b>${engine.particle_count()}</b>`,
+        ],
+        timeScale: engine.time_scale(),
+        fps,
+        metersPerPixel: engine.meters_per_pixel(),
+        controls: `tap dig · long-press blast · ☄/m meteor · drag orbit · pinch zoom`,
+      });
     };
 
     let firstFrame = true;

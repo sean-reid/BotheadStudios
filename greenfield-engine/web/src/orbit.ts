@@ -7,6 +7,7 @@
 
 import init, { OrbitDemo } from "./wasm/engine.js";
 import "./scene-nav";
+import { createSimHud } from "./sim-hud";
 
 // --- Log relay: mirror console + global errors to the dev server ---
 function report(level: string, msg: string): void {
@@ -61,10 +62,13 @@ async function main(): Promise<void> {
   report("info", `build ${__BUILD_ID__}`);
   report("info", `UA: ${navigator.userAgent}`);
   report("info", `secureContext=${window.isSecureContext} · gpu in navigator=${"gpu" in navigator}`);
-  // Stamp the build into the HUD immediately — before WASM even loads — so a stale Safari cache is
-  // obvious at a glance (the number won't match the one I report on deploy).
-  const hudEl = document.getElementById("hud");
-  if (hudEl) hudEl.textContent = `orbit · build ${__BUILD_ID__}`;
+  // The scene identity comes from the page (birth.html / twomoons.html / orbit.html share this script
+  // via body attributes). Resolve it now so the canonical banner can be stamped immediately — before
+  // WASM even loads — so a stale Safari cache is obvious at a glance (the build won't match).
+  const numMoons = Number(document.body.getAttribute("data-moons")) || 1;
+  const birthScene = document.body.getAttribute("data-scene") === "birth";
+  const sceneName = birthScene ? "birth of the moon" : numMoons === 2 ? "two moons" : "space";
+  const hud = createSimHud(sceneName);
 
   const canvas = document.getElementById("gpu-canvas") as HTMLCanvasElement | null;
   if (!canvas) {
@@ -95,10 +99,8 @@ async function main(): Promise<void> {
         : undefined,
     );
     setStatus("Requesting GPU device…");
-    // Moon count comes from the page (<body data-moons="2">) so orbit.html and twomoons.html share
-    // this one script. Default 1.
-    const numMoons = Number(document.body.getAttribute("data-moons")) || 1;
-    const birthScene = document.body.getAttribute("data-scene") === "birth";
+    // Moon count / birth flag were resolved from the page above (orbit.html and twomoons.html share
+    // this one script via <body data-moons>/<body data-scene>).
     const demo = await OrbitDemo.create(canvas, numMoons);
     // Birth of the Moon (docs/27): body 2 becomes Theia, inbound ~5 real seconds from impact — the
     // physics is identical machinery; only the declared impactor changes.
@@ -299,7 +301,9 @@ async function main(): Promise<void> {
       { passive: false },
     );
 
-    // --- Live HUD ---
+    // --- Live HUD (the canonical shared Sim HUD — same banner/frame/sim-line as every scene) ---
+    const windowTitle = birthScene ? "The Birth of the Moon" : numMoons === 2 ? "Two Moons" : "Space";
+    const body3 = birthScene ? "Theia" : "Moon"; // the third body in view
     let fps = 0;
     let framesSinceFps = 0;
     let lastFpsTime = performance.now();
@@ -349,9 +353,17 @@ async function main(): Promise<void> {
       };
       const tPlus = demo.sim_since_impact_s();
       const countdown = demo.impact_countdown_s();
-      let eventLine = "";
+      // Event lines (IMPACT / countdown / T+ aftermath clock) — the scene's own timeline, re-homed into
+      // the shared window's event slot. All the same info as before, just below the universal sim line.
+      const events: string[] = [];
+      if (demo.has_impacted()) {
+        events.push(
+          `<b style="color:#ffd08a">IMPACT</b> · ${demo.debris_count()} fragments · ` +
+            `${(demo.impact_energy_j() / 1e30).toFixed(2)}e30 J`,
+        );
+      }
       if (tPlus >= 0) {
-        eventLine = `<br><b style="color:#ffd08a">T+${fmtSim(tPlus)}</b> after impact`;
+        let tLine = `<b style="color:#ffd08a">T+${fmtSim(tPlus)}</b> after impact`;
         // Live disk stats — the measured answer to "did we achieve orbit?" (O(n²) + JSON across the
         // wasm boundary: throttled to ~1 Hz; ?nostats disables it entirely for profiling via the rig).
         try {
@@ -365,32 +377,34 @@ async function main(): Promise<void> {
             // is all Theia is the deficit. Shown as ●Theia / ●Earth to match the render's origin tint.
             const earth = d.earth ?? 0;
             const theia = Math.max(0, d.bound - earth);
-            eventLine +=
+            tLine +=
               ` · disk <b>${d.bound.toFixed(2)} M☾</b> in <b>${d.clumps}</b> moonlet${d.clumps === 1 ? "" : "s"}` +
               ` · biggest <b>${d.biggest.toFixed(2)} M☾</b>` +
               ` · origin <b style="color:#ff9a52">${theia.toFixed(2)} Theia</b> / <b style="color:#6aa0ff">${earth.toFixed(2)} Earth</b>` +
               (d.escaped > 0.005 ? ` · escaped ${d.escaped.toFixed(2)} M☾` : "");
           }
         } catch { /* stats unavailable */ }
+        events.push(tLine);
       } else if (birthScene && countdown >= 0) {
-        eventLine = `<br><b style="color:#ff8a8a; font-size:16px">IMPACT IN T−${countdown.toFixed(1)} s</b>`;
+        events.push(`<b style="color:#ff8a8a; font-size:16px">IMPACT IN T−${countdown.toFixed(1)} s</b>`);
       }
-      stats.innerHTML =
-        (birthScene ? `<b>The Birth of the Moon</b> — Theia inbound · ` : "") +
-        `<b>Sun · Earth · ${birthScene ? "Theia" : "Moon"}</b> · frame <b>${demo.focus_label()}</b> · ` +
-        `Earth–${birthScene ? "Theia" : "Moon"} <b>${demo.moon_distance_km().toFixed(0)}</b> km · ` +
-        `v <b>${demo.moon_speed_kms().toFixed(2)}</b> km/s<br>` +
-        `${line2}<br>` +
-        (demo.earth_day_hours() > 0
-          ? `Earth day <b>${demo.earth_day_hours().toFixed(1)} h</b> · `
-          : "") +
-        `time <b>${Math.round(demo.time_scale_value()).toLocaleString()}×</b> · ` +
-        `<b>${fps}</b> fps · build <b>${__BUILD_ID__}</b> · drag / pinch` +
-        (demo.has_impacted()
-          ? `<br><b style="color:#ffd08a">IMPACT</b> · ${demo.debris_count()} fragments · ` +
-            `${(demo.impact_energy_j() / 1e30).toFixed(2)}e30 J`
-          : "") +
-        eventLine;
+      // Scene-specific physics lines (bodies distance/speed, orbit/impact state, Earth's day).
+      const physics: string[] = [
+        `Earth–${body3} <b>${demo.moon_distance_km().toFixed(0)}</b> km · v <b>${demo.moon_speed_kms().toFixed(2)}</b> km/s`,
+        line2,
+      ];
+      if (demo.earth_day_hours() > 0) {
+        physics.push(`Earth day <b>${demo.earth_day_hours().toFixed(1)} h</b>`);
+      }
+      hud.update({
+        title: `<b>${windowTitle}</b> · Sun · Earth · ${body3} · frame <b>${demo.focus_label()}</b>`,
+        physics,
+        timeScale: demo.time_scale_value(),
+        fps,
+        metersPerPixel: demo.meters_per_pixel(),
+        controls: `drag orbit · pinch / wheel zoom · buttons ↖`,
+        events,
+      });
     };
 
     const statsSkip = new URLSearchParams(location.search).has("nostats");

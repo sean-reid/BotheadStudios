@@ -42,6 +42,19 @@ mod world;
 #[cfg(target_arch = "wasm32")]
 pub use app::{Engine, OrbitDemo};
 
+/// World metres spanned by ONE screen pixel at the focal plane (distance `dist_m` from the eye),
+/// for a perspective camera with vertical field of view `fov_y` (radians) rendered into a viewport
+/// `viewport_h` pixels tall. Pure frustum geometry: the visible slice at `dist_m` is
+/// `2·dist_m·tan(fov_y/2)` metres tall, spread over `viewport_h` pixels. Both the terrain scene
+/// (world units already metres) and the space scene (convert display units → metres first) feed the
+/// HUD scale bar through this one function, so "scale" means the same thing on every screen.
+pub(crate) fn metres_per_pixel_at(dist_m: f64, fov_y: f64, viewport_h: f64) -> f64 {
+    if viewport_h <= 0.0 {
+        return 0.0;
+    }
+    2.0 * dist_m * (fov_y * 0.5).tan() / viewport_h
+}
+
 /// The rendering + browser-host layer. wasm/`wgpu`-only; excluded from native builds and tests.
 #[cfg(target_arch = "wasm32")]
 mod app {
@@ -1388,10 +1401,10 @@ mod app {
             self.world.bulk_height(x, z)
         }
 
-        fn view_proj(&self) -> (Mat4, Vec3) {
-            let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-            // Far plane pushed out (CAMERA_FAR) so the curved Earth cap's horizon is visible.
-            let proj = Mat4::perspective_rh(0.9, aspect, CAMERA_NEAR, CAMERA_FAR);
+        /// The camera eye and look target in world space, derived from live camera state. Shared by
+        /// `view_proj` (the render matrix) and `meters_per_pixel` (the HUD scale bar) so the reported
+        /// scale is byte-for-byte the geometry that was rendered.
+        fn eye_and_target(&self) -> (Vec3, Vec3) {
             let cp = self.camera.pitch.cos();
             let dir = Vec3::new(
                 cp * self.camera.yaw.sin(),
@@ -1414,8 +1427,25 @@ mod app {
             // ground plane recedes to a HORIZON with sky above — a surface-of-a-planet view. A little
             // below eye height keeps a gentle downward tilt so the terrain patch stays in frame.
             let target = Vec3::new(0.0, eye.y * 0.82, 0.0);
+            (eye, target)
+        }
+
+        fn view_proj(&self) -> (Mat4, Vec3) {
+            let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+            // Far plane pushed out (CAMERA_FAR) so the curved Earth cap's horizon is visible.
+            let proj = Mat4::perspective_rh(0.9, aspect, CAMERA_NEAR, CAMERA_FAR);
+            let (eye, target) = self.eye_and_target();
             let view = Mat4::look_at_rh(eye, target, Vec3::Y);
             (proj * view, eye)
+        }
+
+        /// World metres spanned by one screen pixel at the look target (the focal plane). An honest,
+        /// live read of the same camera geometry the frame was rendered with — feeds the HUD scale
+        /// bar. In the terrain scene world units ARE metres, so no unit conversion is needed.
+        pub fn meters_per_pixel(&self) -> f64 {
+            let (eye, target) = self.eye_and_target();
+            let dist = (eye - target).length() as f64;
+            crate::metres_per_pixel_at(dist, 0.9, self.config.height.max(1) as f64)
         }
 
         fn write_uniform(
@@ -3858,6 +3888,17 @@ mod app {
             Ok(())
         }
 
+        /// World metres spanned by one screen pixel at the focus body (the look target sits at the
+        /// display origin, so the focal distance is exactly `base_distance·zoom` display units).
+        /// Display units are metres·DISPLAY_SCALE, so divide back out to report a true metres/pixel —
+        /// which the HUD renders as a km/AU scale bar. Honest live read of camera state; feeds the
+        /// same scale bar as the terrain scene through `metres_per_pixel_at`.
+        pub fn meters_per_pixel(&self) -> f64 {
+            let dist_disp = (self.camera.base_distance * self.camera.zoom) as f64;
+            let dist_m = dist_disp / DISPLAY_SCALE; // display units → metres
+            crate::metres_per_pixel_at(dist_m, 0.9, self.config.height.max(1) as f64)
+        }
+
         fn view_proj(&self) -> Mat4 {
             let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
             let proj = Mat4::perspective_rh(0.9, aspect, 0.05, 100_000.0);
@@ -4000,6 +4041,31 @@ mod app {
 #[cfg(test)]
 mod tests {
     use crate::{body, gravity, materials, mesher, world};
+
+    #[test]
+    fn metres_per_pixel_matches_frustum_geometry() {
+        // The visible slice of the world at the focal plane is 2·d·tan(fov/2) metres tall; one pixel
+        // is that divided by the viewport height. Check the closed form and its scaling behaviour —
+        // this is the pure math behind the HUD scale bar (same on terrain and in space).
+        let fov = 0.9_f64;
+        let vh = 1000.0_f64;
+        let d = 100.0_f64;
+        let mpp = crate::metres_per_pixel_at(d, fov, vh);
+        let expected = 2.0 * d * (fov * 0.5).tan() / vh;
+        assert!((mpp - expected).abs() < 1e-12, "closed form: {mpp} vs {expected}");
+        // Linear in distance: twice as far away ⇒ twice the metres per pixel (zooming out coarsens).
+        assert!(
+            (crate::metres_per_pixel_at(2.0 * d, fov, vh) - 2.0 * mpp).abs() < 1e-12,
+            "scale must be linear in focal distance"
+        );
+        // Inverse in viewport height: a taller viewport packs the same slice into more pixels.
+        assert!(
+            (crate::metres_per_pixel_at(d, fov, 2.0 * vh) - 0.5 * mpp).abs() < 1e-12,
+            "scale must be inverse in viewport height"
+        );
+        // Degenerate viewport is guarded (no divide-by-zero into the HUD).
+        assert_eq!(crate::metres_per_pixel_at(d, fov, 0.0), 0.0);
+    }
 
     #[test]
     fn material_database_loads() {
