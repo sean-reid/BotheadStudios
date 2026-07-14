@@ -92,6 +92,8 @@ async function main(): Promise<void> {
     );
     setStatus("Requesting GPU device…");
     const engine = await Engine.create(canvas);
+    // Expose the engine for the headless watch rig (docs/28 ejecta-blanket diagnostics). Harmless in prod.
+    (window as unknown as { __sim?: unknown }).__sim = engine;
     hideStatus();
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;

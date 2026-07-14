@@ -87,10 +87,33 @@ impl ExcavSurface {
 /// The DECLARED shock ejecta velocity is a RESOLUTION IOU: the excavation flow is a continuum shock finer
 /// than a grain, so at N≈384 it cannot emerge from the local contact physics — we declare its KNOWN
 /// result instead, to be DELETED once particle count is high enough for the flow to emerge on its own. It
-/// is honest, not a dial, because it is DERIVED from cited cratering scaling, not tuned: speed =
-/// Housen–Holsapple point-source v = C·v_i·(a/d)^(1/μ), μ ≈ 0.55 (competent rock), C ≈ 0.6 (free-surface
-/// coupling); launch ~45° up-and-downrange (Maxwell Z-model, Z≈3); deep material is DISPLACED not ejected
-/// (speed fades to zero below the excavation depth). See the resolved-vs-declared engine principle (docs/28).
+/// is honest, not a dial, because it is DERIVED from cited cratering scaling, not tuned.
+///
+/// VELOCITY SCALE — the CRATER's ejecta speed, not the impactor's contact jet (docs/28, the 2026-07-13
+/// fix). The overall SCALE is the GRAVITY-REGIME crater ejection speed `K·√(g·R_crater)`, NOT the old
+/// `C·v_i` tied to the impactor's contact/free-surface velocity `v_i`. The reason: `v_i` is the velocity of
+/// the sub-grain contact JET (a tiny mass); applied to whole ~1 m / 2900 kg grains at this resolution it
+/// grossly over-represents the fast-ejecta mass, flinging a terrain-meteor blanket to km-scale ranges. In
+/// the Housen–Holsapple gravity regime the ejecta launch speed instead scales with the CRATER: the
+/// material at the rim is launched at ~√(g·R) (so it lands ~one crater radius out — the standard result
+/// that the continuous ejecta blanket spans a few crater radii, H&H 2011 / Melosh 1989), rising inward.
+/// K is an ORDER-UNITY coefficient from that rim relation (K = 1: rim ejecta land ~1 R_crater away, the
+/// definitional gravity-regime value — NOT tuned to look right).
+///
+/// The distribution SHAPE is the H-H power law `(R_crater/d)^(1/μ)` (μ ≈ 0.55, competent rock) — √(gR) at
+/// the rim (d = R_crater), rising inward — ANCHORED AT THE RIM and capped at the continuous-ejecta-blanket
+/// edge (~2.5 R_crater, √2.5·√(gR)). It is anchored at the rim, NOT at the impactor radius: the earlier
+/// `(a/d)` form (a = impactor radius) collapses a terrain meteor's ejecta to ~0 when a ≪ R_crater and puts
+/// the RIM speed at ~0, contradicting the cited relation that rim ejecta launch at √(gR). The rim anchor,
+/// with the near-field clamp at `a` and the blanket cap, is the honest realization. This self-scales
+/// HONESTLY across both bands with the same code: a terrain meteor (R_crater ~14 m, g = 9.88 → √(gR) ≈ 12
+/// m/s, capped ≈ 18.6 m/s) makes a LOCAL ejecta blanket ~2–3 crater radii wide, while a giant impact
+/// (R_crater ~planet-scale excavation extent, g ~10 → √(gR) ≈ 5.9 km/s ≈ the old C·v_i ≈ 5.7 km/s; for a
+/// giant impactor a ≈ R_crater so the near-field clamp holds it there) is essentially unchanged, so the
+/// proto-lunar disk still lofts. Launch ~45° up-and-downrange (Maxwell Z-model, Z≈3); deep material is
+/// DISPLACED not ejected (speed fades to zero below the excavation depth). See the resolved-vs-declared
+/// engine principle (docs/28). The distribution SHAPE (and its blanket cap) remain the flagged resolution
+/// IOU; only the velocity SCALE `√(g·R_crater)` became fully honest.
 pub struct Furrow {
     /// Impact site (surface point of first contact).
     pub site: DVec3,
@@ -110,16 +133,33 @@ pub struct Furrow {
     pub downrange: f64,
     /// Below this depth the shock DISPLACES rather than EJECTS (ejection speed fades to zero).
     pub exc_depth: f64,
-    /// Impact speed (drives the ejecta speed).
+    /// Impact speed. NO LONGER the ejecta-velocity scale (that is now the crater's `K·√(g·r_crater)`);
+    /// retained because it sets the impact-energy budget `½·m·v²` that caps the total ejecta KE, and it
+    /// sets the furrow obliquity.
     pub v_mag: f64,
-    /// Impactor radius `a` — the Housen–Holsapple scaling length.
+    /// Impactor radius `a` — the Housen–Holsapple point-source scaling length (the distribution SHAPE).
     pub a: f64,
+    /// Surface gravity at the impact site (m/s²). With `r_crater` this sets the gravity-regime ejecta
+    /// velocity SCALE `K·√(g·r_crater)` — the crater's ejection speed, not the impactor's contact jet.
+    pub g: f64,
+    /// Crater/excavation scale `R_crater` (m) — reused from the furrow's `extent`. The rim ejecta launch
+    /// at ~√(g·r_crater); this is what makes the blanket self-scale from metres (terrain) to km/s (giant).
+    pub r_crater: f64,
 }
 
 impl Furrow {
     /// Build the furrow frame at `site` with outward normal `n`, for an impactor of radius
-    /// `impactor_radius` arriving at `v_impact`, with excavation scale `extent` (≈ impactor size).
-    pub fn new(site: DVec3, n: DVec3, v_impact: DVec3, impactor_radius: f64, extent: f64) -> Self {
+    /// `impactor_radius` arriving at `v_impact`, with excavation scale `extent` (≈ the crater radius) under
+    /// surface gravity `g` (m/s²). `g` and `extent` set the gravity-regime ejecta velocity SCALE
+    /// `K·√(g·extent)` (see [`Furrow::ejection`]); `extent` is reused as `r_crater`.
+    pub fn new(
+        site: DVec3,
+        n: DVec3,
+        v_impact: DVec3,
+        impactor_radius: f64,
+        extent: f64,
+        g: f64,
+    ) -> Self {
         let v_mag = v_impact.length();
         // Downrange tangent: the impact velocity projected onto the surface. A near-vertical impact has
         // no preferred direction — fall back to any tangent (the bowl is symmetric there, so its axis
@@ -151,6 +191,8 @@ impl Furrow {
             exc_depth: (extent * 0.5).max(1.0),
             v_mag,
             a: impactor_radius,
+            g,
+            r_crater: extent, // the excavation scale IS the crater scale for the gravity-regime ejecta speed
         }
     }
 
@@ -172,16 +214,45 @@ impl Furrow {
     }
 
     /// The DECLARED shock→rarefaction ejection velocity at a grain at `pos` (surface normal `outward`
-    /// there, `below` m beneath the surface): H-H point-source speed C·v_i·(a/d)^(1/μ) faded to zero
-    /// below the excavation depth, launched ~45° between local-up (`outward`) and the along-surface
-    /// downrange direction (the Maxwell Z-model excavation flow). Excludes ground motion (caller adds it).
+    /// there, `below` m beneath the surface): the H-H point-source distribution SHAPE `(a/d)^(1/μ)` scaled
+    /// by the GRAVITY-REGIME crater ejection speed `K·√(g·R_crater)` (NOT the old `C·v_i` impactor contact
+    /// jet — see the [`Furrow`] doc for why), faded to zero below the excavation depth, launched ~45°
+    /// between local-up (`outward`) and the along-surface downrange direction (the Maxwell Z-model
+    /// excavation flow). Excludes ground motion (caller adds it).
     pub fn ejection(&self, pos: DVec3, outward: DVec3, below: f64) -> DVec3 {
         const MU_HH: f64 = 0.55;
-        const C_EJ: f64 = 0.6;
+        // Gravity-regime rim-ejecta coefficient (order unity): material at the crater RIM launches at
+        // ~√(g·R), landing ~one crater radius out — the standard result that the continuous ejecta blanket
+        // spans a few crater radii (Housen & Holsapple 2011; Melosh, Impact Cratering, 1989). K = 1 is the
+        // definitional value (rim ejecta land ~1 R_crater away); it is DERIVED, not tuned to look right.
+        const K_REGIME: f64 = 1.0;
+        // Outer edge of the CONTINUOUS ejecta blanket ≈ 2.5 crater radii (Melosh 1989; H&H 2011). Its
+        // ballistic range v²/g = 2.5·R fixes the fastest continuous ejecta at √(2.5)·√(gR), so the shape
+        // is capped there: B = √2.5 ≈ 1.58. This is the RESOLUTION IOU made explicit — the true H-H law
+        // has a small MASS of much faster material at the impact point (the contact jet, → rays/distal
+        // ejecta), but at N≈384 each grain is an equal, large mass, so representing that sub-resolution
+        // fast tail as whole grains is exactly the debris storm. We cap at the continuous-blanket edge (a
+        // CITED extent, not a tuned dial); the distal fast tail is DELETED once N resolves it (docs/28).
+        const B_BLANKET: f64 = 1.5811388300841898; // √2.5 — continuous ejecta blanket to ~2.5 R_crater
         let from_site = pos - self.site;
-        let d = from_site.length().max(self.a); // >= a: the (a/d) factor never exceeds 1
+        // Near-field clamp at the impactor radius `a` (the H-H coupling length): the power law is only
+        // valid outside the projectile. For a GIANT impactor a ≈ R_crater, so this clamp is what keeps the
+        // space band's ejecta at ~√(g·R) (byte-near the old C·v_i); for a small terrain meteor a ≪ R and
+        // the clamp is irrelevant (the B cap governs the fast inner grains instead).
+        let d = from_site.length().max(self.a);
         let fade = (1.0 - below / self.exc_depth).clamp(0.0, 1.0);
-        let speed = C_EJ * self.v_mag * (self.a / d).powf(1.0 / MU_HH) * fade;
+        // The velocity SCALE is the crater's √(g·R_crater), self-consistent with gravity — so the same code
+        // gives a terrain meteor a metres-per-second LOCAL blanket (√(9.88·14) ≈ 12 m/s, capped to ≈ 18.6
+        // m/s / ~2.5·R range) and a giant impact a km/s protolunar curtain (√(9.82·3.5e6) ≈ 5.9 km/s ≈ the
+        // old scale). The SHAPE is the H-H power law ANCHORED AT THE RIM `(R_crater/d)^(1/μ)` — √(gR) at
+        // the rim (d = R_crater), rising inward — capped at the continuous-blanket edge B. (Anchoring the
+        // power law at the impactor radius `(a/d)` instead — the pre-2026-07-13 form — collapses a terrain
+        // meteor's ejecta to ~0 when a ≪ R and puts the RIM ejecta at ~0, contradicting the cited relation
+        // that rim ejecta launch at √(gR); the rim anchor is the honest fix. The (a/d)-vs-(R/d) anchor is
+        // the flagged resolution IOU — the distribution SHAPE — while the √(g·R) SCALE is now honest.)
+        let v_scale = K_REGIME * (self.g * self.r_crater).max(0.0).sqrt();
+        let shape = ((self.r_crater / d).powf(1.0 / MU_HH)).min(B_BLANKET);
+        let speed = v_scale * shape * fade;
         let horiz = (from_site - outward * from_site.dot(outward))
             .try_normalize()
             .unwrap_or(self.t); // outward-along-surface (downrange), fall back to the track
@@ -240,7 +311,9 @@ pub fn ejecta_energy_scale(
 /// is the scaling length a. `impactor_mass` is the impactor's mass — with `v_impact` it sets the impact
 /// energy `½·m·v²` that CAPS the total ejecta KE ([`ejecta_energy_scale`]): the declared H-H law can hand
 /// a small impactor's excavated grains more KE than the impact delivered, and exact energy conservation
-/// scales that back. `extent` is the excavation scale (≈ impactor size, clamped). This routine FILLS the
+/// scales that back. `extent` is the excavation scale (≈ the crater radius, clamped); `g` is the surface
+/// gravity at the site, and together they set the gravity-regime ejecta velocity scale `K·√(g·extent)`
+/// (see [`Furrow::ejection`]). This routine FILLS the
 /// furrow's half-ellipsoid volume with `n_grains` fresh grains (a body has no pre-existing grains); a
 /// terrain scene instead converts its real voxels (`matter::materialize_furrow`), but BOTH share the
 /// [`Furrow`] shape + ejection law + energy cap. Returns (bodies, mat_ids, temps, source) to append.
@@ -257,9 +330,10 @@ pub fn furrow_target_grains(
     n_grains: usize,
     extent: f64,
     impactor_mass: f64,
+    g: f64,
 ) -> (Vec<Body>, Vec<usize>, Vec<f32>, Vec<u8>) {
     let n = surface.site_normal(site); // outward surface normal at the site
-    let f = Furrow::new(site, n, v_impact, impactor_radius, extent);
+    let f = Furrow::new(site, n, v_impact, impactor_radius, extent, g);
 
     let mut bodies = Vec::with_capacity(n_grains);
     let mut mat_ids = Vec::with_capacity(n_grains);
@@ -364,6 +438,10 @@ pub fn build_impact_debris_between(
     // half-ball. Excavation scale ~ the impactor, clamped for GIANT impactors (a Theia-scale cap would
     // swallow the planet; the giant-impact melt region is hemispheric, not global — flagged).
     let cap_extent = (2.0 * moon_r).min(0.55 * earth_radius);
+    // Surface gravity at the impact site sets the gravity-regime ejecta velocity scale K·√(g·R_crater)
+    // (docs/28): for Earth this is ~9.8 m/s², and with the planet-scale excavation extent it gives ~5.9
+    // km/s — matching the old impactor-tied C·v_i ≈ 5.7 km/s, so the proto-lunar disk is ~unchanged.
+    let surface_g = crate::orbit::G * earth_mass / (earth_radius * earth_radius);
     let (cap_bodies, cap_mats, cap_temps, cap_src) = furrow_target_grains(
         mats,
         earth_body,
@@ -376,6 +454,7 @@ pub fn build_impact_debris_between(
         CAP_N,
         cap_extent,
         moon_mass, // impactor mass → the impact-energy cap (Theia is within budget: no scaling)
+        surface_g, // gravity-regime ejecta velocity scale K·√(g·R_crater)
     );
     particles.extend(cap_bodies);
     mat_ids.extend(cap_mats);
@@ -462,6 +541,10 @@ mod tests {
     const EARTH_RADIUS_M: f64 = 6.371e6;
     const MOON_MASS: f64 = 7.342e22;
     const MOON_RADIUS_M: f64 = 1.737e6;
+    /// Earth's surface gravity (≈9.82 m/s²) — the gravity-regime ejecta scale K·√(g·R_crater) needs it.
+    const EARTH_G: f64 = G * EARTH_MASS / (EARTH_RADIUS_M * EARTH_RADIUS_M);
+    /// The terrain scene's emergent surface gravity (`Engine::surface_g`).
+    const TERRAIN_G: f64 = 9.88;
 
     /// Specific orbital energy of a fragment about the planet: ½v² − GM/r. Negative ⇒ BOUND.
     fn bound_fraction(agg: &Aggregate, earth_pos: DVec3, earth_vel: DVec3) -> f64 {
@@ -801,6 +884,7 @@ mod tests {
             CAP_N,
             extent,
             MOON_MASS, // moon-scale impactor (a = MOON_RADIUS_M): within budget, so no scaling
+            EARTH_G,   // gravity-regime ejecta scale K·√(g·R_crater) on Earth
         );
         assert_eq!(bodies.len(), CAP_N);
         assert_eq!(mids.len(), CAP_N);
@@ -856,6 +940,7 @@ mod tests {
             CAP_N,
             extent,
             MOON_MASS,
+            EARTH_G,
         );
         for p in &vb {
             assert!(p.pos.length() <= EARTH_RADIUS_M + 1.0, "vertical: grain above surface");
@@ -871,12 +956,13 @@ mod tests {
         //   • grains all Earth-tagged (SOURCE_TARGET) and all BELOW the surface plane;
         //   • an OBLIQUE strike carves a furrow ELONGATED downrange, its centroid pushed downrange;
         //   • ejecta are LOFTED (outward/up velocity), launched along the LOCAL normal (so the arcs are
-        //     set by the scene's local gravity — a flat uniform-g patch has no escape velocity), but
-        //     the total ejecta KE is CAPPED at the impact energy ½·m·v² (docs/28 exact conservation): a
-        //     SMALL impactor (a ≈ 0.3 m ≪ the 1 m³ grains) cannot fling its excavated grains at the raw
-        //     H-H speed — that would eject more KE than the impact carried (the debris storm). So we
-        //     assert Σ½m|v_ej|² ≤ E_i AND the derived-not-dial check (halving the impact speed halves the
-        //     loft — the cap scales as v², so the ratio survives);
+        //     set by the scene's local gravity — a flat uniform-g patch has no escape velocity), and the
+        //     ejecta velocity SCALE is now the GRAVITY-REGIME crater speed K·√(g·R_crater) (docs/28), NOT
+        //     the old impactor contact jet C·v_i. The derived-not-dial check reflects that honest change:
+        //     the ejecta speed is INDEPENDENT of the impactor speed at a fixed crater (it is set by g·R),
+        //     and it scales as √(g·R_crater) when the crater grows — so a bigger crater lofts faster,
+        //     a faster impactor at the SAME crater does not. The total ejecta KE stays CAPPED at the
+        //     impact energy ½·m·v² (docs/28 exact conservation), asserted Σ½m|v_ej|² ≤ E_i;
         //   • a VERTICAL strike is SYMMETRIC (no downrange bias) — obliquity is what elongates a furrow.
         use crate::aggregate::SOURCE_TARGET;
         let mats = materials::load();
@@ -894,7 +980,7 @@ mod tests {
         let v_oblique = DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0;
         let (bodies, mids, temps, src) = furrow_target_grains(
             &mats, &earth, flat, site, v_oblique, a, frag_mass, DVec3::ZERO, CAP_N, extent,
-            impactor_mass,
+            impactor_mass, TERRAIN_G,
         );
         assert_eq!(bodies.len(), CAP_N);
         assert_eq!(mids.len(), CAP_N);
@@ -936,27 +1022,48 @@ mod tests {
             ke <= e_impact * (1.0 + 1e-9),
             "ejecta KE {ke:.3e} must not exceed the impact energy {e_impact:.3e} (energy conserved)"
         );
-        // Derived, not a dial: a HALF-SPEED impact lofts proportionally slower. Both the RAW H-H speeds
-        // AND the energy budget scale as v², so the cap factor is IDENTICAL at any speed and the capped
-        // speeds still halve — the physics tracks the impact, it is not a fixed kick nor a look-right clamp.
+        // Derived, not a dial (docs/28, the crater-scaled ejecta fix): the ejecta velocity SCALE is
+        // K·√(g·R_crater), so at a FIXED crater it is INDEPENDENT of the impactor speed — a half-speed
+        // impact into the SAME crater lofts at the SAME speed (the old C·v_i scale would have halved it,
+        // which is exactly the sub-grain contact-jet velocity we replaced). The impactor speed enters the
+        // loft only through the crater it digs (energy → R_crater), tested next.
+        let vmax = |b: &[Body]| b.iter().map(|p| p.vel.length()).fold(0.0, f64::max);
         let (half, _, _, _) = furrow_target_grains(
             &mats, &earth, flat, site, v_oblique * 0.5, a, frag_mass, DVec3::ZERO, CAP_N, extent,
-            impactor_mass,
+            impactor_mass, TERRAIN_G,
         );
-        let vmax = |b: &[Body]| b.iter().map(|p| p.vel.length()).fold(0.0, f64::max);
         let (vf, vh) = (vmax(&bodies), vmax(&half));
         assert!(
-            (vh / vf - 0.5).abs() < 0.05,
-            "ejecta speed scales with the impact (full {vf:.0}, half {vh:.0}; ratio {:.3})",
+            (vh / vf - 1.0).abs() < 1e-9,
+            "ejecta speed is set by the crater (√(g·R)), not the impactor speed: same crater ⇒ same loft \
+             (full {vf:.3}, half-speed {vh:.3}; ratio {:.6})",
             vh / vf
         );
+        // And it DOES track gravity: the scale is √(g·R_crater), so at a FIXED crater geometry (identical
+        // grain positions — the fill is g-independent) quadrupling g doubles EVERY grain's ejection speed.
+        // This isolates the derived scale (the (a/d)^(1/μ) shape is unchanged when only g moves), proving
+        // it is √g, not a fixed kick nor tuned to look right.
+        let (heavy_g, _, _, _) = furrow_target_grains(
+            &mats, &earth, flat, site, v_oblique, a, frag_mass, DVec3::ZERO, CAP_N, extent,
+            impactor_mass, 4.0 * TERRAIN_G,
+        );
+        for (p, q) in bodies.iter().zip(heavy_g.iter()) {
+            let (s, sg) = (p.vel.length(), q.vel.length());
+            if s > 1e-6 {
+                assert!(
+                    (sg / s - 2.0).abs() < 1e-6,
+                    "ejection speed scales as √g: 4×g ⇒ 2× speed (got {sg:.4}/{s:.4} = {:.4})",
+                    sg / s
+                );
+            }
+        }
 
         // VERTICAL strike (straight down): SYMMETRIC bowl — no downrange bias, along-span ≈ across-span,
         // and the centroid is centred over the impact (obliquity is what elongates/offsets a furrow).
         let v_vert = -up * 17_000.0;
         let (vb, _, _, _) = furrow_target_grains(
             &mats, &earth, flat, site, v_vert, a, frag_mass, DVec3::ZERO, CAP_N, extent,
-            impactor_mass,
+            impactor_mass, TERRAIN_G,
         );
         // Its tangent axes are arbitrary (no preferred direction), so measure symmetry in two fixed
         // orthogonal tangents (x, z) of the plane.
@@ -1022,6 +1129,7 @@ mod tests {
         // Raw (uncapped) ejecta KE of this excavation.
         let raw = furrow_target_grains(
             &mats, &earth, flat, site, v, a, frag_mass, DVec3::ZERO, CAP_N, 12.0, f64::INFINITY,
+            TERRAIN_G,
         )
         .0;
         let raw_ke: f64 = raw.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
@@ -1032,6 +1140,7 @@ mod tests {
         let impactor_mass = e_impact / (0.5 * v.length_squared());
         let (bodies, ..) = furrow_target_grains(
             &mats, &earth, flat, site, v, a, frag_mass, DVec3::ZERO, CAP_N, 12.0, impactor_mass,
+            TERRAIN_G,
         );
         // ground_vel is zero here, so the ejecta KE relative to ground is the absolute KE.
         let ke: f64 = bodies.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
@@ -1042,9 +1151,11 @@ mod tests {
         assert!(ke < raw_ke, "the cap reduced the ejecta KE ({ke:.3e} < raw {raw_ke:.3e})");
 
         // HONEST FINDING (docs/28): a PHYSICALLY-CONSISTENT 1000 kg / 0.31 m terrain meteor delivers far
-        // MORE energy than this raw ejection carries, so at the f=1 bound the cap does NOT bind for it —
-        // the raw ejecta KE is ~0.15× its impact energy. The cap is a correct conservation invariant, but
-        // the observed terrain debris storm is NOT an aggregate energy-conservation violation.
+        // MORE energy than this raw ejection carries, so at the f=1 bound the cap does NOT bind for it. The
+        // cap is a correct conservation invariant, but it was never what tamed the terrain debris storm:
+        // with the crater-scaled velocity (K·√(g·R_crater)) the raw ejecta KE is now ~m/s-scale and tiny
+        // (≪ E_i). The storm was a velocity-SCALE error (the impactor contact jet C·v_i applied to whole
+        // grains), fixed by scaling to the crater, not by the energy cap.
         let e_1000kg = 0.5 * 1000.0 * v.length_squared();
         assert!(
             raw_ke < e_1000kg,
@@ -1070,10 +1181,12 @@ mod tests {
         let frag_mass = m_theia / DEBRIS_N as f64;
         let real = furrow_target_grains(
             &mats, &earth, curved, site, v, a, frag_mass, DVec3::ZERO, CAP_N, extent, m_theia,
+            EARTH_G,
         )
         .0;
         let uncapped = furrow_target_grains(
             &mats, &earth, curved, site, v, a, frag_mass, DVec3::ZERO, CAP_N, extent, f64::INFINITY,
+            EARTH_G,
         )
         .0;
         for (r, u) in real.iter().zip(uncapped.iter()) {
@@ -1083,6 +1196,109 @@ mod tests {
         let e_impact = 0.5 * m_theia * v.length_squared();
         let ke: f64 = real.iter().map(|b| 0.5 * b.mass * b.vel.length_squared()).sum();
         assert!(ke < e_impact, "Theia's ejecta KE {ke:.3e} J < impact energy {e_impact:.3e} J");
+    }
+
+    #[test]
+    fn a_terrain_meteor_ejecta_lands_in_a_local_blanket_not_a_footprint_storm() {
+        // docs/28 (the 2026-07-13 crater-scaled-ejecta fix). THE problem: the old ejecta velocity SCALE
+        // C·v_i (the impactor's ~km/s contact-jet speed) applied to whole 2900 kg terrain grains flung a
+        // meteor's ejecta across the WHOLE 96 m patch at up to ~km/s — a footprint-spanning storm that
+        // forced a footprint-sized resolved region. The honest fix scales the ejecta to the CRATER's
+        // gravity-regime speed K·√(g·R_crater) instead, so the blanket is LOCAL: a few crater radii, tens
+        // of metres. This test pins that at the EJECTION-LAW level: the max ballistic range of any grain
+        // must be O(a few R_crater), firmly inside the patch — NOT the ~10⁷ m the old C·v_i scale gave.
+        // HONEST NOTE (rig-measured 2026-07-13): fixing the ejection scale does NOT by itself tame the
+        // terrain SCENE's debris storm — with this ejection capped at ~18 m/s the rig STILL shows terrain
+        // grains flung km-scale, because the dominant loft there is the GPU terrain-collision penalty
+        // (`particle_step.wgsl::terrain_accel`, f = c_stiffness·penetration) on grains materialized BELOW
+        // the surface, NOT the shock ejection. That is a SEPARATE mechanism (out of this ejection-scale
+        // change); this test guards only that the ejection LAW itself is now local, not a km-scale spray.
+        let mats = materials::load();
+        let earth = crate::planet::earth();
+        let flat = ExcavSurface::Flat { up: DVec3::Y, ref_radius: EARTH_RADIUS_M };
+        let site = DVec3::ZERO;
+        // The real terrain-meteor parameters (lib.rs `meteor`): a 1000 kg / 0.31 m Fe-Ni body at 17 km/s
+        // digs an R_crater ≈ 14 m crater (energy/σ, LOD-capped) into g = 9.88 terrain.
+        let r_crater = 14.0;
+        let a = 0.31;
+        let v_impact = DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0;
+        let frag_mass = 2_900.0; // 1 m³ basalt voxel
+        let impactor_mass = 1_000.0;
+        let (bodies, ..) = furrow_target_grains(
+            &mats, &earth, flat, site, v_impact, a, frag_mass, DVec3::ZERO, CAP_N, r_crater,
+            impactor_mass, TERRAIN_G,
+        );
+        // Ballistic range on the flat uniform-g patch: a grain launched from ~the surface with up-speed vu
+        // and horizontal speed vh lands 2·vu·vh/g downrange (only the lofted, vu>0 grains travel).
+        let range = |p: &Body| {
+            let vu = p.vel.dot(DVec3::Y);
+            if vu <= 0.0 {
+                return 0.0;
+            }
+            let vh = (p.vel - DVec3::Y * vu).length();
+            2.0 * vu * vh / TERRAIN_G
+        };
+        let max_range = bodies.iter().map(range).fold(0.0f64, f64::max);
+        let max_speed = bodies.iter().map(|p| p.vel.length()).fold(0.0f64, f64::max);
+        println!(
+            "TERRAIN ejecta: max speed {max_speed:.1} m/s · max ballistic range {max_range:.1} m \
+             (R_crater {r_crater} m; 96 m patch)"
+        );
+        // LOCAL blanket: the farthest ejecta lands within a few crater radii — tens of metres, well inside
+        // the patch. (Measured ~14 m ≈ 1 R_crater at K=1; the old scale put it at ~10⁷ m.)
+        assert!(
+            max_range < 3.0 * r_crater && max_range < 50.0,
+            "ejecta must land in a LOCAL blanket (max range {max_range:.1} m < 3·R_crater = {:.1} m), \
+             not a footprint storm",
+            3.0 * r_crater
+        );
+        // The fast km/s tail is GONE: no grain moves faster than a few tens of m/s.
+        assert!(
+            max_speed < 40.0,
+            "the km/s ejecta tail is gone — max grain speed {max_speed:.1} m/s (was ~10 km/s under C·v_i)"
+        );
+    }
+
+    #[test]
+    fn a_space_scale_impact_still_ejects_at_km_per_second() {
+        // The other side of the SAME crater-scaled scale (docs/28): a giant impact's excavation extent is
+        // planet-scale (R_crater ~ millions of metres) and g ~ 10, so K·√(g·R_crater) ≈ 5.9 km/s —
+        // essentially the old C·v_i ≈ 5.7 km/s. So the space band's km/s ejecta (what lofts the
+        // proto-lunar disk) is preserved. Mirrors the furrow/birth assertions: fast (km/s) but sub-escape
+        // (bound), so material is launched into orbit rather than blown clean away.
+        let mats = materials::load();
+        let earth = crate::planet::earth();
+        let curved = ExcavSurface::Curved { center: DVec3::ZERO, radius: EARTH_RADIUS_M };
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
+        let theia = crate::planet::theia();
+        let m_theia = theia.total_mass();
+        let a = theia.radius();
+        let extent = (2.0 * a).min(0.55 * EARTH_RADIUS_M); // the same cap_extent the space builder uses
+        let v = DVec3::new(1.0, -1.0, 0.0).normalize() * 9_500.0; // ~mutual escape, 45° oblique
+        let frag_mass = m_theia / DEBRIS_N as f64;
+        let (bodies, ..) = furrow_target_grains(
+            &mats, &earth, curved, site, v, a, frag_mass, DVec3::ZERO, CAP_N, extent, m_theia,
+            EARTH_G,
+        );
+        let vmax = bodies.iter().map(|p| p.vel.length()).fold(0.0f64, f64::max);
+        let v_esc = (2.0 * G * EARTH_MASS / EARTH_RADIUS_M).sqrt();
+        // The crater-scaled ejecta speed here is √(g·extent); confirm the code matches the derivation.
+        let expected_scale = (EARTH_G * extent).sqrt();
+        println!(
+            "SPACE ejecta: max speed {vmax:.0} m/s (scale √(g·extent) = {expected_scale:.0} m/s; \
+             old C·v_i ≈ {:.0} m/s; v_esc {v_esc:.0} m/s)",
+            0.6 * v.length()
+        );
+        assert!(
+            vmax > 3_000.0,
+            "space-band ejecta must stay km/s to loft a disk (got {vmax:.0} m/s)"
+        );
+        assert!(vmax < v_esc, "ejecta must be sub-escape (bound): {vmax:.0} < {v_esc:.0}");
+        // The scale IS √(g·R_crater) (the max-speed grain sits at d→a, where (a/d)^(1/μ)·fade ≈ 1).
+        assert!(
+            (vmax - expected_scale).abs() / expected_scale < 0.2,
+            "max ejecta speed ≈ the derived scale √(g·extent): {vmax:.0} vs {expected_scale:.0}"
+        );
     }
 
     #[test]

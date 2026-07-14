@@ -1086,7 +1086,7 @@ mod tests {
         // +y (the surface normal under uniform surface gravity).
         let site = glam::DVec3::new(0.0, surf as f64 - 0.5, 0.0);
         let v_impact = glam::DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0;
-        let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.3, 8.0);
+        let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.3, 8.0, 9.88);
 
         let mut sim = MatterSim::new(200_000);
         // A 1000 kg Fe-Ni meteor → the impact-energy cap (docs/28); its ½·m·v² bounds the ejecta KE.
@@ -1149,7 +1149,7 @@ mod tests {
         let (px, pz) = (c.x as i32, c.z as i32);
         let surf = w.surface_top_voxel(px, pz).unwrap() as f32 - c.y;
         let site = glam::DVec3::new(0.0, surf as f64 - 0.5, 0.0);
-        let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, -glam::DVec3::Y * 17_000.0, 0.3, 8.0);
+        let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, -glam::DVec3::Y * 17_000.0, 0.3, 8.0, 9.88);
 
         let mut sim = MatterSim::new(200_000);
         let n = sim.materialize_furrow(&mut w, &mats, &furrow, Vec3::ZERO, 1_000.0);
@@ -1173,12 +1173,13 @@ mod tests {
         // UNCAPPED (impactor_mass = ∞, the raw declared H-H ejection) and once with a LIGHT impactor
         // whose delivered energy the raw ejection would exceed — and asserts the cap corrects it EXACTLY.
         //
-        // HONEST FINDING (measured, docs/28): for the REAL 1000 kg terrain meteor the raw ejecta KE is
-        // ~2.1e10 J — only ~0.15× its impact energy (1.445e11 J) — so at the f=1 bound the cap does NOT
-        // bind and the current terrain scene is UNCHANGED by it (the observed debris storm is a velocity-
-        // DISTRIBUTION tail, not an aggregate energy-conservation violation — see the module note / report).
-        // We therefore use a LIGHTER impactor (whose ½·m·v² is below the raw ejecta KE) to exercise and
-        // prove the binding path, and separately confirm the 1000 kg meteor is within budget.
+        // HONEST FINDING (measured, docs/28): with the crater-scaled ejecta velocity K·√(g·R_crater) the
+        // real 1000 kg terrain meteor's raw ejecta KE is now tiny (~m/s grain speeds) — far below its
+        // impact energy (1.445e11 J) — so at the f=1 bound the cap does NOT bind and the terrain scene is
+        // UNCHANGED by it. The debris storm was a velocity-SCALE error (the impactor contact jet C·v_i on
+        // whole grains), fixed by scaling ejecta to the crater, NOT by the energy cap. We therefore use a
+        // LIGHTER impactor (whose ½·m·v² is below the raw ejecta KE) to exercise and prove the binding
+        // path, and separately confirm the 1000 kg meteor is within budget.
         let mats = materials::load();
         let v_impact = glam::DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0;
 
@@ -1188,7 +1189,7 @@ mod tests {
             let c = w.center();
             let surf = w.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
             let site = glam::DVec3::new(0.0, surf as f64 - 0.5, 0.0);
-            let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.31, 12.0);
+            let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.31, 12.0, 9.88);
             let mut sim = MatterSim::new(200_000);
             sim.materialize_furrow(&mut w, &mats, &furrow, Vec3::ZERO, f64::INFINITY);
             sim.particles
@@ -1205,7 +1206,7 @@ mod tests {
         let c = w.center();
         let surf = w.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
         let site = glam::DVec3::new(0.0, surf as f64 - 0.5, 0.0);
-        let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.31, 12.0);
+        let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.31, 12.0, 9.88);
         let mut sim = MatterSim::new(200_000);
         let start = sim.particle_count();
         let n = sim.materialize_furrow(&mut w, &mats, &furrow, Vec3::ZERO, impactor_mass);

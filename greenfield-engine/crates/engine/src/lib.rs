@@ -275,6 +275,11 @@ mod app {
         /// Frame counter driving the periodic GPU-debris de-resolution (`settle_gpu_debris`): the
         /// readback stalls the pipeline, so we amortise it over `SETTLE_READBACK_INTERVAL` frames.
         frame: u64,
+        /// Diagnostic cache (docs/28 ejecta blanket): the GPU-debris cloud's horizontal span and vertical
+        /// reach (m), refreshed from each readback in `settle_gpu_debris`. The watch rig reads these to
+        /// tell a LOCAL blanket from a footprint storm. 0 until the first readback lands.
+        debris_span_m: f32,
+        debris_height_m: f32,
 
         camera: Camera,
     }
@@ -639,6 +644,8 @@ mod app {
                 particle_bind,
                 gpu_particles,
                 frame: 0,
+                debris_span_m: 0.0,
+                debris_height_m: 0.0,
                 camera,
             })
         }
@@ -735,6 +742,21 @@ mod app {
             self.gpu_particles.count
         }
 
+        /// Diagnostic (docs/28, the crater-scaled ejecta fix): the horizontal SPREAD of terrain debris —
+        /// the larger of the x- and z-extents of the live grain cloud (m). This is the number that says
+        /// whether a meteor made a LOCAL ejecta blanket (a few crater radii — tens of m) or the old
+        /// footprint-spanning storm (~the whole ~96 m patch, grains flung km-scale). Returns 0 with no
+        /// debris. `terrain_debris_height_m` is the companion vertical reach (does the ejecta fill the sky).
+        pub fn terrain_debris_spread_m(&self) -> f64 {
+            self.debris_span_m as f64
+        }
+
+        /// Diagnostic companion to [`Self::terrain_debris_spread_m`]: the vertical reach of the debris
+        /// cloud (highest grain minus lowest, m) — a compact blanket stays low, a debris storm fills the sky.
+        pub fn terrain_debris_height_m(&self) -> f64 {
+            self.debris_height_m as f64
+        }
+
         /// Dig at a screen point (normalized device coords, y up). `blast` uses a stronger tool that
         /// can break rock. Casts a ray from the camera and fractures the first solid voxel region.
         pub fn dig(&mut self, ndc_x: f32, ndc_y: f32, blast: bool) {
@@ -828,8 +850,18 @@ mod app {
                 let v_impact = glam::DVec3::new(dir.x as f64, dir.y as f64, dir.z as f64)
                     * METEOR_SPEED as f64;
                 let site64 = glam::DVec3::new(hit.x as f64, hit.y as f64, hit.z as f64);
-                let furrow =
-                    crate::impact::Furrow::new(site64, glam::DVec3::Y, v_impact, a, mat_r as f64);
+                // The gravity-regime ejecta velocity scale K·√(g·R_crater) (docs/28) needs the terrain's
+                // surface gravity: for the terrain meteor (R_crater ≈ mat_r, g ≈ 9.88) this gives ~12 m/s
+                // (capped ≈ 18.6 m/s), a LOCAL ejecta blanket ~2–3 crater radii wide instead of the km/s
+                // impactor-contact scale (C·v_i ≈ 10 km/s) the old ejection law used.
+                let furrow = crate::impact::Furrow::new(
+                    site64,
+                    glam::DVec3::Y,
+                    v_impact,
+                    a,
+                    mat_r as f64,
+                    self.surface_g as f64,
+                );
                 let start = self.matter.particle_count();
                 self.matter.materialize_furrow(
                     &mut self.world,
@@ -1023,6 +1055,22 @@ mod app {
             let Some(grains) = self.gpu_particles.take_readback() else {
                 return;
             };
+            // Diagnostic (docs/28 ejecta blanket): cache the live debris cloud's horizontal span and
+            // vertical reach so the watch rig can measure LOCAL blanket vs footprint storm.
+            if !grains.is_empty() {
+                let (mut xmin, mut xmax, mut ymin, mut ymax, mut zmin, mut zmax) =
+                    (f32::MAX, f32::MIN, f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+                for g in &grains {
+                    xmin = xmin.min(g.offset[0]);
+                    xmax = xmax.max(g.offset[0]);
+                    ymin = ymin.min(g.offset[1]);
+                    ymax = ymax.max(g.offset[1]);
+                    zmin = zmin.min(g.offset[2]);
+                    zmax = zmax.max(g.offset[2]);
+                }
+                self.debris_span_m = (xmax - xmin).max(zmax - zmin);
+                self.debris_height_m = ymax - ymin;
+            }
             // If the live buffer was appended to since the snapshot (a new meteor mid-flight), the
             // snapshot indices no longer align with the buffer — do NOT compact against it (that would
             // drop the freshly-appended grains). Discard this snapshot; the next interval retries.
