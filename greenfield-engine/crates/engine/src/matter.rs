@@ -350,18 +350,62 @@ impl MatterSim {
         let ri = (reach.ceil() as i32).max(1);
         let (cx, cy, cz) = (sv.x.floor() as i32, sv.y.floor() as i32, sv.z.floor() as i32);
         let start = self.particles.len();
+        // Excavate the crater as a bowl DRAPED INTO THE LOCAL SURFACE — each column dug from its OWN
+        // pre-impact surface DOWN to the bowl floor — so the crater is always OPEN TO THE SKY and its rim
+        // joins the surrounding terrain smoothly. The naive bowl is referenced to a FLAT datum plane
+        // through the impact site (`below = site.y − vc.y`), but the terrain has real relief
+        // (`world::AMPLITUDE` ≈ 34 m ≫ a ~12 m terrain crater). Against a flat datum, an up-slope column
+        // (surface above the datum) has its sub-datum voxels removed while the solid ABOVE the datum is
+        // LEFT as an intact ROOF, and a deep floor meets the un-excavated hillside at a tall edge WALL.
+        // Both bury the excavated grains below the collision surface: the GPU heightfield
+        // (`surface_top_voxel` → `particle_step.wgsl::terrain_h`) reports the roof/wall top, so each buried
+        // grain reads a penetration of its whole burial depth and the EXPLICIT `k·penetration` terrain
+        // spring launches it at km/s — the debris storm (the see-through crater and the hanging debris were
+        // the same buried-grain artifact). Draping the depth on the local surface removes the roof by
+        // construction (excavation starts AT the surface) and tapers the bowl to zero depth at the rim
+        // (no edge wall), so `surface_top_voxel` drops to the true crater floor and every grain sits
+        // at/above it (penetration ≤ a grain radius): no spring kick. Matter-conserving as before.
+        //
+        // (Only the terrain meteor uses `materialize_furrow`; the space-band giant impact fills fresh
+        // grains via `impact::furrow_target_grains`, which is untouched.)
         for dz in -ri..=ri {
-            for dy in -ri..=ri {
-                for dx in -ri..=ri {
+            for dx in -ri..=ri {
+                if self.particles.len() >= self.max_particles {
+                    break;
+                }
+                let (x, z) = (cx + dx, cz + dz);
+                // Pre-impact surface of THIS column. We only mutate this column (and only at/below its
+                // top), so reading it here still sees the pre-impact height. The highest solid voxel is
+                // `surf_vox − 1`; its centre is the draped datum (depth 0).
+                let Some(surf_vox) = world.surface_top_voxel(x, z) else {
+                    continue;
+                };
+                let top_solid = surf_vox - 1;
+                // Scan from the surface downward; excavate the contiguous run inside the bowl. Depth is
+                // measured from THIS column's surface (draped), not the flat impact plane. The lower bound
+                // is one past the deepest we EXCAVATE (`exc_depth`).
+                let lo = top_solid - (furrow.exc_depth.ceil() as i32) - 1;
+                for y in (lo..=top_solid).rev() {
+                    let vc =
+                        glam::DVec3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5) - c64;
+                    // Draped depth: metres below the column's top-solid voxel centre (0 at the surface,
+                    // growing downward), NOT the flat-datum `−(vc − site)·up`.
+                    let below = (top_solid - y) as f64;
+                    // Below the EXCAVATION depth the shock DISPLACES the matter rather than ejecting it
+                    // (`furrow.ejection` already fades to 0 there): it stays SOLID as the compacted crater
+                    // floor, a CLOSED surface — never a hole to see the sky through, and (crucially) never
+                    // a stack of loose at-rest grains born deep in the steep bowl that the stiff terrain
+                    // spring then detonates. The excavated grains are only the top `exc_depth` ejecta layer.
+                    if below > furrow.exc_depth {
+                        break; // deeper matter is displaced, not excavated — leave it solid
+                    }
+                    let rel = vc - furrow.site;
+                    // Horizontal membership uses the world position; depth uses the draped `below`.
+                    if !furrow.contains(rel.dot(furrow.t), rel.dot(furrow.b), below) {
+                        break; // past the bowl floor (below only grows deeper) — done with this column
+                    }
                     if self.particles.len() >= self.max_particles {
                         break;
-                    }
-                    let (x, y, z) = (cx + dx, cy + dy, cz + dz);
-                    // Voxel centre in CENTERED world coords (f64, the frame the furrow lives in).
-                    let vc = glam::DVec3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5) - c64;
-                    let below = -(vc - furrow.site).dot(up); // depth beneath the surface plane
-                    if !furrow.contains_point(vc, below) {
-                        continue;
                     }
                     let Some(mat) = world.material_at(x, y, z) else {
                         continue;
@@ -376,6 +420,39 @@ impl MatterSim {
                         temp_k: REF_TEMP_K,
                         resting_frames: 0,
                     });
+                }
+            }
+        }
+        // SIT EVERY GRAIN ON THE COLLISION SURFACE (resolved↔bulk reconciliation, docs/28). The GPU debris
+        // step collides grains against the bilinear terrain heightfield (`particle_step.wgsl::terrain_h`,
+        // mirrored by `World::surface_height_bilinear`). A grain born at its voxel centre sits BELOW that
+        // bilinear surface wherever a neighbouring column is taller — the crater's own steep walls, and the
+        // draped floor's copy of the terrain relief. The terrain penalty is a STIFF spring (`√c_stiffness`
+        // ≈ 707), so a born-buried grain stores `½·k·penetration²` of spring PE that energy conservation
+        // MUST convert to launch velocity ≈ 707·penetration — even 0.3 m ⇒ ~200 m/s. That, not the tame
+        // ~18 m/s ejection, is the debris storm (measured: km-scale spread). The honest fix is the task's:
+        // materialize grains AT/ABOVE the collision surface, never below it. Per column we lift the WHOLE
+        // grain stack UNIFORMLY (preserving the 1 m spacing ⇒ no self-overlap, no injected contact energy)
+        // just enough that its LOWEST grain rests exactly on the bilinear surface (penetration 0). The lift
+        // is ≤ the local heightfield step (~1–2 m), adding only a few metres of settling PE — negligible and
+        // LOCAL, versus the km/s spring launch it removes. Matter is still conserved (1 grain per voxel).
+        if self.particles.len() > start {
+            const PART_HALF: f32 = 0.5; // DEBRIS_PART_HALF (lib.rs) — a grain's collision half-extent
+            // Per-column lift = how far the column's lowest grain sits below the bilinear collision surface.
+            let mut lift: std::collections::HashMap<(i32, i32), f32> = std::collections::HashMap::new();
+            for p in &self.particles[start..] {
+                let key = ((p.pos.x + center.x) as i32, (p.pos.z + center.z) as i32);
+                let surf = world.surface_height_bilinear(p.pos);
+                let pen = surf - (p.pos.y - PART_HALF); // >0 ⇒ this grain is buried below the surface
+                let e = lift.entry(key).or_insert(0.0);
+                *e = e.max(pen);
+            }
+            for p in &mut self.particles[start..] {
+                let key = ((p.pos.x + center.x) as i32, (p.pos.z + center.z) as i32);
+                if let Some(&d) = lift.get(&key) {
+                    if d > 0.0 {
+                        p.pos.y += d; // lift the whole column so its lowest grain rests ON the surface
+                    }
                 }
             }
         }
@@ -1088,6 +1165,16 @@ mod tests {
         let v_impact = glam::DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0;
         let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.3, 8.0, 9.88);
 
+        // Pre-impact surface top of every column (centered), so we can assert each grain came from at/below
+        // its OWN column's surface — the honest invariant now the crater is DRAPED on the local relief
+        // (a grain excavated from a hill legitimately sits above the patch-CENTRE surface `surf`).
+        let pre_top: Vec<i32> = (0..(w.w * w.d))
+            .map(|i| {
+                w.surface_top_voxel((i % w.w) as i32, (i / w.w) as i32)
+                    .unwrap_or(-1)
+            })
+            .collect();
+
         let mut sim = MatterSim::new(200_000);
         // A 1000 kg Fe-Ni meteor → the impact-energy cap (docs/28); its ½·m·v² bounds the ejecta KE.
         let impactor_mass = 1_000.0;
@@ -1097,9 +1184,25 @@ mod tests {
         // Matter conserved: the world lost exactly n voxels, now held as n grains.
         assert_eq!(w.solid_count() + sim.particle_count(), before);
 
-        // Every grain sits at its own former voxel centre and at/below the local surface (below the plane).
+        // Every grain sits ON — never BELOW — the post-excavation collision surface (the birth-time
+        // reconciliation lift in `materialize_furrow`): penetration ≤ ~one grain radius, so the stiff
+        // terrain spring can't detonate it. And it stays within the local terrain envelope (its own or a
+        // neighbouring column's pre-impact surface — the lift only nudges it up onto the bilinear surface,
+        // never up out of the ground it came from).
+        const PART_HALF: f32 = 0.5;
         for p in &sim.particles {
-            assert!(p.pos.y <= surf + 1e-3, "grain above the surface: y={}", p.pos.y);
+            let (vx, vz) = ((p.pos.x + c.x) as usize, (p.pos.z + c.z) as usize);
+            let col_surf = pre_top[vz * w.w + vx] as f32 - c.y; // centered surface of this grain's column
+            let pen = w.surface_height_bilinear(p.pos) - (p.pos.y - PART_HALF);
+            assert!(
+                pen <= PART_HALF + 0.75,
+                "grain buried below the collision surface (pen={pen:.2}) — the terrain spring would launch it"
+            );
+            assert!(
+                p.pos.y <= col_surf + 2.5,
+                "grain lifted out of the terrain envelope: y={} col_surf={col_surf}",
+                p.pos.y
+            );
         }
         // OBLIQUE: elongated downrange (+x, site.x = 0), centroid pushed downrange of contact.
         let along: Vec<f32> = sim.particles.iter().map(|p| p.pos.x).collect();
@@ -1229,6 +1332,97 @@ mod tests {
             "the 1000 kg meteor's raw ejecta KE {raw_ke:.3e} J is within its impact energy {e_1000kg:.3e} J \
              (ratio {:.3}) — the f=1 cap does not bind for it",
             raw_ke / e_1000kg
+        );
+    }
+
+    #[test]
+    fn excavation_lowers_the_bulk_collision_surface_at_the_crater() {
+        // THE STORM'S SOURCE (docs/28 terrain meteor). A meteor materializes excavated voxels into grains
+        // at their ORIGINAL positions (below the pre-impact surface). The GPU debris step collides those
+        // grains against the terrain surface via a per-column heightfield. If that surface still reports
+        // the PRE-impact height over the crater, a grain excavated from depth d sees penetration ≈ d and
+        // the k·penetration spring launches it at km/s — the debris storm.
+        //
+        // The heightfield the GPU reads is `surface_top_voxel` (`upload_heightfield_to_gpu` in lib.rs),
+        // which reads live voxels — so after `materialize_furrow` removes the crater voxels it MUST report
+        // the lowered crater floor. This test proves the resolved-vs-bulk surface tracks the excavation:
+        // the voxel-derived surface (`surface_height_bilinear`, which mirrors `particle_step.wgsl::terrain_h`)
+        // drops by the excavated depth over the crater column.
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let c = w.center();
+        let (px, pz) = (c.x as i32, c.z as i32);
+        let surf_top_before = w.surface_top_voxel(px, pz).unwrap();
+        let surf_before = surf_top_before as f32 - c.y; // centered surface height at the column
+        // A vertical strike at the patch centre → a symmetric bowl straight down the column.
+        let site = glam::DVec3::new(0.0, surf_before as f64 - 0.5, 0.0);
+        let furrow = crate::impact::Furrow::new(
+            site,
+            glam::DVec3::Y,
+            -glam::DVec3::Y * 17_000.0,
+            0.3,
+            8.0,
+            9.88,
+        );
+        let mut sim = MatterSim::new(200_000);
+        let n = sim.materialize_furrow(&mut w, &mats, &furrow, Vec3::ZERO, 1_000.0);
+        assert!(n > 0, "the furrow excavates terrain into grains");
+
+        // The centre column lost solid voxels from the top down → its surface top DROPPED.
+        let surf_top_after = w.surface_top_voxel(px, pz).unwrap();
+        let excavated = surf_top_before - surf_top_after;
+        assert!(
+            excavated > 0,
+            "the crater column's surface top must drop (before {surf_top_before}, after {surf_top_after})"
+        );
+        // The bilinear collision surface (what the GPU debris step collides against — mirrored by
+        // `surface_height_bilinear`) reports the LOWERED crater floor, not the pre-impact surface.
+        let surf_after = w.surface_height_bilinear(Vec3::new(0.0, 0.0, 0.0));
+        assert!(
+            surf_after < surf_before - 0.5,
+            "collision surface must drop to the crater floor: before {surf_before:.2} after {surf_after:.2}"
+        );
+    }
+
+    #[test]
+    fn no_excavated_grain_is_deep_buried_against_the_collision_surface() {
+        // THE STORM'S ABSENCE, at its source. Immediately after `materialize_furrow`, EVERY excavated
+        // grain must sit at/above the UPDATED collision surface — penetration ≤ ~one grain radius — so the
+        // GPU terrain penalty spring (`f = k·penetration`) gives it NO explosive kick. A grain excavated
+        // from depth d whose column surface dropped to the crater floor is now ABOVE that floor (its
+        // neighbours below it were removed too), so it is not deep-buried. This is the invariant that keeps
+        // the ejecta a LOCAL blanket instead of a km-scale storm.
+        const PART_HALF: f32 = 0.5; // DEBRIS_PART_HALF (lib.rs) — a grain's collision half-extent
+        let mats = materials::load();
+        let mut w = world::generate(&mats);
+        let c = w.center();
+        let surf = w.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+        // Oblique strike (the default meteor is oblique) — the worst case for surface tracking.
+        let site = glam::DVec3::new(0.0, surf as f64 - 0.5, 0.0);
+        let v_impact = glam::DVec3::new(1.0, -1.0, 0.0).normalize() * 17_000.0;
+        let furrow = crate::impact::Furrow::new(site, glam::DVec3::Y, v_impact, 0.31, 12.0, 9.88);
+        let mut sim = MatterSim::new(200_000);
+        let n = sim.materialize_furrow(&mut w, &mats, &furrow, Vec3::ZERO, 1_000.0);
+        assert!(n > 0);
+        // The meteor pipeline (lib.rs::meteor) also converts the STEEP crater walls the furrow leaves into
+        // grains (`materialize_steep_terrain`) — a 1-voxel-wide rim-to-floor cliff is exactly the steep
+        // face a bilinear heightfield can't represent conservatively. Mirror that here so the collision
+        // surface the grains see is the same one the real scene builds.
+        sim.materialize_steep_terrain(&mut w, &mats, Vec3::new(0.0, surf, 0.0), 24.0, 3);
+
+        // For every grain, penetration against the post-excavation bilinear surface (the SAME surface the
+        // GPU debris step collides against) must not exceed one grain radius + a sub-voxel slack.
+        let mut worst = f32::MIN;
+        for p in &sim.particles {
+            let surf_y = w.surface_height_bilinear(p.pos);
+            let penetration = surf_y - (p.pos.y - PART_HALF);
+            worst = worst.max(penetration);
+        }
+        assert!(
+            worst <= PART_HALF + 0.75,
+            "an excavated grain is deep-buried against the collision surface (worst penetration {worst:.2} m) \
+             — the terrain penalty spring will launch it (the debris storm). The bulk surface is not \
+             tracking the excavation."
         );
     }
 
