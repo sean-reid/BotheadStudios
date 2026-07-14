@@ -194,6 +194,69 @@ pub fn damping_for_restitution(e: f64, stiffness: f64) -> f64 {
     2.0 * zeta * stiffness.sqrt()
 }
 
+/// Result of resolving one grain against the terrain: the corrected velocity and the position delta.
+#[derive(Clone, Copy, Debug)]
+pub struct TerrainContact {
+    /// Velocity after the constraint (into-surface component removed + Coulomb friction). Contact can
+    /// only ever REMOVE kinetic energy from this — it never adds.
+    pub vel: DVec3,
+    /// Position correction along the surface normal (velocity-decoupled — writes no velocity, so it
+    /// injects no kinetic energy however far the surface moved). Zero if not in contact.
+    pub dpos: DVec3,
+    /// True iff the grain was penetrating the surface (in contact).
+    pub hit: bool,
+}
+
+/// NON-INJECTING terrain contact — the native **physics of record** for `particle_step.wgsl`'s
+/// `terrain_resolve` (kept in sync by construction). The terrain is a per-column heightfield summarising
+/// solid matter; a grain below the bilinear surface is in contact. Contact is resolved as a CONSTRAINT,
+/// never a penalty spring, so it can NEVER increase a grain's kinetic energy — the fix for the settling
+/// storm (a stiff penalty spring `F = k·pen` stored ½k·pen² and RELEASED it as launch KE ≈ √k·pen
+/// whenever penetration appeared from a SURFACE change, e.g. a de-resolution deposit stepping a column up
+/// under a resting neighbour). Given the grain state, the surface height `h` and its horizontal gradient
+/// `(dhdx, dhdz)` at the grain, the grain half-extent, μ, the per-substep projection cap `max_corr`, and
+/// the `headroom` to the nearest grain resting above (∞ for open sky), it returns:
+///   1. NORMAL — the into-surface velocity is removed (clamped to ≥ 0), impulse `jn = max(0, −v·n)`.
+///      Dissipative only; it also SUPPORTS a resting grain (the per-substep gravity increment is zeroed).
+///   2. FRICTION — Coulomb, bounded by `μ·jn` (a harder-pressed grain gets more friction). Dissipative.
+///   3. POSITION — a velocity-decoupled projection out of the surface, bounded by `max_corr` AND by the
+///      `headroom` above (so a buried grain is never rammed up through the grains resting on it). No KE.
+pub fn terrain_contact_resolve(
+    pos: DVec3,
+    vel: DVec3,
+    h: f64,
+    dhdx: f64,
+    dhdz: f64,
+    part_half: f64,
+    mu: f64,
+    max_corr: f64,
+    headroom: f64,
+) -> TerrainContact {
+    let penetration = h - (pos.y - part_half);
+    if penetration <= 0.0 {
+        return TerrainContact { vel, dpos: DVec3::ZERO, hit: false };
+    }
+    let n = DVec3::new(-dhdx, 1.0, -dhdz).normalize(); // outward surface normal (continuous, never flips)
+    let mut v = vel;
+    // 1. Normal: remove into-surface velocity.
+    let vn = v.dot(n);
+    let mut jn = 0.0;
+    if vn < 0.0 {
+        jn = -vn;
+        v += jn * n; // clamp into-surface component to 0 — dissipative, never a rebound
+    }
+    // 2. Friction: oppose tangential slip, bounded by μ·jn (kinetic Coulomb). Can only halt slip.
+    let v_t = v - v.dot(n) * n;
+    let vt_mag = v_t.length();
+    if vt_mag > 1.0e-9 {
+        let dv = (mu * jn).min(vt_mag);
+        v -= (v_t / vt_mag) * dv;
+    }
+    // 3. Position projection out of the surface — velocity-decoupled, bounded (stack-safe).
+    let dpos = penetration.min(max_corr).min(headroom) * n;
+    TerrainContact { vel: v, dpos, hit: true }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +490,87 @@ mod tests {
             vi.length() < 0.1 && vj.length() < 0.1,
             "both settle to rest"
         );
+    }
+
+    // ── Non-injecting terrain contact (the settling-storm fix) — native mirror of the GPU
+    // `terrain_resolve`, verified on hardware in `tools/gpu-verify` (scenes K/L/N/O/I).
+
+    #[test]
+    fn terrain_surface_step_injects_no_kinetic_energy() {
+        // A grain RESTING on flat terrain (surface height h0) has the surface step UP by Δ beneath it —
+        // exactly what a de-resolution deposit does to a neighbour's bilinear surface. The OLD penalty
+        // spring released ½k·Δ² as launch KE (≈√k·Δ ≈ 707·Δ m/s for k=5e5). The constraint must add ZERO
+        // kinetic energy: the grain is reconciled to the risen surface by a velocity-decoupled projection.
+        let part_half = 0.5;
+        for &d in &[0.1f64, 0.25, 0.5, 1.0, 2.5] {
+            // Grain at rest with its base exactly on the old surface (h0 = 0), velocity ~0.
+            let pos = DVec3::new(0.0, part_half, 0.0);
+            let vel = DVec3::ZERO;
+            // Surface steps up to h = Δ under the (stationary) grain — flat, so zero gradient.
+            let r = terrain_contact_resolve(pos, vel, d, 0.0, 0.0, part_half, 0.6, 0.01, f64::INFINITY);
+            assert!(r.hit, "penetrating after the surface stepped up");
+            let ke = 0.5 * r.vel.length_squared();
+            assert!(
+                ke < 1.0e-9,
+                "surface step Δ={d} injected KE {ke:.3e} (a spring would give ½·(707·Δ)² ≈ {:.0})",
+                0.5 * (707.0 * d as f64).powi(2)
+            );
+            // And the projection only ever pushes OUTWARD (never deeper), and never writes velocity.
+            assert!(r.dpos.y > 0.0, "projection is outward (up)");
+        }
+    }
+
+    #[test]
+    fn terrain_supports_a_resting_grain_without_launch_or_sink() {
+        // A grain pressed into the surface by the per-substep gravity increment: the constraint zeroes the
+        // into-surface velocity (support — it does not sink) and does not launch it (no rebound).
+        let part_half = 0.5;
+        let dt = 1.0 / 960.0;
+        let g = 9.81;
+        // Grain sitting a hair below the surface (as a resting grain does — gravity pulls it down each
+        // substep) with the downward velocity gravity added this substep. h=0.
+        let pos = DVec3::new(0.0, part_half - g * dt * dt, 0.0);
+        let vel = DVec3::new(0.0, -g * dt, 0.0);
+        let r = terrain_contact_resolve(pos, vel, 0.0, 0.0, 0.0, part_half, 0.6, 0.01, f64::INFINITY);
+        assert!(r.hit, "a resting grain is in contact (slightly penetrating)");
+        assert!(r.vel.y >= 0.0, "into-surface velocity removed (supported, y-vel {:.4})", r.vel.y);
+        assert!(r.vel.y < 1.0e-9, "not launched upward (y-vel {:.4})", r.vel.y);
+        assert!(r.dpos.y > 0.0, "projected back up to the surface (does not sink)");
+    }
+
+    #[test]
+    fn terrain_contact_energy_is_monotone_non_increasing_on_a_drop() {
+        // Integrate a grain FALLING onto flat terrain over many substeps (gravity + the constraint) and
+        // assert total mechanical energy (KE + g·y) only ever DECREASES — the constraint never manufactures
+        // energy. This is the native analogue of gpu-verify scene I (the fudge detector).
+        let part_half = 0.5;
+        let dt = 1.0 / 960.0;
+        let g = 9.81;
+        let mut pos = DVec3::new(0.0, 8.0, 0.0); // released from 8 m up
+        let mut vel = DVec3::ZERO;
+        let energy = |p: DVec3, v: DVec3| g * p.y + 0.5 * v.length_squared();
+        let mut e_prev = energy(pos, vel);
+        for _ in 0..4000 {
+            // gravity
+            vel.y -= g * dt;
+            pos += vel * dt;
+            // terrain constraint (flat surface at y=0)
+            let r = terrain_contact_resolve(pos, vel, 0.0, 0.0, 0.0, part_half, 0.6, 0.01, f64::INFINITY);
+            if r.hit {
+                vel = r.vel;
+                pos += r.dpos;
+            }
+            let e = energy(pos, vel);
+            // Non-increase, with a tiny slack for the projection's PE bookkeeping (the projection lifts the
+            // grain to the surface it fell to — never above where it fell from, so no net gain) and f64 noise.
+            assert!(
+                e <= e_prev + 1.0e-6,
+                "terrain contact injected energy: {e_prev:.6} → {e:.6}"
+            );
+            e_prev = e;
+        }
+        // It came to rest supported at the surface (base ~0 ⇒ centre ~part_half), not sunk, not launched.
+        assert!((pos.y - part_half).abs() < 0.05, "rests at the surface (y {:.4})", pos.y);
+        assert!(vel.length() < 0.05, "settled (speed {:.4})", vel.length());
     }
 }

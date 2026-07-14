@@ -70,7 +70,7 @@ struct Particle {
 // exactly (static terrain has v_neighbor = 0, so its momentum is correctly absorbed). 64 bytes (4 rows).
 struct Accum {
     force  : vec3<f32>, // Σ contact force (grains + terrain)
-    _p0    : f32,
+    headroom : f32,     // free gap (m) to the nearest grain resting above — caps the terrain projection
     s_diag : vec3<f32>, // Sxx, Syy, Szz
     _p1    : f32,
     s_off  : vec3<f32>, // Sxy, Sxz, Syz
@@ -112,7 +112,7 @@ fn hash_cell(c : vec3<i32>) -> u32 {
 // to temperature yet (flagged) — matters for phase change (steam/boiling) later. No force cap (a cap
 // is a fudge); stability comes from the implicit integrator, not a clamp.
 fn zero_accum() -> Accum {
-    return Accum(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0);
+    return Accum(vec3<f32>(0.0), 1.0e30, vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0);
 }
 // One contact's contribution to the implicit stabilization matrix along normal n. The coefficient g is
 // the full backward-Euler Jacobian of a spring-DAMPER contact projected onto n: g = dt²·k + dt·c. The
@@ -203,6 +203,15 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
     let vi = particles[i].vel;
     let base = cell_of(pi);
     var acc = zero_accum();
+    // HEADROOM: the free gap (m) to the nearest grain resting ABOVE this one, measured along the terrain
+    // surface normal. The terrain position projection (cs_integrate) is capped by this so it can push a
+    // buried grain up only into EMPTY space, never THROUGH the grain resting on it — the honest fix for
+    // the stack-ram. Without it, projecting a grain the surface rose under drives it into its stack and
+    // the (energy-conserving) grain-grain contact launches the pile. A grain with something resting on it
+    // (headroom ≈ 0) instead stays put — transiently a little embedded — until it de-resolves or the pile
+    // above shifts: the ground can't teleport a rigid stack upward. 1e30 ⇒ open sky above.
+    let tn = normalize(vec3<f32>(-terrain_surface(pi).y, 1.0, -terrain_surface(pi).z));
+    var headroom = 1.0e30;
     for (var dz = -1; dz <= 1; dz = dz + 1) {
         for (var dy = -1; dy <= 1; dy = dy + 1) {
             for (var dx = -1; dx <= 1; dx = dx + 1) {
@@ -211,19 +220,28 @@ fn cs_forces(@builtin(global_invocation_id) gid : vec3<u32>) {
                 for (var s = 0u; s < n; s = s + 1u) {
                     let j = grid_bucket[h * P.bucket_k + s];
                     if (j == i) { continue; }
-                    let c = contact_accel(pi, vi, particles[j].offset, particles[j].vel);
+                    let pj = particles[j].offset;
+                    let c = contact_accel(pi, vi, pj, particles[j].vel);
                     acc.force = acc.force + c.force;
                     acc.s_diag = acc.s_diag + c.s_diag;
                     acc.s_off = acc.s_off + c.s_off;
                     acc.sv_nbr = acc.sv_nbr + c.sv_nbr;
+                    // Is j resting above i (ahead along the outward normal)? If so, the free gap before
+                    // pushing i into it is (distance − diameter), clamped ≥ 0. Conservative (uses the full
+                    // centre distance), so it never lets the projection open a new overlap.
+                    let dj = pj - pi;
+                    if (dot(dj, tn) > 0.0) {
+                        headroom = min(headroom, max(length(dj) - 2.0 * P.c_radius, 0.0));
+                    }
                 }
             }
         }
     }
-    let t = terrain_accel(pi, vi); // the terrain is matter too — same contact law
-    acc.force = acc.force + t.force;
-    acc.s_diag = acc.s_diag + t.s_diag;
-    acc.s_off = acc.s_off + t.s_off;
+    // Terrain contact is NOT a force here. It is resolved as a non-injecting constraint (velocity clamp
+    // + velocity-decoupled position projection) AFTER the grain-grain velocity solve, in cs_integrate —
+    // see `terrain_resolve`. A penalty spring in the force sum was the settling-storm fudge (it stored
+    // penetration and released it as launch KE). So this accumulation is grain-grain only.
+    acc.headroom = headroom;
     forces[i] = acc;
 }
 
@@ -236,7 +254,7 @@ fn terrain_top(cx : i32, cz : i32) -> f32 {
     return f32(heightfield[u32(z) * P.world_w + u32(x)]) - P.center.y - 0.5;
 }
 
-// The smooth (bilinear) terrain surface height at a position — the SAME surface `terrain_accel` collides
+// The smooth (bilinear) terrain surface height at a position — the SAME surface `terrain_resolve` collides
 // against, factored out so the integrate step can tell whether a grain is grounded (for the settle
 // counter). Clamped to the patch edge exactly like `terrain_top`.
 fn terrain_h(pos : vec3<f32>) -> f32 {
@@ -253,52 +271,93 @@ fn terrain_h(pos : vec3<f32>) -> f32 {
     return mix(mix(h00, h10, fx), mix(h01, h11, fx), fz);
 }
 
-// Terrain contact as a CONSERVATIVE penalty (docs/24 Path B — the honest, Newtonian way). The terrain is
-// solid matter summarised as a per-column heightfield; a grain that sinks below the surface feels a
-// repulsive force. The OLD min-translation normal FLIPPED between up and sideways at voxel edges — a
-// discontinuous force that is NOT the gradient of any potential, so it pumped energy (the crater "free
-// energy", and it was masked by the `drag` fudge). Here we build a SMOOTH surface instead: bilinear-
-// interpolate the four surrounding column tops into a continuous height h(x,z), and make the penalty the
-// EXACT gradient of U = ½·k·penetration²  ⇒  F = k·penetration·(−∂h/∂x, 1, −∂h/∂z). That is −∇U by
-// construction, so it CONSERVES energy (no flip, no injection). Normal damping is implicit (the tensor);
-// Coulomb friction is explicit, clamped so it can only halt slip. Returns an Accum.
-fn terrain_accel(pos : vec3<f32>, vel : vec3<f32>) -> Accum {
-    var acc = zero_accum();
+// The bilinear terrain surface height AND its horizontal gradient at a position. `xyz` unused; returns
+// vec3(h, ∂h/∂x, ∂h/∂z). The surface is the four surrounding column tops bilinearly interpolated (the
+// SAME field `terrain_h` samples) — a continuous height, so the outward normal (−∂h/∂x, 1, −∂h/∂z) never
+// flips at voxel edges.
+fn terrain_surface(pos : vec3<f32>) -> vec3<f32> {
     let vx = pos.x + P.center.x;
     let vz = pos.z + P.center.z;
     let cx = i32(floor(vx));
     let cz = i32(floor(vz));
-    // Bilinear surface over the cell (cx,cz)–(cx+1,cz+1) from the four corner column tops.
     let h00 = terrain_top(cx, cz);
     let h10 = terrain_top(cx + 1, cz);
     let h01 = terrain_top(cx, cz + 1);
     let h11 = terrain_top(cx + 1, cz + 1);
     let fx = vx - f32(cx);
     let fz = vz - f32(cz);
-    let h = mix(mix(h00, h10, fx), mix(h01, h11, fx), fz); // smooth surface height
-    let dhdx = mix(h10 - h00, h11 - h01, fz);              // ∂h/∂x
-    let dhdz = mix(h01 - h00, h11 - h10, fx);              // ∂h/∂z
-    let bottom = pos.y - P.part_half;
-    let penetration = h - bottom;
-    if (penetration <= 0.0) { return acc; } // above the smooth surface — no contact
+    let h = mix(mix(h00, h10, fx), mix(h01, h11, fx), fz);
+    let dhdx = mix(h10 - h00, h11 - h01, fz);
+    let dhdz = mix(h01 - h00, h11 - h10, fx);
+    return vec3<f32>(h, dhdx, dhdz);
+}
 
-    // F = −∇U = k·penetration·grad, grad = (−∂h/∂x, 1, −∂h/∂z). Conservative by construction.
-    let grad = vec3<f32>(-dhdx, 1.0, -dhdz);
-    let n = normalize(grad);
-    let f_mag = P.c_stiffness * penetration;      // scalar spring magnitude along +y-of-U
-    let normal_load = f_mag * length(grad);       // |F|, the real normal load for Coulomb friction
-    let vn = dot(vel, n);
-    let v_t = vel - n * vn;
-    let vt_mag = length(v_t);
-    var a_t = vec3<f32>(0.0);
-    if (vt_mag > 1.0e-9) {
-        // Clamped at vt_mag/dt so friction can only halt the slip, never reverse it (see contact_accel).
-        let fmag = min(min(P.c_tangent_damp * vt_mag, P.c_friction * normal_load), vt_mag / P.dt);
-        a_t = -(v_t / vt_mag) * fmag;
+// Per-substep bound on the GEOMETRIC position projection out of the terrain (metres). This is a solver
+// RELAXATION rate, NOT a physical dial: the rest state (penetration → 0) is independent of it; it only
+// caps how fast residual penetration is walked out. It exists so a surface that jumps a whole voxel under
+// a STACK (a de-resolution deposit, or a grain buried by a wall) relaxes over several substeps instead of
+// being teleported out in one — a one-shot teleport would open a metre-scale overlap with the grains
+// resting ABOVE the buried one and re-launch them through the (stiff) grain-grain contact. Chosen so the
+// induced per-substep grain-grain overlap stays well inside the settling regime (verified insensitive
+// across [0.002, 0.05] m in gpu-verify's SURFACE-STEP sweep — a wide stable basin, not a tuned edge).
+const MAX_SURFACE_CORRECTION : f32 = 0.01;
+
+// Terrain contact as a NON-INJECTING constraint (the honest fix for the settling storm). The terrain is
+// solid matter summarised as a per-column heightfield. The OLD law was a one-sided stiff penalty spring
+// F = k·penetration: fine for a grain pressing DOWN under its own weight, but whenever penetration
+// appeared from a change in the SURFACE (a de-resolution deposit stepping the column up under a resting
+// neighbour, or a grain shoved against a steep wall) it released ½k·pen² as launch KE ≈ √k·pen ≈ 707·pen
+// m/s — the deposit-/wall-kick that drove the km-scale settling storm. A spring STORES penetration and
+// releases it; that is the fudge.
+//
+// Here contact is resolved at the CONSTRAINT level so it can NEVER increase kinetic energy:
+//   1. VELOCITY — remove only the component of velocity going INTO the surface (vn<0 ⇒ set vn:=0). This
+//      is the exact normal-constraint impulse Jn = max(0,−vn) ≥ 0; it can only REMOVE kinetic energy
+//      (→ heat), never add it, whatever the penetration depth. It also SUPPORTS a resting grain: the
+//      per-substep gravity increment (−g·dt into the surface) is zeroed every step, so the grain rests
+//      on the surface and on slopes rather than sinking through.
+//   2. FRICTION — Coulomb kinetic friction opposing tangential slip, bounded by μ·Jn (the normal impulse
+//      just applied). A grain pressed harder — by a faster fall, or by the weight of the pile above it
+//      transmitted as downward velocity — gets proportionally more friction: the honest μ·N law, purely
+//      dissipative, no tuned coefficient.
+//   3. POSITION — reconcile the residual penetration by a GEOMETRIC projection along the surface normal
+//      that writes NO velocity. Moving a grain to the surface without touching its velocity injects zero
+//      KE regardless of how far the surface moved (it raises gravitational PE by exactly the work the
+//      ground did lifting it — real support, not a launch). Bounded by MAX_SURFACE_CORRECTION so it stays
+//      stack-safe. Returns the corrected velocity in .xyz-of-vel and the position delta.
+struct TerrainHit {
+    dvel : vec3<f32>, // velocity AFTER the constraint (into-surface removed + friction)
+    dpos : vec3<f32>, // position correction along the surface normal (bounded, no velocity written)
+    hit  : f32,       // 1.0 if in contact, else 0.0
+};
+fn terrain_resolve(pos : vec3<f32>, vel : vec3<f32>, headroom : f32) -> TerrainHit {
+    let s = terrain_surface(pos);
+    let penetration = s.x - (pos.y - P.part_half);
+    if (penetration <= 0.0) {
+        return TerrainHit(vel, vec3<f32>(0.0), 0.0);
     }
-    acc.force = f_mag * grad + a_t; // spring is the exact −∇U; friction is tangential
-    accum_tensor(&acc, n, THETA * THETA * P.dt * P.dt * P.c_stiffness + THETA * P.dt * P.c_normal_damp);
-    return acc;
+    let n = normalize(vec3<f32>(-s.y, 1.0, -s.z)); // outward surface normal (continuous, never flips)
+    var v = vel;
+    // 1. Normal: remove into-surface velocity. Jn = the impulse magnitude applied (≥ 0).
+    let vn = dot(v, n);
+    var jn = 0.0;
+    if (vn < 0.0) {
+        jn = -vn;
+        v = v + jn * n; // clamp the into-surface component to 0 — dissipative, never a rebound
+    }
+    // 2. Friction: oppose tangential slip, bounded by μ·Jn (kinetic Coulomb). Can only halt slip.
+    let v_t = v - dot(v, n) * n;
+    let vt_mag = length(v_t);
+    if (vt_mag > 1.0e-9) {
+        let dv = min(P.c_friction * jn, vt_mag);
+        v = v - (v_t / vt_mag) * dv;
+    }
+    // 3. Position projection out of the surface — velocity-decoupled, bounded per substep AND by the
+    // headroom to the grain resting above (so a buried grain is never rammed up into its stack; the
+    // energy-conserving grain-grain contact would otherwise launch the pile). Velocity-decoupled ⇒ zero
+    // KE injected regardless of how far the surface moved.
+    let dpos = min(min(penetration, MAX_SURFACE_CORRECTION), headroom) * n;
+    return TerrainHit(v, dpos, 1.0);
 }
 
 // --- render expansion: 1 physics grain → 8 sub-cubes (docs/23) ------------------------------------
@@ -367,14 +426,26 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     let c12 = m01 * m02 - m00 * m12;
     let c22 = m00 * m11 - m01 * m01;
     let inv_det = 1.0 / (m00 * c00 + m01 * c01 + m02 * c02);
-    let vel = vec3<f32>(
+    var vel = vec3<f32>(
         (c00 * rhs.x + c01 * rhs.y + c02 * rhs.z) * inv_det,
         (c01 * rhs.x + c11 * rhs.y + c12 * rhs.z) * inv_det,
         (c02 * rhs.x + c12 * rhs.y + c22 * rhs.z) * inv_det,
     ) * P.drag;
     // Trapezoidal position update: pos += (dt/2)(v_old + v_new) — consistent with the midpoint velocity
     // solve above (a symplectic-Euler pos += v_new·dt would break the energy conservation the solve buys).
-    let pos = pt.offset + (pt.vel + vel) * (0.5 * P.dt);
+    var pos = pt.offset + (pt.vel + vel) * (0.5 * P.dt);
+
+    // TERRAIN CONTACT (non-injecting constraint — the settling-storm fix). Grain-grain contact is the
+    // momentum-conserving implicit solve above; the terrain is an infinite-mass boundary resolved AFTER
+    // it, by a velocity clamp (removes only into-surface velocity ⇒ never adds KE, and supports a resting
+    // grain) plus a velocity-decoupled geometric position projection (reconciles penetration without
+    // writing velocity ⇒ still no KE, even when the SURFACE jumped under the grain). No penalty spring,
+    // so no store-and-release launch. See `terrain_resolve`.
+    let th = terrain_resolve(pos, vel, acc.headroom);
+    if (th.hit > 0.5) {
+        vel = th.dvel;
+        pos = pos + th.dpos;
+    }
 
     // NOTE on energy: the contact damping + friction here REMOVE kinetic energy. Physically that energy
     // is not destroyed — it becomes HEAT in the grains (→ temp_k) and radiates to space. We drop it for

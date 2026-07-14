@@ -157,6 +157,13 @@ struct Gpu {
 }
 
 fn init_gpu() -> Gpu {
+    init_gpu_src(SHADER)
+}
+
+/// Build the pipelines from an ARBITRARY shader source (not just the on-disk SHADER). Used by the
+/// MAX_SURFACE_CORRECTION robustness sweep, which recompiles the real shader with the constant edited to
+/// prove the storm-fix outcome is insensitive to it (a relaxation rate, not a tuned edge).
+fn init_gpu_src(shader_src: &str) -> Gpu {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..Default::default()
@@ -181,7 +188,7 @@ fn init_gpu() -> Gpu {
 
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("particle_step"),
-        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        source: wgpu::ShaderSource::Wgsl(shader_src.into()),
     });
 
     let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
@@ -1061,55 +1068,50 @@ fn main() {
         failures += !ok as i32;
     }
 
-    // Scene K: RESTITUTION (docs/24 Stage 1). Drop ONE grain from height h onto a flat floor; it rebounds
-    // to ≈ e²·h. We DERIVE the normal damping from a target coefficient of restitution (the same
-    // `damping_for_restitution` the engine uses) and MEASURE the bounce end-to-end on hardware — the
-    // θ-solver adds a little numerical dissipation, so the realized e is somewhat below the material's e;
-    // what MUST hold is that bounce is real (nonzero) and TRACKS the material (bouncier ⇒ higher rebound).
-    // Backward-Euler gave e≈0 for everything (the rebound was dissipated); this is the Stage 1 fix.
+    // Scene K: TERRAIN CONTACT IS NON-INJECTING + SUPPORTIVE (the settling-storm fix). Terrain contact WAS
+    // a one-sided penalty spring F = k·penetration: it STORED ½k·pen² and RELEASED it as launch KE
+    // (≈√k·pen ≈ 707·pen m/s) whenever penetration appeared from a SURFACE change — a de-resolution deposit
+    // stepping a column up under a resting grain, or a grain shoved against a wall. That drove the km-scale
+    // settling storm. Terrain contact is now a CONSTRAINT: a velocity clamp (remove into-surface velocity —
+    // can only REMOVE KE) + a velocity-decoupled geometric position projection. A DELIBERATE consequence:
+    // the terrain boundary is PERFECTLY INELASTIC (e = 0) — there is no stored spring energy to give back,
+    // so no bounce AND no launch (they are the SAME mechanism). Grain-GRAIN restitution, the dominant
+    // granular bounce, is unaffected (see F5 = 0.636). Restoring an elastic terrain bounce would need a
+    // resting-velocity threshold below which e→0 (else a resting grain hops on the per-substep gravity
+    // increment forever) — and that threshold is exactly the tuned/chaotic clamp this work rejected. So
+    // e = 0 terrain is the honest, robust choice. This scene guards BOTH halves of the constraint:
+    //   (a) SUPPORT — a grain dropped onto the ground settles AT the surface and stays (does not sink
+    //       through, does not launch), and
+    //   (b) NON-INJECTION — its rebound is ≈0 (the old spring flung it up), so terrain adds no KE.
     {
-        // Mirror crate::granular::damping_for_restitution: c = 2ζ√k, ζ = −ln e / √(π² + ln²e).
-        let damping_for_restitution = |e: f32| -> f32 {
-            let e = e.clamp(1.0e-3, 0.999);
-            let l = -e.ln();
-            let zeta = l / (std::f32::consts::PI.powi(2) + l * l).sqrt();
-            2.0 * zeta * C_STIFFNESS.sqrt()
-        };
-        let measure = |target_e: f32| -> f32 {
-            let mut scene = Scene::flat(8, 8, 4, 0.6);
-            scene.normal_damp = Some(damping_for_restitution(target_e));
-            let rest_y = PART_HALF; // grain rests with centre at floor+part_half → centered y = 0.5
-            let drop_h = 10.0f32;
-            let p0 = Particle::at(0.0, rest_y + drop_h, 0.0); // released from rest, high up
-            // Sample the trajectory across short runs (1 grain — cheap): the rebound apex is the highest
-            // point reached AFTER the grain first touches the floor.
-            let mut apex_after = 0.0f32;
-            let mut contacted = false;
-            for f in (12..384).step_by(8) {
-                let out = simulate(&gpu, vec![p0], f, &scene);
-                let h = out[0].offset[1];
-                if h < rest_y + 0.3 {
-                    contacted = true;
-                }
-                if contacted {
-                    apex_after = apex_after.max(h);
-                }
+        let scene = Scene::flat(8, 8, 4, 0.6); // center_y = 4 ⇒ flat surface at centered y = −0.5
+        let rest_y = PART_HALF;
+        let drop_h = 10.0f32;
+        let p0 = Particle::at(0.0, rest_y + drop_h, 0.0);
+        // Rebound apex reached AFTER first contact (a spring would fling it back up; the constraint must not).
+        let mut apex_after = f32::MIN;
+        let mut contacted = false;
+        for f in (12..300).step_by(6) {
+            let o = simulate(&gpu, vec![p0], f, &scene)[0];
+            if o.offset[1] < rest_y + 0.3 {
+                contacted = true;
             }
-            ((apex_after - rest_y).max(0.0) / drop_h).sqrt()
-        };
-        let e_dead = measure(0.2);
-        let e_mid = measure(0.5);
-        let e_bouncy = measure(0.9);
-        // Restitution is now REAL (backward-Euler gave 0 for everything) and MONOTONE in the material's e
-        // (non-decreasing — bouncier matter rebounds higher). It is deliberately MODEST: the stable
-        // θ-solver adds numerical dissipation that floors low-e (rock-like) matter to ≈0 bounce — a
-        // documented cost. That's fine BY DESIGN: at hypervelocity the crater ejecta are driven by VAPOR
-        // pressure (phase transition, docs/20/24), not elastic rebound — restitution only needs to be
-        // honest, not large. Verifies: bouncy matter bounces, and more-bouncy ≥ less-bouncy.
-        let ok = e_bouncy > 0.1 && e_bouncy >= e_mid && e_mid >= e_dead;
+            if contacted {
+                apex_after = apex_after.max(o.offset[1]);
+            }
+        }
+        let settled = simulate(&gpu, vec![p0], 500, &scene)[0];
+        let surf = -0.5f32; // flat terrain surface (centered)
+        let rest_base = settled.offset[1] - PART_HALF; // where the grain's underside came to rest
+        let rebound = (apex_after - surf).max(0.0); // height above the surface it bounced back to (want ~0)
+        let settled_speed =
+            (settled.vel[0].powi(2) + settled.vel[1].powi(2) + settled.vel[2].powi(2)).sqrt();
+        let ok = rebound < 0.6            // perfectly inelastic terrain — no launch (a spring flung it up)
+            && (rest_base - surf).abs() < 0.4 // supported: rests AT the surface (did not sink through)
+            && settled_speed < 0.05;      // came fully to rest
         println!(
-            "\nK restitution (measured e for material e = 0.2 / 0.5 / 0.9): {:.3} / {:.3} / {:.3}  (real + monotone)  {}",
-            e_dead, e_mid, e_bouncy, pass(ok)
+            "\nK terrain non-injecting + supportive: dropped {:.0} m, rebound {:.2} m above surface (want ~0),\n   settled base at {:.2} (surface {:.2}), speed {:.3} m/s  {}",
+            drop_h, rebound, rest_base, surf, settled_speed, pass(ok)
         );
         failures += !ok as i32;
     }
@@ -1195,6 +1197,116 @@ fn main() {
             centre_drop, rim_rise, max_height(&out) - block_top, e0, e1, mean_speed(&out), pass(ok)
         );
         failures += !ok as i32;
+    }
+
+    // Scene L: SURFACE-STEP NO-LAUNCH SWEEP (the core storm-fix assertion, on hardware). A grain rests on
+    // flat terrain; then the COLLISION SURFACE steps UP by Δ beneath it — exactly what a de-resolution
+    // deposit does to a resting NEIGHBOUR's bilinear surface. The step is applied by lowering center_y by Δ
+    // between two runs (surface height = heightfield − center_y − 0.5), which moves the surface under the
+    // already-settled grain WITHOUT changing its position — so any resulting motion is purely the contact's
+    // response to sudden surface-driven penetration. The OLD penalty spring released ½k·Δ² as launch KE
+    // (≈707·Δ m/s — ≥177 m/s even for a quarter-voxel Δ). The constraint law adds ≈0 KE: the grain is
+    // reconciled to the risen surface by a velocity-decoupled projection (gaining only gravitational PE —
+    // the real work the ground did lifting it), never launched. Sweep sub-voxel → multi-voxel Δ.
+    {
+        let mut all_ok = true;
+        let mut detail = String::new();
+        for &d in &[0.25f32, 0.5, 1.0, 2.5] {
+            let base = Scene::flat(16, 16, 8, 0.6);
+            let g = simulate(&gpu, vec![Particle::at(0.0, PART_HALF, 0.0)], 200, &base)[0];
+            let mut stepped = Scene::flat(16, 16, 8, 0.6);
+            stepped.center_y = 8.0 - d; // raise the surface by Δ under the settled grain
+            // Peak speed at ANY time during the relaxation — a launch spikes immediately.
+            let mut peak = 0.0f32;
+            for f in (2..160).step_by(4) {
+                let o = simulate(&gpu, vec![g], f, &stepped)[0];
+                peak = peak.max((o.vel[0].powi(2) + o.vel[1].powi(2) + o.vel[2].powi(2)).sqrt());
+            }
+            let spring_launch = C_STIFFNESS.sqrt() * d; // what the OLD spring would have produced
+            let ok = peak < 1.0; // ≈0; the spring would give ≈707·Δ
+            all_ok &= ok;
+            detail.push_str(&format!("Δ{:.2}:{:.2}m/s(spring≈{:.0}) ", d, peak, spring_launch));
+        }
+        println!("\nL surface-step no-launch: {detail} (constraint adds ≈0 KE; spring launched ≈707·Δ)  {}", pass(all_ok));
+        failures += !all_ok as i32;
+    }
+
+    // Scene N: STACK-AWARE SURFACE STEP (the buried-grain concern the naive projection exploded). A vertical
+    // stack of grains rests on flat terrain; the surface then steps UP a full voxel beneath the WHOLE stack
+    // (lower center_y by 1). The bottom grain becomes penetrating not by its own motion but because the
+    // ground rose — and it must NOT be teleported out in one shot into the grains resting above it (which a
+    // full one-step projection did, opening a 1 m grain-grain overlap that re-launched the stack). The
+    // bounded, velocity-decoupled projection lets the stack ride up over several substeps: it stays stacked,
+    // rises by ≈Δ, and never launches.
+    {
+        let base = Scene::flat(12, 12, 8, 0.6);
+        let stack: Vec<Particle> = (0..5)
+            .map(|k| Particle::at(0.0, PART_HALF + k as f32 * (2.0 * PART_HALF), 0.0))
+            .collect();
+        let settled = simulate(&gpu, stack, 300, &base);
+        let base_lo = min_max(settled.iter().map(|p| p.offset[1])).0;
+        let mut stepped = Scene::flat(12, 12, 8, 0.6);
+        stepped.center_y = 7.0; // surface rises 1 m under the stack
+        let mut peak = 0.0f32;
+        for f in (2..200).step_by(6) {
+            let o = simulate(&gpu, settled.clone(), f, &stepped);
+            peak = peak.max(max_height(&o));
+        }
+        let after = simulate(&gpu, settled.clone(), 400, &stepped);
+        let (lo, hi) = min_max(after.iter().map(|p| p.offset[1]));
+        let spd = mean_speed(&after);
+        // The honest outcome: the ground cannot teleport a rigid stack upward, so the buried bottom grain
+        // stays put (transiently a little embedded) and is NOT rammed into the grains above. No launch,
+        // the stack stays intact, nothing sinks, and it settles. (Rising would REQUIRE ramming; refusing
+        // to ram is correct — the grain resolves later by de-resolution or when the pile shifts.)
+        let stack_top = base_lo + 4.0; // 5 grains, 1 m spacing
+        let ok = finite(&after)
+            && peak < stack_top + 1.5  // did NOT launch (the ram flung a grain to +5 m; a spring, skyward)
+            && (hi - lo) > 3.0          // still a stack (did not explode to one layer)
+            && lo > base_lo - 0.5       // did not sink through
+            && spd < 0.1;               // settled
+        println!(
+            "\nN stack-aware surface step (Δ=1 under a 5-stack): peak height {:.2} (stack top {:.2}), span {:.2}, settled {:.3} m/s  {}",
+            peak, stack_top, hi - lo, spd, pass(ok)
+        );
+        failures += !ok as i32;
+    }
+
+    // Scene O: MAX_SURFACE_CORRECTION ROBUSTNESS. The one constant the fix introduces is the per-substep cap
+    // on the geometric position projection. To prove it is a solver RELAXATION rate (a wide stable basin),
+    // not a hand-tuned edge (the failure mode of the reverted velocity clamps, where a 5→10 m/s change
+    // swung the storm 2.4 km → 44 km), recompile the REAL shader with the constant edited across two decades
+    // and re-run the surface-step-under-a-grain test. The launch must stay ≈0 (flat) throughout.
+    {
+        println!("\nO MAX_SURFACE_CORRECTION robustness (relaxation rate, not a tuned edge):");
+        let mut all_ok = true;
+        for &corr in &[0.002f32, 0.005, 0.01, 0.02, 0.05] {
+            let src = SHADER.replace(
+                "const MAX_SURFACE_CORRECTION : f32 = 0.01;",
+                &format!("const MAX_SURFACE_CORRECTION : f32 = {:.4};", corr),
+            );
+            assert!(src.matches("MAX_SURFACE_CORRECTION : f32 =").count() == 1, "const not found/uniquely replaced");
+            let g2 = init_gpu_src(&src);
+            // The DISCRIMINATING case: Δ=1 surface step under a resting 5-STACK (the buried-grain ram).
+            let base = Scene::flat(12, 12, 8, 0.6);
+            let stack: Vec<Particle> = (0..5)
+                .map(|k| Particle::at(0.0, PART_HALF + k as f32 * (2.0 * PART_HALF), 0.0))
+                .collect();
+            let settled = simulate(&g2, stack, 300, &base);
+            let base_lo = min_max(settled.iter().map(|p| p.offset[1])).0;
+            let mut stepped = Scene::flat(12, 12, 8, 0.6);
+            stepped.center_y = 7.0; // Δ = 1 surface step under the whole stack
+            let mut peak_h = f32::MIN;
+            for f in (2..200).step_by(6) {
+                let o = simulate(&g2, settled.clone(), f, &stepped);
+                peak_h = peak_h.max(max_height(&o));
+            }
+            let climb = peak_h - (base_lo + 4.0); // how far above the settled stack-top a grain flew
+            let ok = climb < 1.0; // rode up ≈Δ; no launch
+            all_ok &= ok;
+            println!("   corr={:.4} m  stack surface-step(Δ=1) peak {:.2} m, launch above stack {:.2} m  {}", corr, peak_h, climb, pass(ok));
+        }
+        failures += !all_ok as i32;
     }
 
     if failures == 0 {
