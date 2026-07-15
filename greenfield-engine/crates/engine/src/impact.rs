@@ -332,6 +332,7 @@ pub fn furrow_target_grains(
     impactor_mass: f64,
     g: f64,
 ) -> (Vec<Body>, Vec<usize>, Vec<f32>, Vec<u8>) {
+    let _ = frag_mass; // impactor grain mass — retained for the shared signature; the cap is now ρ·V
     let n = surface.site_normal(site); // outward surface normal at the site
     let f = Furrow::new(site, n, v_impact, impactor_radius, extent, g);
 
@@ -339,6 +340,15 @@ pub fn furrow_target_grains(
     let mut mat_ids = Vec::with_capacity(n_grains);
     let mut temps = Vec::with_capacity(n_grains);
     let mut source = Vec::with_capacity(n_grains);
+    // PHYSICAL grain mass (docs/28 item 4): the excavated cap is real matter — ρ·V, not a bookkeeping
+    // multiple of the impactor's grain mass. Each grain represents an equal slice of the furrow's
+    // half-ellipsoid volume (V = (2/3)π·l_along·l_lat·l_depth), so its mass is that slice's volume times
+    // the LOCAL density at its depth (iron-rich deep, crust shallow). This is what makes the cap ≈ 0.31×
+    // the impactor (was a fudged 2×), so the momentum-conserving loft can drag it near-orbital without
+    // gutting the impactor. (`frag_mass` — the impactor's grain mass — is no longer the cap's mass.)
+    let vol_per = (2.0 / 3.0) * std::f64::consts::PI * f.l_along * f.l_lat * f.l_depth
+        / n_grains as f64;
+    let mut masses = Vec::with_capacity(n_grains);
     // Pass 1: place each grain and compute its RAW declared shock-ejection velocity (relative to ground).
     // The energy cap is a property of the WHOLE ejecta set, so we cannot finalise velocities per grain.
     let mut ejections = Vec::with_capacity(n_grains);
@@ -352,9 +362,11 @@ pub fn furrow_target_grains(
         // every grain is genuinely below the surface.
         let tangent_pt = site + f.t * along + f.b * lat;
         let (pos, outward, r_sample, below) = surface.place(tangent_pt, depth);
-        ejections.push(f.ejection(pos, outward, below));
-        bodies.push(Body { pos, vel: ground_vel, mass: frag_mass }); // ejection added (scaled) below
         let layer = target.layer_at(r_sample);
+        let mass_i = (layer.density * vol_per).max(1.0); // real ρ·V of this grain's slice
+        ejections.push(f.ejection(pos, outward, below));
+        bodies.push(Body { pos, vel: ground_vel, mass: mass_i }); // ejection added (scaled) below
+        masses.push(mass_i);
         mat_ids.push(materials::index_of(mats, layer.material));
         temps.push(target.temperature_at(r_sample) as f32);
         source.push(crate::aggregate::SOURCE_TARGET);
@@ -362,9 +374,10 @@ pub fn furrow_target_grains(
     // Pass 2: EXACT energy conservation (docs/28) — total ejecta KE ≤ the impact energy. For a small
     // impactor the raw KE exceeds it and every ejection is scaled by √(E_i/KE); for a giant impactor
     // (Theia) the factor is 1.0 and the velocities are byte-unchanged. `v*1.0 == v`, so the space band is
-    // untouched.
+    // untouched. KE uses each grain's REAL mass.
     let e_impact = 0.5 * impactor_mass * v_impact.length_squared();
-    let scale = ejecta_energy_scale(ejections.iter().map(|&ej| (frag_mass, ej)), e_impact);
+    let scale =
+        ejecta_energy_scale(ejections.iter().zip(masses.iter()).map(|(&ej, &m)| (m, ej)), e_impact);
     for (b, ej) in bodies.iter_mut().zip(ejections.iter()) {
         b.vel += *ej * scale;
     }
@@ -452,7 +465,7 @@ pub fn build_impact_debris_scaled(
     for i in 0..debris_n {
         let rr = moon_r * ((i as f64 + 0.5) / debris_n as f64).cbrt();
         particles.push(Body {
-            pos: moon_center + fib_dir(i, DEBRIS_N) * rr,
+            pos: moon_center + fib_dir(i, debris_n) * rr,
             vel: earth_vel + v_contact,
             mass: frag_mass,
         });
@@ -489,6 +502,15 @@ pub fn build_impact_debris_scaled(
     mat_ids.extend(cap_mats);
     temps.extend(cap_temps);
     source.extend(cap_src);
+
+    // MOMENTUM-CONSERVING LOFT (docs/28 step 3) — the shared particle-physics primitive: the impactor
+    // ploughs the excavated target matter downrange, sharing tangential momentum toward the COM (what the
+    // cap gains, the impactor loses; Σp conserved). Now that the cap is at its PHYSICAL ρ·V mass, this
+    // drags Earth material to near-orbital tangential speed — so it joins the bound disk (the Moon is
+    // Earth-derived) — without gutting the impactor's own disk. Same law a terrain meteor would use.
+    let is_impactor: Vec<bool> =
+        source.iter().map(|&s| s == crate::aggregate::SOURCE_IMPACTOR).collect();
+    granular::plough_loft(&mut particles, &is_impactor, n, v_contact);
 
     // One canonical contact law from the real material. Grain radius is DENSITY-CONSISTENT — the radius a
     // grain of this mass and the material's density actually has, r = (3m/4πρ)^⅓ — so the contact
@@ -535,14 +557,19 @@ pub fn build_impact_debris_scaled(
     // all of them as the bulk basalt above. The grain RADIUS is from that material's REAL density
     // (r = (3m/4πρ)^⅓), so iron packs denser than crust for the same mass. `Aggregate` mixes the two grains'
     // laws per contact (`Contact::mix`), reducing exactly to the single law for a same-material pair — so
-    // only genuinely cross-material contacts change. (Grain MASS is still equal here; the physical ρ·V cap
-    // mass — docs/28 item 4 — lands with the momentum-conserving loft work that needs it.)
+    // only genuinely cross-material contacts change. Radius is from the grain's REAL material density AND
+    // its REAL mass (the cap is now physical ρ·V, so impactor and cap grains differ in mass) —
+    // r = (3m/4πρ)^⅓ — so iron packs denser than crust.
+    // Radius from the grain's REAL mass + material density; but the Contact is referenced to the SHARED
+    // `frag_mass` (= the aggregate's `contact_ref_mass`), so the loop's `per-mass × ref_mass = force`
+    // yields the true force-stiffness E·r for any grain mass, and the ÷(own mass) that follows is exact.
     agg.per_grain_contact = agg
         .mat_ids
         .iter()
-        .map(|&mid| {
+        .zip(agg.particles.iter())
+        .map(|(&mid, p)| {
             let m = &mats[mid];
-            let r = (3.0 * frag_mass / (4.0 * std::f64::consts::PI * (m.density as f64).max(1.0))).cbrt();
+            let r = (3.0 * p.mass / (4.0 * std::f64::consts::PI * (m.density as f64).max(1.0))).cbrt();
             granular::contact_from_material(m, r, frag_mass)
         })
         .collect();
