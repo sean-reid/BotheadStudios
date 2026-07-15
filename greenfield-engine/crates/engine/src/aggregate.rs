@@ -94,6 +94,12 @@ pub struct Aggregate {
     /// divides by ITS OWN mass — so unequal-mass contacts (a dense solid through light air parcels)
     /// conserve momentum exactly. Equal-mass aggregates are unchanged (F/m ≡ the old acceleration).
     pub contact_ref_mass: f64,
+    /// PER-GRAIN contact law (docs/23: iron collides as iron, not bulk basalt). When non-empty, a solid
+    /// pair `(i, j)` collides via `contact[i].mix(&contact[j])` instead of the single bulk `contact` — each
+    /// grain brings its own material's stiffness/restitution/friction (from its `mat_ids` entry). Empty ⇒
+    /// the single-material path (unchanged). Same-material pairs are byte-identical (`mix` is idempotent),
+    /// so only genuinely cross-material contacts differ. Built at ref mass `contact_ref_mass` like `contact`.
+    pub per_grain_contact: Vec<crate::granular::Contact>,
     /// Specific heat (J/(kg·K)) used to convert contact-dissipated energy into temperature rise — energy
     /// is conserved, not destroyed (docs/20): friction/damping heat the matter (→ incandescence).
     pub specific_heat: f64,
@@ -162,6 +168,7 @@ impl Aggregate {
             gravity_bodies: Vec::new(),
             contact: None,
             contact_ref_mass: 1.0,
+            per_grain_contact: Vec::new(),
             specific_heat: 1000.0, // generic rock-ish default; set from the material via with_specific_heat
             boundary: None,
             boundary_vel: DVec3::ZERO,
@@ -306,6 +313,7 @@ impl Aggregate {
             gravity_bodies: Vec::new(),
             contact: None,
             contact_ref_mass: 1.0,
+            per_grain_contact: Vec::new(),
             specific_heat: 1000.0, // generic rock-ish default; set from the material via with_specific_heat
             boundary: None,
             boundary_vel: DVec3::ZERO,
@@ -504,11 +512,17 @@ impl Aggregate {
             for i in 0..p.len() {
                 for j in (i + 1)..p.len() {
                     // Phase-appropriate law per PAIR: a vaporized member makes the encounter gaseous
-                    // (EOS pressure, no cohesion) — the vapor disk's pressure support (docs/27).
+                    // (EOS pressure, no cohesion) — the vapor disk's pressure support (docs/27). Otherwise,
+                    // when per-grain materials are set, a SOLID pair collides via each grain's own material
+                    // mixed (iron-as-iron, docs/23); else the single bulk law. (Gas mixing is follow-up.)
+                    let mixed_law;
                     let law = if self.contact_gas.is_some()
                         && (self.vapor.get(i) == Some(&true) || self.vapor.get(j) == Some(&true))
                     {
                         self.contact_gas.as_ref().unwrap()
+                    } else if !self.per_grain_contact.is_empty() {
+                        mixed_law = self.per_grain_contact[i].mix(&self.per_grain_contact[j]);
+                        &mixed_law
                     } else {
                         &c
                     };
@@ -742,9 +756,18 @@ impl Aggregate {
             for i in 0..p.len() {
                 for j in (i + 1)..p.len() {
                     // Specific power × ref mass = the pair's actual dissipated watts; split half-half,
-                    // each side's temperature rise divides by ITS OWN heat capacity (m·c).
+                    // each side's temperature rise divides by ITS OWN heat capacity (m·c). Mirror the force
+                    // law: a per-grain (mixed-material) pair dissipates via the SAME mixed law, so the heat
+                    // accounting matches the force that produced it (energy conserved, not double-counted).
+                    let mixed_law;
+                    let law: &crate::granular::Contact = if !self.per_grain_contact.is_empty() {
+                        mixed_law = self.per_grain_contact[i].mix(&self.per_grain_contact[j]);
+                        &mixed_law
+                    } else {
+                        &c
+                    };
                     let pw = crate::granular::contact_dissipation(
-                        p[i].pos, p[i].vel, p[j].pos, p[j].vel, &c,
+                        p[i].pos, p[i].vel, p[j].pos, p[j].vel, law,
                     ) * m_ref;
                     if pw > 0.0 {
                         let e_half = 0.5 * pw * dt;

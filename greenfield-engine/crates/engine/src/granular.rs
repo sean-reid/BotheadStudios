@@ -91,6 +91,35 @@ pub struct Contact {
     pub shock: f64,
 }
 
+impl Contact {
+    /// The contact law for a pair of grains of DIFFERENT materials — "iron collides as iron, basalt as
+    /// basalt" (docs/23: everything is matter; a Theia iron-core grain must not collide as bulk basalt).
+    /// Each grain brings its OWN [`contact_from_material`] law; this mixes the two per pair, by construction
+    /// reducing EXACTLY to a single material when both sides are identical (so same-material pairs — the
+    /// whole terrain/debris path — are byte-unchanged, and only cross-material pairs differ):
+    ///  • radius — arithmetic mean, so `touch = 2·radius = r_a + r_b` (the real sum of the two grain radii);
+    ///  • stiffness — HARMONIC mean (two contacts in series; the softer material dominates the compliance);
+    ///  • normal / tangential damping and friction — GEOMETRIC mean (the standard DEM cross-property mix);
+    ///  • cohesion — the MINIMUM (a bond is only as strong as its weaker partner);
+    ///  • cohesion range — arithmetic mean; shock closure — the max (a gas member makes the pass gaseous).
+    /// All are symmetric and idempotent on equal inputs. (Restitution enters through `normal_damp`, which is
+    /// already derived from each material's restitution in [`contact_from_material`].)
+    pub fn mix(&self, o: &Contact) -> Contact {
+        let hmean = |a: f64, b: f64| if a + b > 0.0 { 2.0 * a * b / (a + b) } else { 0.0 };
+        let gmean = |a: f64, b: f64| (a * b).max(0.0).sqrt();
+        Contact {
+            radius: 0.5 * (self.radius + o.radius),
+            stiffness: hmean(self.stiffness, o.stiffness),
+            normal_damp: gmean(self.normal_damp, o.normal_damp),
+            friction: gmean(self.friction, o.friction),
+            tangent_damp: gmean(self.tangent_damp, o.tangent_damp),
+            cohesion: self.cohesion.min(o.cohesion),
+            coh_range: 0.5 * (self.coh_range + o.coh_range),
+            shock: self.shock.max(o.shock),
+        }
+    }
+}
+
 /// Acceleration on grain *i* due to contact with grain *j* (equal radii). Zero unless they overlap.
 /// Symmetric: grain *j* receives the negation from its own evaluation, so momentum is conserved.
 #[inline]
@@ -260,6 +289,55 @@ pub fn terrain_contact_resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contact_mix_is_idempotent_and_bounded() {
+        // docs/23 per-grain material contact. The critical no-regression guarantee: mixing a material with
+        // ITSELF returns exactly that material's law — so same-material pairs (the entire terrain/debris
+        // path) are byte-unchanged and only cross-material contacts differ. And a mixed pair's parameters
+        // must lie BETWEEN the two materials (no contact stiffer/bouncier than either constituent).
+        let mats = crate::materials::load();
+        let idx = |n| crate::materials::index_of(&mats, n);
+        let (iron, basalt) = (&mats[idx("iron")], &mats[idx("basalt")]);
+        let ci = contact_from_material(iron, 0.5, 1000.0);
+        let cb = contact_from_material(basalt, 0.5, 1000.0);
+        // Idempotent: mix(c, c) == c, field by field.
+        let self_mix = ci.mix(&ci);
+        assert!((self_mix.stiffness - ci.stiffness).abs() < 1e-6 * ci.stiffness, "stiffness self-mix");
+        assert!((self_mix.normal_damp - ci.normal_damp).abs() < 1e-6 * ci.normal_damp.max(1.0), "damp self-mix");
+        assert!((self_mix.friction - ci.friction).abs() < 1e-9, "friction self-mix");
+        assert!((self_mix.radius - ci.radius).abs() < 1e-12, "radius self-mix");
+        assert!((self_mix.cohesion - ci.cohesion).abs() < 1e-6 * ci.cohesion.max(1.0), "cohesion self-mix");
+        // Symmetric: mix(a, b) == mix(b, a).
+        let ab = ci.mix(&cb);
+        let ba = cb.mix(&ci);
+        assert!((ab.stiffness - ba.stiffness).abs() < 1e-9, "mix symmetric in stiffness");
+        assert!((ab.friction - ba.friction).abs() < 1e-9, "mix symmetric in friction");
+        // Bounded between the constituents (harmonic mean of stiffness lies between the two).
+        let (lo, hi) = (ci.stiffness.min(cb.stiffness), ci.stiffness.max(cb.stiffness));
+        assert!(lo <= ab.stiffness && ab.stiffness <= hi, "mixed stiffness between iron & basalt");
+        let (flo, fhi) = (ci.friction.min(cb.friction), ci.friction.max(cb.friction));
+        assert!(flo <= ab.friction && ab.friction <= fhi, "mixed friction between iron & basalt");
+    }
+
+    #[test]
+    fn mixed_material_contact_conserves_momentum() {
+        // A cross-material pair (iron grain overrunning a basalt grain) must exert equal-and-opposite
+        // forces — the per-grain path uses the SAME symmetric contact_accel on the mixed law, so Σp is
+        // conserved regardless of the materials. Overlap them and check the pair force sums to zero.
+        let mats = crate::materials::load();
+        let idx = |n| crate::materials::index_of(&mats, n);
+        let ci = contact_from_material(&mats[idx("iron")], 0.5, 1000.0);
+        let cb = contact_from_material(&mats[idx("basalt")], 0.5, 1000.0);
+        let law = ci.mix(&cb);
+        // Two grains overlapping (centres 0.9·touch apart), approaching.
+        let (pi, pj) = (DVec3::new(0.0, 0.0, 0.0), DVec3::new(0.9 * 2.0 * law.radius, 0.0, 0.0));
+        let (vi, vj) = (DVec3::new(1.0, 0.0, 0.0), DVec3::new(-1.0, 0.0, 0.0));
+        let fi = contact_accel(pi, vi, pj, vj, &law);
+        let fj = contact_accel(pj, vj, pi, vi, &law);
+        assert!((fi + fj).length() < 1e-9, "pair forces must be equal & opposite (got {fi:?} + {fj:?})");
+        assert!(fi.x < 0.0, "the overtaken grain-i should be pushed back (−x), got {fi:?}");
+    }
 
     #[test]
     fn restitution_damping_is_monotone_and_matches_the_calibration() {
