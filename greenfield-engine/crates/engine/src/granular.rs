@@ -91,6 +91,52 @@ pub struct Contact {
     pub shock: f64,
 }
 
+/// Momentum-conserving PLOUGHING LOFT (docs/24 + docs/28 step 3) — a primitive of the shared particle
+/// physics, not an impact-scene special case (so a terrain meteor and a giant impact loft their excavated
+/// matter through the SAME law). When a fast body ploughs into slower target matter, the excavation drags
+/// that matter DOWNRANGE along the track — the mechanism that gives target material the near-orbital
+/// tangential velocity to join a bound disk (why the Moon is Earth-derived). At feasible particle counts
+/// the excavation shock is finer than a grain (docs/24 problem #1), so we declare its result HONESTLY —
+/// as a *conserved momentum transfer*, never a scripted velocity: the TANGENTIAL (along-surface) momentum
+/// is shared inelastically toward the common centre-of-mass velocity (the physical maximum drag,
+/// co-motion — no free dial), and whatever the target gains, the impactor loses, so Σ(m·v) is EXACTLY
+/// conserved. Only the along-track component is touched; the radial shock-rebound and gravity keep theirs.
+///
+/// `impactor[k]` marks which particles are the ploughing body (the rest are the excavated target). `n` is
+/// the outward surface normal at the impact site; `v_contact` is the impactor's velocity relative to the
+/// (co-moving) target — its along-surface part is the plough direction. A vertical strike (no tangential
+/// component) is a no-op. Requires the target mass to be PHYSICAL (ρ·V): if the target is over-massed the
+/// COM velocity collapses and nothing lofts — the reason this pairs with the docs/28 item-4 mass fix.
+pub fn plough_loft(particles: &mut [crate::orbit::Body], impactor: &[bool], n: DVec3, v_contact: DVec3) {
+    let tang = v_contact - n * v_contact.dot(n);
+    let t = match tang.try_normalize() {
+        Some(t) => t,
+        None => return, // vertical incidence: no downrange plough
+    };
+    let (mut m_imp, mut p_imp, mut m_cap, mut p_cap) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for (b, &imp) in particles.iter().zip(impactor) {
+        let pt = b.mass * b.vel.dot(t);
+        if imp {
+            m_imp += b.mass;
+            p_imp += pt;
+        } else {
+            m_cap += b.mass;
+            p_cap += pt;
+        }
+    }
+    if m_imp <= 0.0 || m_cap <= 0.0 {
+        return;
+    }
+    // Common COM tangential velocity — the mass-weighted mean, so re-setting EVERY particle's tangential
+    // component to it leaves Σ(m·v_t) unchanged (exact conservation), while dragging the (lighter) target
+    // up toward the impactor's speed and slowing the impactor only slightly.
+    let v_com = (p_imp + p_cap) / (m_imp + m_cap);
+    for b in particles.iter_mut() {
+        let vt = b.vel.dot(t);
+        b.vel += t * (v_com - vt);
+    }
+}
+
 impl Contact {
     /// The contact law for a pair of grains of DIFFERENT materials — "iron collides as iron, basalt as
     /// basalt" (docs/23: everything is matter; a Theia iron-core grain must not collide as bulk basalt).
@@ -318,6 +364,48 @@ mod tests {
         assert!(lo <= ab.stiffness && ab.stiffness <= hi, "mixed stiffness between iron & basalt");
         let (flo, fhi) = (ci.friction.min(cb.friction), ci.friction.max(cb.friction));
         assert!(flo <= ab.friction && ab.friction <= fhi, "mixed friction between iron & basalt");
+    }
+
+    #[test]
+    fn plough_loft_conserves_momentum_and_lofts_the_lighter_target() {
+        use crate::orbit::Body;
+        // docs/28 step 3: the momentum-conserving loft. A heavy impactor moving downrange (+x) at 6 km/s
+        // ploughs a LIGHTER cap at rest. Total tangential momentum must be UNCHANGED (a transfer), the
+        // impactor must slow, and the cap must be dragged toward the impactor's speed — the near-orbital
+        // loft. With a light cap (physical ρ·V), the shared COM speed is CLOSE to the impactor's, not a
+        // third of it (the over-massed-cap failure this fixes).
+        let n = DVec3::Y; // surface normal
+        let v_contact = DVec3::new(6_000.0, -6_000.0, 0.0); // 45° oblique; downrange = +x, v_t = 6 km/s
+        let t = DVec3::X;
+        // 2 impactor grains (mass 3) + 2 cap grains (mass 1): m_cap/m_imp = 1/3, like the physical cap.
+        let mut ps = vec![
+            Body { pos: DVec3::ZERO, vel: v_contact, mass: 3.0 },
+            Body { pos: DVec3::new(0.0, 1.0, 0.0), vel: v_contact, mass: 3.0 },
+            Body { pos: DVec3::new(1.0, -1.0, 0.0), vel: DVec3::ZERO, mass: 1.0 },
+            Body { pos: DVec3::new(2.0, -1.0, 0.0), vel: DVec3::ZERO, mass: 1.0 },
+        ];
+        let imp = vec![true, true, false, false];
+        let p_before: f64 = ps.iter().map(|b| b.mass * b.vel.dot(t)).sum();
+        let imp_t0 = ps[0].vel.dot(t);
+        plough_loft(&mut ps, &imp, n, v_contact);
+        let p_after: f64 = ps.iter().map(|b| b.mass * b.vel.dot(t)).sum();
+        assert!((p_after - p_before).abs() < 1e-6 * p_before.abs(), "tangential momentum conserved");
+        // COM tangential speed = (6·6000 + 2·0)/8 = 4500. Both populations meet there.
+        let v_com = (6.0 * 6_000.0) / 8.0;
+        assert!((ps[0].vel.dot(t) - v_com).abs() < 1e-6, "impactor → v_com");
+        assert!((ps[2].vel.dot(t) - v_com).abs() < 1e-6, "cap dragged to v_com");
+        assert!(ps[0].vel.dot(t) < imp_t0, "impactor slows");
+        assert!(ps[2].vel.dot(t) > 0.0, "cap lofted downrange");
+        // Radial (y) untouched — only the along-track component couples.
+        assert!((ps[0].vel.y - v_contact.y).abs() < 1e-9, "impactor radial untouched");
+        assert!(ps[2].vel.y.abs() < 1e-9, "cap radial untouched");
+        // Vertical strike ⇒ no-op.
+        let mut vert = ps.clone();
+        let b0 = vert.clone();
+        plough_loft(&mut vert, &imp, n, DVec3::new(0.0, -6_000.0, 0.0));
+        for (a, b) in vert.iter().zip(b0.iter()) {
+            assert!((a.vel - b.vel).length() < 1e-9, "vertical strike: no plough");
+        }
     }
 
     #[test]

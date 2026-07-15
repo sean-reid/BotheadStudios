@@ -5,6 +5,43 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-15 — The Moon becomes Earth-derived: a momentum-conserving loft breaks the 0.000 deficit
+
+**What.** Closed docs/28 step 3. Earth (target) material now LOFTS into the bound proto-lunar disk —
+**Earth 0.083 M☾ | Theia 0.551 M☾** aloft, where it had measured a dead **0.000 M☾ Earth** at every
+resolution (the "nothing is taken from Earth" deficit). The Moon is now genuinely Earth-derived, as the
+isotopes demand — and it emerged from conserved mechanics, no dial. Two coupled fixes:
+
+- **Physical cap mass (docs/28 item 4).** The excavated cap was materialized at a bookkeeping **2× the
+  impactor** mass; it is now real **ρ·V** — each grain an equal slice of the furrow's half-ellipsoid volume
+  times the LOCAL density at its depth (≈ 0.31× the impactor). `furrow_target_grains` sets it; the energy
+  cap and per-grain contact use each grain's real mass.
+- **A momentum-conserving loft in the SHARED particle physics** (`granular::plough_loft`, not the impact
+  builder — Robin: "added to global particle physics"). When a fast body ploughs slower target matter, the
+  along-track (tangential) momentum is shared inelastically toward the impactor↔cap **centre-of-mass**
+  velocity — the physical maximum drag, no free dial — and what the cap gains the impactor loses, so
+  Σ(m·v) is **exactly** conserved. Only the along-track component is touched (radial rebound + gravity keep
+  theirs). This is the same reverted "COM drag" from 2026-07-14 that made it WORSE — the ONLY thing that
+  changed is the cap mass: at the fudged 2× the COM speed collapsed to v_t/3 (sub-orbital, gutted the
+  disk); at the physical 0.31× it is ~0.76·v_t ≈ near-orbital, so Earth material joins the disk while the
+  impactor barely slows. The cap-mass fudge, not the mechanism, was the blocker all along.
+
+One law for every band: a terrain meteor and a giant impact both loft their excavated matter through
+`plough_loft` (space-band wired now; terrain wiring is a flagged follow-up).
+
+**Why.** docs/23/24 no-fudge: the loft is real ploughing momentum, declared HONESTLY as a conserved
+transfer (the µs shock is sub-resolution at any N — docs/24 #1), never a scripted velocity.
+
+**Verified (native).** `plough_loft_conserves_momentum_and_lofts_the_lighter_target` (Σ tangential p
+unchanged; cap dragged up, impactor slowed; radial untouched; vertical = no-op). **Full suite 144/144** —
+every disk guardrail (birth peak-aloft > 0.3 M☾, emergent day 2–14 h, theia) still holds, so the honest
+mass + loft did not detune the disk. On-screen rig-watch (birth.html) is the remaining check — pending
+Robin's eyes / a rig in this env. FOLLOW-UPS (flagged, not papered over): the lib.rs interactive-scene
+mass bookkeeping (`cap_mass = moon_mass·CAP_N/DEBRIS_N`, now ≈6.5× high) and terrain-band `plough_loft`
+wiring.
+
+---
+
 ## 2026-07-14 — Measured: "raise N" does NOT loft Earth material (the disk deficit is a mechanism, not a resolution, problem)
 
 **What.** Investigated docs/28 step 3 (progressive excavation) — why the proto-lunar disk is ~100%
