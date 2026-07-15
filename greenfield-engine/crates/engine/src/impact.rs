@@ -530,6 +530,22 @@ pub fn build_impact_debris_scaled(
     agg.mat_ids = mat_ids;
     agg.temps = temps;
     agg.source = source; // per-particle provenance (Theia vs Earth)
+    // PER-GRAIN contact law (docs/23: everything is matter): each grain collides as its OWN material — a
+    // Theia iron-core grain with iron's stiffness/restitution/friction, a mantle grain as peridotite — not
+    // all of them as the bulk basalt above. The grain RADIUS is from that material's REAL density
+    // (r = (3m/4πρ)^⅓), so iron packs denser than crust for the same mass. `Aggregate` mixes the two grains'
+    // laws per contact (`Contact::mix`), reducing exactly to the single law for a same-material pair — so
+    // only genuinely cross-material contacts change. (Grain MASS is still equal here; the physical ρ·V cap
+    // mass — docs/28 item 4 — lands with the momentum-conserving loft work that needs it.)
+    agg.per_grain_contact = agg
+        .mat_ids
+        .iter()
+        .map(|&mid| {
+            let m = &mats[mid];
+            let r = (3.0 * frag_mass / (4.0 * std::f64::consts::PI * (m.density as f64).max(1.0))).cbrt();
+            granular::contact_from_material(m, r, frag_mass)
+        })
+        .collect();
     let acc0 = agg.accelerations();
     (agg, acc0)
 }
