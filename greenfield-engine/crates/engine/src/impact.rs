@@ -545,6 +545,10 @@ pub fn build_impact_debris_scaled(
         .with_gravity_source(earth_pos, earth_mass, earth_radius)
         .with_contact(contact, frag_mass)
         .with_vapor_phase(gas, boil_k)
+        // REAL vapor pressure (docs/26/27): once shock heat vaporizes the parcels, a continuum SPH pressure
+        // P = ρ·R_s·T (basalt's gas constant) does the expansion work the overlap hack couldn't — the plume
+        // launches and cools by PdV. Smoothing length ≈ the impactor radius (a few initial parcel spacings).
+        .with_vapor_sph(crate::atmosphere::specific_gas_constant(mat), moon_r.max(1.0))
         .with_specific_heat(specific_heat)
         .with_boundary(earth_pos, earth_radius, contact.stiffness)
         .with_boundary_hole(surface, cap_extent);
@@ -1038,6 +1042,173 @@ mod tests {
                 at / MOON_MASS
             );
         }
+    }
+
+    #[test]
+    #[ignore = "scene reconciliation — long-running; run with --ignored"]
+    fn birth_scene_reconciliation_reproduce_the_real_approach() {
+        // Option 3 (reconcile scene vs native): birth.html derives v_contact from the LIVE Theia approach
+        // (lib.rs start_birth: from (d0, b) at 5 km/s, gravity does the rest → orbit::contact_velocity),
+        // NOT the clean 9.5 km/s @ 45° the other native tests hardcode. Reproduce that exact approach here
+        // and measure orbiting, so "nothing orbits on screen" is checked against the SAME impact the scene
+        // runs — is the discrepancy the geometry, or is it timing/visibility of a small emergent disk?
+        let mats = materials::load();
+        let theia = crate::planet::theia();
+        let m_theia = theia.total_mass();
+        let contact = EARTH_RADIUS_M + theia.radius();
+        let mu = G * (EARTH_MASS + m_theia); // relative-motion gravitational parameter
+        // The scene's inbound geometry (lib.rs start_birth), Earth at the origin.
+        let (d0, v_in, b) = (9.6e7_f64, 5_000.0_f64, 1.46 * contact);
+        let mut rel = DVec3::new(d0, b, 0.0); // Theia relative to Earth
+        let mut vrel = DVec3::new(-v_in, 0.0, 0.0);
+        let (mut rel_old, mut vrel_old) = (rel, vrel);
+        let dt = 1.0;
+        let mut hit = false;
+        for _ in 0..2_000_000 {
+            if rel.length() <= contact {
+                hit = true;
+                break;
+            }
+            rel_old = rel;
+            vrel_old = vrel;
+            let r = rel.length();
+            let a = -rel * (mu / (r * r * r)); // relative acceleration
+            vrel += a * dt;
+            rel += vrel * dt;
+        }
+        assert!(hit, "Theia never reached contact");
+        let n_hat = rel.normalize();
+        let v_contact = crate::orbit::contact_velocity(rel_old, vrel_old, n_hat, contact, mu);
+        let site = n_hat * EARTH_RADIUS_M; // Earth at origin
+        let v_circ = (G * EARTH_MASS / EARTH_RADIUS_M).sqrt();
+        // Obliquity: angle of v_contact from the local surface (0 = grazing, 90 = head-on).
+        let vt_frac = (v_contact - n_hat * v_contact.dot(n_hat)).length();
+        let obliq_deg = (v_contact.dot(n_hat).abs() / v_contact.length()).acos().to_degrees();
+        println!(
+            "\nSCENE approach → contact: |v| = {:.0} m/s ({:.2}× v_circ), tangential {:.0} m/s ({:.2}× v_circ), obliquity {:.0}°",
+            v_contact.length(), v_contact.length() / v_circ, vt_frac, vt_frac / v_circ, obliq_deg
+        );
+        // Build the SAME impact the scene builds, integrate the aftermath, measure orbiting by PERIGEE.
+        let (mut agg, mut acc) = build_impact_debris_scaled(
+            &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia,
+            &crate::planet::earth(), EARTH_MASS, EARTH_RADIUS_M, 128, 256,
+        );
+        for _ in 0..3000 {
+            agg.step(&mut acc, 2.0);
+        }
+        let mu_e = G * EARTH_MASS;
+        let (mut orbiting, mut reimpacting) = (0.0f64, 0.0f64);
+        for (i, p) in agg.particles.iter().enumerate() {
+            if agg.source[i] != crate::aggregate::SOURCE_TARGET {
+                continue;
+            }
+            let r = p.pos.length();
+            let eps = 0.5 * p.vel.length_squared() - mu_e / r;
+            if eps >= 0.0 || r <= 1.1 * EARTH_RADIUS_M {
+                continue;
+            }
+            let h = p.pos.cross(p.vel).length();
+            let e = (1.0 + 2.0 * eps * h * h / (mu_e * mu_e)).max(0.0).sqrt();
+            let perigee = (-mu_e / (2.0 * eps)) * (1.0 - e);
+            if perigee > EARTH_RADIUS_M {
+                orbiting += p.mass;
+            } else {
+                reimpacting += p.mass;
+            }
+        }
+        println!(
+            "SCENE impact → Earth material: orbiting {:.4} M_moon | re-impacting {:.4} M_moon (clean-45° test gave 0.0495 | 0.0330)",
+            orbiting / MOON_MASS, reimpacting / MOON_MASS
+        );
+        // Does enough matter VAPORIZE for a pressure field to matter? (Option-2 leverage check.)
+        let n_vapor = agg.vapor.iter().filter(|v| **v).count();
+        let vapor_mass: f64 = agg
+            .particles
+            .iter()
+            .zip(agg.vapor.iter())
+            .filter(|(_, &v)| v)
+            .map(|(p, _)| p.mass)
+            .sum();
+        let tmax = agg.temps.iter().cloned().fold(0.0f32, f32::max);
+        let tmean = agg.temps.iter().sum::<f32>() / agg.temps.len().max(1) as f32;
+        let total: f64 = agg.particles.iter().map(|p| p.mass).sum();
+        println!(
+            "VAPOR at t=end: {n_vapor}/{} parcels, {:.3} M_moon ({:.0}% of the cloud); temp mean {:.0} K, max {:.0} K (basalt boil+Lv ≈ 10040 K)",
+            agg.particles.len(),
+            vapor_mass / MOON_MASS,
+            100.0 * vapor_mass / total,
+            tmean,
+            tmax
+        );
+    }
+
+    #[test]
+    #[ignore = "orbit diagnostic — long-running; run with --ignored"]
+    fn disk_orbit_diagnostic_does_anything_actually_orbit() {
+        // Robin rig-watched birth.html: crater material is excavated, "but nothing reached orbital
+        // velocity." Reconcile with the native "bound-aloft" number. The honest test of ORBITING is the
+        // PERIGEE: a bound ellipse whose perigee is BELOW the surface re-impacts — it is NOT in orbit,
+        // even if it is momentarily above 1.1 R. Report, for the excavated cap: peak tangential speed vs
+        // circular velocity, and the mass split into truly-orbiting (perigee > R) vs re-impacting.
+        let mats = materials::load();
+        let theia = crate::planet::theia();
+        let earth = crate::planet::earth();
+        let m_theia = theia.total_mass();
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
+        let v_esc = (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
+        let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
+        let (mut agg, mut acc) = build_impact_debris_scaled(
+            &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
+            EARTH_RADIUS_M, 128, 256,
+        );
+        let mu = G * EARTH_MASS;
+        let v_circ = (mu / EARTH_RADIUS_M).sqrt();
+        let v_esc_surf = (2.0 * mu / EARTH_RADIUS_M).sqrt();
+        // Peak tangential speed among the excavated cap, right after the loft (t=0).
+        let mut peak_vt0 = 0.0f64;
+        for (i, p) in agg.particles.iter().enumerate() {
+            if agg.source[i] == crate::aggregate::SOURCE_TARGET {
+                let rhat = p.pos.normalize_or_zero();
+                let vt = (p.vel - rhat * p.vel.dot(rhat)).length();
+                peak_vt0 = peak_vt0.max(vt);
+            }
+        }
+        for _ in 0..3000 {
+            agg.step(&mut acc, 2.0);
+        }
+        // Classify the still-aloft, bound cap material by PERIGEE (the honest orbit test).
+        let (mut orbiting, mut reimpacting, mut peak_vt) = (0.0f64, 0.0f64, 0.0f64);
+        for (i, p) in agg.particles.iter().enumerate() {
+            if agg.source[i] != crate::aggregate::SOURCE_TARGET {
+                continue;
+            }
+            let r = p.pos.length();
+            let v2 = p.vel.length_squared();
+            let eps = 0.5 * v2 - mu / r; // specific orbital energy
+            let rhat = p.pos.normalize_or_zero();
+            let vt = (p.vel - rhat * p.vel.dot(rhat)).length();
+            peak_vt = peak_vt.max(vt);
+            if eps >= 0.0 || r <= 1.1 * EARTH_RADIUS_M {
+                continue; // unbound or already down
+            }
+            let h = p.pos.cross(p.vel).length(); // specific angular momentum
+            let a = -mu / (2.0 * eps);
+            let e = (1.0 + 2.0 * eps * h * h / (mu * mu)).max(0.0).sqrt();
+            let perigee = a * (1.0 - e);
+            if perigee > EARTH_RADIUS_M {
+                orbiting += p.mass; // perigee clears the surface — a real orbit
+            } else {
+                reimpacting += p.mass; // bound ellipse that dives back into Earth
+            }
+        }
+        let mm = MOON_MASS;
+        println!("\nv_circ = {:.0} m/s, v_esc = {:.0} m/s", v_circ, v_esc_surf);
+        println!("cap PEAK tangential speed at launch = {:.0} m/s ({:.2}× circular)", peak_vt0, peak_vt0 / v_circ);
+        println!("cap peak tangential speed at t=end   = {:.0} m/s ({:.2}× circular)", peak_vt, peak_vt / v_circ);
+        println!(
+            "cap Earth material: TRULY ORBITING (perigee>R) {:.4} M_moon | re-impacting (perigee<R) {:.4} M_moon",
+            orbiting / mm, reimpacting / mm
+        );
     }
 
     #[test]

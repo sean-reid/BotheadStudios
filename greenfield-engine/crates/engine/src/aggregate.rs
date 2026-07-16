@@ -137,6 +137,15 @@ pub struct Aggregate {
     /// Boil threshold (K) for the phase flip — the bulk material's boiling point (1-atm value;
     /// the local-vapor-pressure criterion is the refinement, flagged).
     pub boil_k: f64,
+    /// SPH VAPOR PRESSURE (docs/26/27, replacing the docs/28-item-5 overlap hack): the specific gas
+    /// constant R_s and kernel smoothing length h for a REAL continuum pressure field among vaporized
+    /// parcels — P = ρ·R_s·T with each parcel's OWN temperature. When both > 0, vapor↔vapor pairs interact
+    /// by a momentum-conserving SPH pressure that does PdV expansion work (launching the plume) and, in
+    /// `step`, cools as it expands (energy-conserving). 0 ⇒ fall back to the old `contact_gas` overlap law.
+    pub vapor_rs: f64,
+    pub vapor_h: f64,
+    /// Cached SPH density at each vaporized parcel (from `accelerations`), reused by `step`'s PdV cooling.
+    pub vapor_rho: Vec<f64>,
     /// Per-particle PROVENANCE (docs/28): which body this matter came from — [`SOURCE_IMPACTOR`] (Theia)
     /// or [`SOURCE_TARGET`] (Earth). A physical attribute, not an index convention: it rides `swap_remove`
     /// and lets the disk's composition be measured and tinted by origin (the real Moon is Earth-like, so
@@ -179,6 +188,9 @@ impl Aggregate {
             vapor: vec![false; n],
             contact_gas: None,
             boil_k: f64::INFINITY,
+            vapor_rs: 0.0,
+            vapor_h: 0.0,
+            vapor_rho: Vec::new(),
             source: vec![SOURCE_IMPACTOR; n],
         }
     }
@@ -196,6 +208,15 @@ impl Aggregate {
     pub fn with_vapor_phase(mut self, gas: crate::granular::Contact, boil_k: f64) -> Self {
         self.contact_gas = Some(gas);
         self.boil_k = boil_k;
+        self
+    }
+
+    /// Enable the REAL SPH vapor pressure field (docs/26/27): `rs` = the vapor's specific gas constant
+    /// (`atmosphere::specific_gas_constant`), `h` = the kernel smoothing length (≈ a few vapor-parcel
+    /// spacings). Vapor↔vapor pairs then use a continuum P = ρ·R_s·T pressure instead of the overlap hack.
+    pub fn with_vapor_sph(mut self, rs: f64, h: f64) -> Self {
+        self.vapor_rs = rs;
+        self.vapor_h = h;
         self
     }
 
@@ -324,6 +345,9 @@ impl Aggregate {
             vapor: vec![false; n],
             contact_gas: None,
             boil_k: f64::INFINITY,
+            vapor_rs: 0.0,
+            vapor_h: 0.0,
+            vapor_rho: Vec::new(),
             source: vec![SOURCE_IMPACTOR; n],
         }
     }
@@ -511,14 +535,18 @@ impl Aggregate {
             let m_ref = self.contact_ref_mass;
             for i in 0..p.len() {
                 for j in (i + 1)..p.len() {
-                    // Phase-appropriate law per PAIR: a vaporized member makes the encounter gaseous
-                    // (EOS pressure, no cohesion) — the vapor disk's pressure support (docs/27). Otherwise,
-                    // when per-grain materials are set, a SOLID pair collides via each grain's own material
-                    // mixed (iron-as-iron, docs/23); else the single bulk law. (Gas mixing is follow-up.)
+                    // Phase-appropriate law per PAIR. With the real SPH vapor field on, a vapor↔vapor pair
+                    // is handled by the continuum pressure below — SKIP it here (no double force). A
+                    // vapor↔solid pair still contacts (the plume pushes the condensed debris at the
+                    // interface). Without SPH, fall back to the legacy overlap gas law. Otherwise a solid
+                    // pair collides via each grain's own material mixed (iron-as-iron, docs/23).
+                    let (vi, vj) = (self.vapor.get(i) == Some(&true), self.vapor.get(j) == Some(&true));
+                    let sph_vapor = self.vapor_rs > 0.0 && self.vapor_h > 0.0;
+                    if sph_vapor && vi && vj {
+                        continue;
+                    }
                     let mixed_law;
-                    let law = if self.contact_gas.is_some()
-                        && (self.vapor.get(i) == Some(&true) || self.vapor.get(j) == Some(&true))
-                    {
+                    let law = if !sph_vapor && self.contact_gas.is_some() && (vi || vj) {
                         self.contact_gas.as_ref().unwrap()
                     } else if !self.per_grain_contact.is_empty() {
                         mixed_law = self.per_grain_contact[i].mix(&self.per_grain_contact[j]);
@@ -622,6 +650,45 @@ impl Aggregate {
             acc[bond.a] += f / pa.mass;
             acc[bond.b] -= f / pb.mass;
         }
+        // SPH VAPOR PRESSURE (docs/26/27): a real continuum pressure among vaporized parcels — P = ρ·R_s·T
+        // with each parcel's OWN temperature — replacing the docs/28-item-5 overlap hack. Symmetric ⇒
+        // momentum-conserving; this is the force that does the PdV expansion work launching the plume (and
+        // cools it, in `step`). Density is a kernel estimate; the cached ρ feeds `step`'s energy update.
+        if self.vapor_rs > 0.0 && self.vapor_h > 0.0 {
+            let h = self.vapor_h;
+            let n = self.particles.len();
+            let vidx: Vec<usize> = (0..n).filter(|&i| self.vapor.get(i) == Some(&true)).collect();
+            let mut rho = vec![0.0f64; n];
+            for &i in &vidx {
+                let mut d = self.particles[i].mass * crate::atmosphere::sph_w(0.0, h);
+                for &j in &vidx {
+                    if j != i {
+                        let r = (self.particles[i].pos - self.particles[j].pos).length();
+                        if r < h {
+                            d += self.particles[j].mass * crate::atmosphere::sph_w(r, h);
+                        }
+                    }
+                }
+                rho[i] = d.max(1.0e-30);
+            }
+            for a in 0..vidx.len() {
+                for b in (a + 1)..vidx.len() {
+                    let (i, j) = (vidx[a], vidx[b]);
+                    let dv = self.particles[i].pos - self.particles[j].pos;
+                    let r = dv.length();
+                    if r >= h || r < 1.0e-9 {
+                        continue;
+                    }
+                    let pi = rho[i] * self.vapor_rs * self.temps[i] as f64;
+                    let pj = rho[j] * self.vapor_rs * self.temps[j] as f64;
+                    let term = pi / (rho[i] * rho[i]) + pj / (rho[j] * rho[j]);
+                    let grad = (dv / r) * crate::atmosphere::sph_dw(r, h); // dW<0 ⇒ repulsive
+                    acc[i] += grad * (-term * self.particles[j].mass);
+                    acc[j] += grad * (term * self.particles[i].mass);
+                }
+            }
+            self.vapor_rho = rho;
+        }
         acc
     }
 
@@ -716,6 +783,42 @@ impl Aggregate {
             b.vel += *a * (0.5 * dt);
         }
         *acc = new_acc;
+        // PdV EXPANSION WORK (docs/26/27): as the vapor plume expands, its pressure does work on the flow —
+        // internal heat converts to bulk kinetic energy (the launch) and the gas COOLS. The SPH energy
+        // equation du_i/dt = (P_i/ρ_i²)·Σ_j m_j (v_i−v_j)·∇_i W is the exact conservative partner of the
+        // pressure force in `accelerations`: the KE it injects is paid for out of temperature, so total
+        // energy is conserved and the 80,000 K trapped heat becomes expansion instead of just sitting.
+        if self.vapor_rs > 0.0 && self.vapor_h > 0.0 && !self.vapor_rho.is_empty() {
+            let h = self.vapor_h;
+            let vidx: Vec<usize> = (0..self.particles.len())
+                .filter(|&i| self.vapor.get(i) == Some(&true))
+                .collect();
+            let mut du = vec![0.0f64; self.particles.len()];
+            for a in 0..vidx.len() {
+                for b in (a + 1)..vidx.len() {
+                    let (i, j) = (vidx[a], vidx[b]);
+                    let dv = self.particles[i].pos - self.particles[j].pos;
+                    let r = dv.length();
+                    if r >= h || r < 1.0e-9 {
+                        continue;
+                    }
+                    let (ri, rj) = (self.vapor_rho[i], self.vapor_rho[j]);
+                    if ri <= 0.0 || rj <= 0.0 {
+                        continue;
+                    }
+                    let pi = ri * self.vapor_rs * self.temps[i] as f64;
+                    let pj = rj * self.vapor_rs * self.temps[j] as f64;
+                    let grad = (dv / r) * crate::atmosphere::sph_dw(r, h);
+                    let dwv = (self.particles[i].vel - self.particles[j].vel).dot(grad); // (v_i−v_j)·∇_iW
+                    du[i] += (pi / (ri * ri)) * self.particles[j].mass * dwv;
+                    du[j] += (pj / (rj * rj)) * self.particles[i].mass * dwv;
+                }
+            }
+            let c = self.specific_heat.max(1.0);
+            for &i in &vidx {
+                self.temps[i] = ((self.temps[i] as f64) + du[i] * dt / c).max(2.7) as f32;
+            }
+        }
         // RADIATIVE COOLING (Stefan–Boltzmann): hot matter in vacuum sheds σ·ε·A·T⁴ — a white-hot
         // fragment visibly fades over hours-days (Robin: "the white-hot fragments never seem to cool" —
         // they had no radiative channel at all). Grain surface area from the contact radius (the
@@ -740,7 +843,7 @@ impl Aggregate {
         }
         // PHASE (docs/26): hotter than the boil point ⇒ vapor; cooled below ⇒ condensed. The flip is
         // a state change, not a force — the pair law above reads it.
-        if self.contact_gas.is_some() {
+        if self.contact_gas.is_some() || self.vapor_rs > 0.0 {
             for (i, t) in self.temps.iter().enumerate() {
                 self.vapor[i] = (*t as f64) > self.boil_k;
             }
@@ -753,8 +856,18 @@ impl Aggregate {
             let m_ref = self.contact_ref_mass;
             let p = &self.particles;
             let mut d_temp = vec![0.0f64; p.len()];
+            let sph_vapor = self.vapor_rs > 0.0 && self.vapor_h > 0.0;
             for i in 0..p.len() {
                 for j in (i + 1)..p.len() {
+                    // A vapor↔vapor pair interacts by CONSERVATIVE SPH pressure (no contact force above), so
+                    // it dissipates NOTHING — skip it, exactly as the force loop does, or we would create
+                    // heat from a force that no longer acts (spurious energy, over-heating the plume).
+                    if sph_vapor
+                        && self.vapor.get(i) == Some(&true)
+                        && self.vapor.get(j) == Some(&true)
+                    {
+                        continue;
+                    }
                     // Specific power × ref mass = the pair's actual dissipated watts; split half-half,
                     // each side's temperature rise divides by ITS OWN heat capacity (m·c). Mirror the force
                     // law: a per-grain (mixed-material) pair dissipates via the SAME mixed law, so the heat
@@ -853,6 +966,53 @@ impl Aggregate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vapor_sph_expands_and_cools_conserving_energy() {
+        // docs/26/27 real vapor pressure: a hot, packed blob with NO gravity/contact must EXPAND under its
+        // own SPH pressure while the PdV energy equation COOLS it — internal heat → bulk kinetic, TOTAL
+        // energy conserved, and (started at rest) momentum stays ~0. This is the mechanism that launches
+        // the proto-lunar plume instead of trapping the impact's heat as a dead 80,000 K.
+        let spacing = 1.0;
+        let ps = cloud(3, spacing, 1.0); // 27 equal-mass parcels
+        let (c, rs, h, t0) = (840.0f64, 100.0f64, 2.5 * spacing, 6000.0f32);
+        let mut agg = Aggregate::new(ps, 0.0).with_vapor_sph(rs, h).with_specific_heat(c);
+        agg.self_gravity = false; // isolate the vapor pressure from gravity
+        agg.boil_k = 0.0; // keep parcels flagged vapor as they cool (temp stays > 0)
+        agg.temps = vec![t0; agg.particles.len()];
+        agg.vapor = vec![true; agg.particles.len()];
+        let com = |a: &Aggregate| {
+            a.particles.iter().map(|p| p.pos).sum::<DVec3>() / a.particles.len() as f64
+        };
+        let rms = |a: &Aggregate, cm: DVec3| {
+            (a.particles.iter().map(|p| (p.pos - cm).length_squared()).sum::<f64>()
+                / a.particles.len() as f64)
+                .sqrt()
+        };
+        let energy = |a: &Aggregate| {
+            let ke: f64 = a.particles.iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
+            let u: f64 =
+                a.particles.iter().zip(a.temps.iter()).map(|(p, &t)| p.mass * c * t as f64).sum();
+            ke + u
+        };
+        let cm0 = com(&agg);
+        let (r0, e0) = (rms(&agg, cm0), energy(&agg));
+        let mut acc = agg.accelerations();
+        for _ in 0..80 {
+            agg.step(&mut acc, 1.0e-4);
+        }
+        let cm1 = com(&agg);
+        let (r1, e1) = (rms(&agg, cm1), energy(&agg));
+        let tmean = agg.temps.iter().map(|&t| t as f64).sum::<f64>() / agg.temps.len() as f64;
+        assert!(r1 > 1.05 * r0, "vapor must expand: rms {r0:.3} → {r1:.3}");
+        assert!(tmean < t0 as f64, "vapor must cool as it expands: {t0} → {tmean:.0} K");
+        assert!(
+            (e1 - e0).abs() < 0.03 * e0,
+            "total energy (KE + internal) conserved: {e0:.4e} → {e1:.4e}"
+        );
+        let p1: DVec3 = agg.particles.iter().map(|p| p.vel * p.mass).sum();
+        assert!(p1.length() < 1.0e-6 * agg.particles.len() as f64, "momentum stays ~0 (started at rest)");
+    }
 
     /// A small cubic cloud of equal-mass particles, at rest.
     fn cloud(side: i32, spacing: f64, mass: f64) -> Vec<Body> {
