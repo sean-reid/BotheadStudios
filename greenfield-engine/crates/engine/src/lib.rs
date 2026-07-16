@@ -93,6 +93,14 @@ mod app {
     /// cap is smooth, so the mild depth imprecision far out is acceptable; the near patch is fine.
     const CAMERA_FAR: f32 = 30_000.0;
     const CAMERA_NEAR: f32 = 0.5;
+    // SPACE-BAND scene resolution — DECOUPLED from impact.rs's test-facing DEBRIS_N/CAP_N so the on-screen
+    // disk can run at the high N the fluid disk actually needs (the grid + Barnes–Hut of docs/30 made this
+    // affordable) WITHOUT dragging the native test suite up to high N. The scene's time-LOD keeps it
+    // interactive if a step gets heavy (observable time dilates rather than the frame stalling). Trade
+    // on-screen disk richness ↔ browser step-rate by bumping these; keep CAP:DEBRIS ≈ 2:1 (docs/28 item 4).
+    const SCENE_DEBRIS_N: usize = 512;
+    const SCENE_CAP_N: usize = 1024;
+    const SCENE_IMPACT_N: usize = SCENE_DEBRIS_N + SCENE_CAP_N;
 
     /// Cohesive-bond geometry + stability for the steel probe (`docs/23`). The bond stiffness is the
     /// material's REAL elastic modulus (k = E·L for a lattice of spacing L) — rigidity is cohesive
@@ -2469,7 +2477,7 @@ mod app {
     }
 
     // Moon-shot Stage A constants.
-    use crate::impact::{DEBRIS_N, IMPACT_N}; // the mutual-impact builder (physics of record, impact.rs)
+    // scene impact resolution uses SCENE_DEBRIS_N/SCENE_CAP_N (module consts), not the test-facing const.
     /// Earth rendered as a shell of particles (the honest low-res look, docs/15): a smooth sphere is a
     /// representation LIE once matter can be excavated — it hides the damage. The shell is the
     /// VISUALIZATION of the un-materialized bulk summary (whose physics is the boundary + gravity
@@ -2565,7 +2573,7 @@ mod app {
                 )],
             });
             let num_moons = num_moons.clamp(1, 2) as usize;
-            let debris_unis: Vec<UniformSlot> = (0..IMPACT_N)
+            let debris_unis: Vec<UniformSlot> = (0..SCENE_IMPACT_N)
                 .map(|_| make_space_uniform(&device, &bind_layout))
                 .collect();
             let shell_unis: Vec<UniformSlot> = (0..SHELL_N)
@@ -3338,17 +3346,27 @@ mod app {
                     } else {
                         crate::planet::moon()
                     };
-                    let (agg, acc0) = crate::impact::build_impact_debris_between(
+                    let (agg, acc0) = crate::impact::build_impact_debris_scaled(
                         &self.mats, site, earth_pos, earth_vel, moon_mass, v_contact,
                         &impactor_profile, &crate::planet::earth(), EARTH_MASS, EARTH_RADIUS_M,
+                        SCENE_DEBRIS_N, SCENE_CAP_N,
                     );
                     self.debris_acc = acc0;
-                    self.moon_debris = Some(agg);
                     self.impact_site_rel = Some(site - earth_pos); // crater mask, in Earth's frame
-                    // The materialized cap LEFT Earth's bulk: its mass moves from the summary body to
-                    // the particles (it was double-counted — Earth pulled ~22% too hard at Theia scale).
-                    let cap_mass = moon_mass * (crate::impact::CAP_N as f64 / DEBRIS_N as f64);
+                    // The materialized cap LEFT Earth's bulk: move its mass from the summary body to the
+                    // particles (else double-counted). Use the ACTUAL materialized target mass — summing the
+                    // SOURCE_TARGET grains — now that the cap is physical ρ·V (docs/28 item 4); the old
+                    // moon_mass·CAP_N/DEBRIS_N formula assumed the fudged 2×-impactor cap and over-subtracts
+                    // ~6.5×, under-massing Earth on screen.
+                    let cap_mass: f64 = agg
+                        .particles
+                        .iter()
+                        .zip(agg.source.iter())
+                        .filter(|(_, &s)| s == crate::aggregate::SOURCE_TARGET)
+                        .map(|(p, _)| p.mass)
+                        .sum();
                     self.bodies[1].mass -= cap_mass;
+                    self.moon_debris = Some(agg);
                     // The impactor IS the debris now — its matter exists exactly once. Reduce the parked
                     // point mass to nothing (a 1 kg marker keeps the body-array shape) so its mass isn't
                     // counted twice in the N-body (Theia is 11% of Earth — a real double-count).
@@ -3480,7 +3498,7 @@ mod app {
 
         /// Record the observable state at the current physics clock (the renderer's source of truth).
         fn push_snapshot(&mut self) {
-            let frag0 = (self.impactor_mass / DEBRIS_N as f64).max(1.0);
+            let frag0 = (self.impactor_mass / SCENE_DEBRIS_N as f64).max(1.0);
             let (debris, temps, sizes, mats, srcs) = match self.moon_debris.as_ref() {
                 Some(agg) => (
                     agg.particles.iter().map(|p| p.pos).collect(),
@@ -3519,7 +3537,7 @@ mod app {
             &self,
         ) -> (Vec<glam::DVec3>, Vec<glam::DVec3>, Vec<f32>, Vec<f32>, Vec<usize>, Vec<u8>, bool) {
             if self.snaps.is_empty() {
-                let frag0 = (self.impactor_mass / DEBRIS_N as f64).max(1.0);
+                let frag0 = (self.impactor_mass / SCENE_DEBRIS_N as f64).max(1.0);
                 let (d, t, sz, mt, sc) = match self.moon_debris.as_ref() {
                     Some(a) => (
                         a.particles.iter().map(|p| p.pos).collect(),
@@ -3800,7 +3818,7 @@ mod app {
             // planetary scale, emergent from the aggregate physics, not a scripted animation.
             let mut debris_count = 0usize;
             if !r_debris.is_empty() {
-                let frag_r = moon_r / (DEBRIS_N as f32).cbrt(); // N fragments ≈ the Moon's volume
+                let frag_r = moon_r / (SCENE_DEBRIS_N as f32).cbrt(); // N fragments ≈ the Moon's volume
                 // Composition rides the SAME lagged snapshot as positions/temps (r_mats): a live read of
                 // moon_debris.mat_ids desynced after drain's swap_remove reordered the live array.
                 for (i, pos) in r_debris.iter().enumerate() {
