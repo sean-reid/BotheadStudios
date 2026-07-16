@@ -496,7 +496,6 @@ impl Aggregate {
 
     /// Softened mutual-gravity acceleration on every particle (N-body).
     pub fn accelerations(&mut self) -> Vec<DVec3> {
-        let s2 = self.softening * self.softening;
         let p = &self.particles;
         let mut acc = vec![self.gravity; p.len()]; // uniform external gravity (0 for a rubble pile)
         // External extended-body gravity source (e.g. the planet the debris falls back to). OUTSIDE the
@@ -524,16 +523,19 @@ impl Aggregate {
         }
                                                    // O(n²) N-body self-gravity — only for a self-gravitating pile. A cohesive solid skips it (its
                                                    // own gravity is ~0 and this `powf(-1.5)` loop would dominate the frame; see `self_gravity`).
+        // Positions + masses, materialised ONCE and shared by BOTH accelerated schemes: Barnes–Hut for the
+        // long-range self-gravity here, and the neighbour grid for the short-range contact/SPH below
+        // (docs/30). Positions are fixed within one accelerations pass.
+        let sr_pos: Vec<DVec3> = p.iter().map(|b| b.pos).collect();
+        let masses: Vec<f64> = p.iter().map(|b| b.mass).collect();
+        // N-body SELF-GRAVITY via Barnes–Hut → O(N log N) (docs/30 stage 1c): a distant clump pulls like a
+        // single mass at its centre of mass. θ=0.5 (RMS error <1%, unbiased — below the FP/chaos noise the
+        // disk tolerates), softened exactly like the direct sum; brute-force below ~1k bodies. Only for a
+        // self-gravitating pile — a cohesive solid's own gravity is ~0 and skips it.
         if self.self_gravity {
-            for i in 0..p.len() {
-                for j in 0..p.len() {
-                    if i == j {
-                        continue;
-                    }
-                    let d = p[j].pos - p[i].pos;
-                    let r2 = d.length_squared() + s2;
-                    acc[i] += d * (G * p[j].mass * (1.0 / (r2 * r2.sqrt())));
-                }
+            let bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, 0.5, self.softening);
+            for (a, g) in acc.iter_mut().zip(bh.accelerations(&sr_pos, &masses)) {
+                *a += g;
             }
         }
         // Every declared massive body, one law each (see `gravity_bodies`) — the Sun keeps the
@@ -555,11 +557,10 @@ impl Aggregate {
         // particles passing through each other; sticking, ploughing and cratering all emerge from it.
         // O(n²) — fine for the coarse clouds here; a neighbour grid is the scaling refinement.
         // SHORT-RANGE neighbour grid (docs/30 stage 1b): O(N) pair-finding for contact + SPH, replacing the
-        // O(N²) double loops. Built ONCE at the widest reach and reused by the SPH block below (positions
-        // are fixed within one accelerations pass). It yields exactly the pairs a brute sweep would (plus a
-        // few just-outside candidates the force laws zero out), so the forces — and conservation — are
-        // identical (verified: contact_grid_matches_brute_force). Self-gravity above stays O(N²) for now.
-        let sr_pos: Vec<DVec3> = p.iter().map(|b| b.pos).collect();
+        // O(N²) double loops. Built ONCE at the widest reach (reusing `sr_pos` from above) and reused by the
+        // SPH block below. It yields exactly the pairs a brute sweep would (plus a few just-outside
+        // candidates the force laws zero out), so the forces — and conservation — are identical
+        // (verified: contact_grid_matches_brute_force).
         let sr_grid = crate::neighbors::NeighborGrid::build(&sr_pos, self.short_range_cell());
         if let Some(c) = self.contact {
             let m_ref = self.contact_ref_mass;

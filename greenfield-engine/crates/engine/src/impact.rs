@@ -1162,7 +1162,9 @@ mod tests {
         let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
         let mu = G * EARTH_MASS;
         println!("\n N (deb+cap) | Earth orbiting | Theia orbiting | total (M_moon, perigee>R)");
-        for &(dn, cn) in &[(128usize, 256usize), (256, 512), (512, 1024)] {
+        // With grid + Barnes–Hut (docs/30 1b/1c) these high-N points are now feasible — each was ~4 min at
+        // O(N²) before; grid+tree make them tractable. Watch the disk converge toward the ~1–2 M☾ real range.
+        for &(dn, cn) in &[(512usize, 1024usize), (1024, 2048), (2048, 4096)] {
             let (mut agg, mut acc) = build_impact_debris_scaled(
                 &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
                 EARTH_RADIUS_M, dn, cn,

@@ -22,6 +22,7 @@
 
 mod aggregate;
 mod atmosphere;
+mod bhtree;
 mod body;
 mod damage;
 mod emission;
