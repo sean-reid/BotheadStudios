@@ -15,11 +15,20 @@
 use glam::DVec3;
 use std::collections::HashMap;
 
+/// Below this particle count, the hash-build overhead exceeds the O(N²) it saves, so [`NeighborGrid`]
+/// stays in a plain brute-force mode — the accelerated path is NEVER slower than the loop it replaces, it
+/// only kicks in once it pays (measured: the crossover is a few hundred particles; the default impact runs
+/// 384, high-N runs will be thousands). Emitting every `i<j` pair in brute mode is exactly what the old
+/// O(N²) loops did — the force laws already zero out the far pairs — so results are identical either way.
+const BRUTE_BELOW: usize = 512;
+
 /// A uniform spatial hash over world positions. Build once per force evaluation (positions change every
-/// step); cell size = the interaction radius of the force being accelerated.
+/// step); cell size = the interaction radius of the force being accelerated. Below [`BRUTE_BELOW`] it holds
+/// no cells and [`NeighborGrid::for_each_pair`] falls back to the brute `i<j` sweep.
 pub struct NeighborGrid {
     cell: f64,
-    cells: HashMap<(i32, i32, i32), Vec<usize>>,
+    n: usize,
+    cells: Option<HashMap<(i32, i32, i32), Vec<usize>>>,
 }
 
 #[inline]
@@ -28,27 +37,41 @@ fn key(p: DVec3, cell: f64) -> (i32, i32, i32) {
 }
 
 impl NeighborGrid {
-    /// Bucket the `pos` into cells of side `cell` (clamped > 0). O(N).
+    /// Bucket the `pos` into cells of side `cell` (clamped > 0). O(N). Small clouds skip the hash entirely.
     pub fn build(pos: &[DVec3], cell: f64) -> Self {
         let cell = cell.max(1.0e-9);
-        let mut cells: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
-        for (i, p) in pos.iter().enumerate() {
-            cells.entry(key(*p, cell)).or_default().push(i);
-        }
-        Self { cell, cells }
+        let n = pos.len();
+        let cells = if n < BRUTE_BELOW {
+            None
+        } else {
+            let mut cells: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
+            for (i, p) in pos.iter().enumerate() {
+                cells.entry(key(*p, cell)).or_default().push(i);
+            }
+            Some(cells)
+        };
+        Self { cell, n, cells }
     }
 
     /// Invoke `f(i, j)` once for every unique pair `i < j` whose centres lie within one cell of each other
     /// (plus a few just-outside corner candidates — filter by the true radius in `f`). Each pair is emitted
-    /// EXACTLY once: iterating from particle `i`, a neighbour `j` is only reported when `j > i`, so the
-    /// mirror encounter from `j`'s neighbourhood is skipped. O(N · ⟨neighbours⟩).
+    /// EXACTLY once. O(N · ⟨neighbours⟩) via the hash, or the O(N²) brute sweep for small clouds — identical
+    /// pair set (brute emits all `i<j`; the force law zeroes the far ones, as the original loops did).
     pub fn for_each_pair(&self, pos: &[DVec3], mut f: impl FnMut(usize, usize)) {
+        let Some(cells) = &self.cells else {
+            for i in 0..self.n {
+                for j in (i + 1)..self.n {
+                    f(i, j);
+                }
+            }
+            return;
+        };
         for (i, p) in pos.iter().enumerate() {
             let (cx, cy, cz) = key(*p, self.cell);
             for dz in -1..=1 {
                 for dy in -1..=1 {
                     for dx in -1..=1 {
-                        if let Some(bucket) = self.cells.get(&(cx + dx, cy + dy, cz + dz)) {
+                        if let Some(bucket) = cells.get(&(cx + dx, cy + dy, cz + dz)) {
                             for &j in bucket {
                                 if j > i {
                                     f(i, j);
@@ -82,7 +105,7 @@ mod tests {
         // sweep finds — no misses (which would silently drop forces and break conservation), no spurious
         // extras beyond what a radius filter removes. Random cloud, several cell sizes.
         let mut s = 0x1234_5678u64;
-        let n = 400;
+        let n = 800; // > BRUTE_BELOW, so this exercises the CELL path (the one that can have bugs)
         let pos: Vec<DVec3> = (0..n)
             .map(|_| {
                 DVec3::new(
