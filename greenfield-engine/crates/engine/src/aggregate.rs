@@ -775,6 +775,63 @@ impl Aggregate {
             .collect()
     }
 
+    /// Hierarchical BLOCK-TIMESTEP advance by `dt` (docs/30 stage 3, the "delta" half): particles are
+    /// bucketed into power-of-2 rate levels from [`particle_timesteps`] and each is integrated at its OWN
+    /// dt via KDK leapfrog — the fast shocked/contact set is sub-stepped at dt/2^L, the quiescent set coasts
+    /// at the base dt. Reduces to a single global KDK step when everything is slow. Only the MECHANICAL
+    /// evolution (positions/velocities under the full force field); the heat/vapor/dissipation coupling is
+    /// left to the synchronized [`step`] path for now.
+    ///
+    /// STATUS: this is the verified block INTEGRATOR — it conserves energy and reproduces the global-dt
+    /// result (tested). It recomputes the full force each sub-step (CORRECTNESS first), so the actual speed
+    /// win — evaluating forces only on the ACTIVE subset each sub-step — is the flagged next increment; this
+    /// proves the scheduler is right before we make it fast.
+    pub fn step_block(&mut self, dt: f64, eta: f64) {
+        if dt <= 0.0 || self.particles.is_empty() {
+            return;
+        }
+        let mut acc = self.accelerations();
+        let ts = self.particle_timesteps(&acc, eta);
+        const LMAX: u32 = 6; // fastest bucket = dt/64; caps runaway sub-stepping
+        let level: Vec<u32> = ts
+            .iter()
+            .map(|&t| {
+                if !t.is_finite() || t >= dt {
+                    0
+                } else {
+                    (dt / t).log2().ceil().clamp(0.0, LMAX as f64) as u32
+                }
+            })
+            .collect();
+        let lmax = level.iter().copied().max().unwrap_or(0);
+        let n = 1u32 << lmax;
+        let dt_min = dt / n as f64;
+        let stride = |l: u32| 1u32 << (lmax - l); // sub-steps between a level-L particle's kicks
+        for sub in 0..n {
+            // First half-kick for every particle STARTING one of its own steps at this sub-tick.
+            for i in 0..self.particles.len() {
+                if sub % stride(level[i]) == 0 {
+                    let dt_i = dt_min * stride(level[i]) as f64;
+                    self.particles[i].vel += acc[i] * (0.5 * dt_i);
+                }
+            }
+            // Drift everyone by the smallest sub-step (leapfrog drift is exact and cheap).
+            for b in self.particles.iter_mut() {
+                b.pos += b.vel * dt_min;
+            }
+            // Recompute the force field at the new positions (full for now — subset is the perf follow-up).
+            let new_acc = self.accelerations();
+            // Second half-kick for every particle ENDING one of its own steps at this tick.
+            for i in 0..self.particles.len() {
+                if (sub + 1) % stride(level[i]) == 0 {
+                    let dt_i = dt_min * stride(level[i]) as f64;
+                    self.particles[i].vel += new_acc[i] * (0.5 * dt_i);
+                }
+            }
+            acc = new_acc;
+        }
+    }
+
     /// A coordination-corrected, **sub-critical** bond damping (N·s/m) that settles the solid without
     /// the explicit integrator going unstable. A particle with `z` bonds sees effective damping `z·c`;
     /// its critical damping is `2√(K·m) = 2√(z·k·m)`, so per bond `c_crit = 2√(k·m)/√z`. We use
@@ -1048,6 +1105,52 @@ mod tests {
         assert!(dt[0] > 0.0 && dt[0].is_finite(), "positive finite dt for real accel");
         assert!(dt[2].is_infinite(), "unaccelerated body is unconstrained");
         assert!((dt[1] / dt[0] - 10.0).abs() < 1e-6, "dt ∝ 1/√|a|: 100× accel ⇒ dt/10");
+    }
+
+    #[test]
+    fn step_block_conserves_energy_and_matches_global_dt() {
+        // docs/30 stage 3: the block integrator must (a) reduce EXACTLY to the global KDK step() when every
+        // particle shares a level, and (b) conserve energy on a mixed-level self-gravitating system over
+        // many steps (the guarantee that block-stepping doesn't corrupt the disk).
+        let ps = cloud(4, 1.0e5, 1.0e20); // 64-body gravity cloud (contact None ⇒ step() is pure KDK)
+        let soft = 3.0e4;
+        // (a) uniform level ⇒ identical to a single global step().
+        let mut a1 = Aggregate::new(ps.clone(), soft);
+        let mut a2 = Aggregate::new(ps.clone(), soft);
+        let mut acc = a1.accelerations();
+        a1.step(&mut acc, 1.0); // tiny dt ⇒ every particle is level 0
+        a2.step_block(1.0, 0.05);
+        let maxdiff = a1
+            .particles
+            .iter()
+            .zip(&a2.particles)
+            .map(|(x, y)| (x.pos - y.pos).length() + (x.vel - y.vel).length())
+            .fold(0.0, f64::max);
+        assert!(maxdiff < 1.0e-6, "block == global step at uniform level (diff {maxdiff:.3e})");
+        // (b) mixed levels, many steps ⇒ energy conserved.
+        let energy = |a: &Aggregate| -> f64 {
+            let ke: f64 = a.particles.iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
+            let s2 = a.softening * a.softening;
+            let mut pe = 0.0;
+            for i in 0..a.particles.len() {
+                for j in (i + 1)..a.particles.len() {
+                    let d2 = (a.particles[i].pos - a.particles[j].pos).length_squared() + s2;
+                    pe -= crate::orbit::G * a.particles[i].mass * a.particles[j].mass / d2.sqrt();
+                }
+            }
+            ke + pe
+        };
+        let mut a3 = Aggregate::new(ps, soft);
+        let e0 = energy(&a3);
+        for _ in 0..400 {
+            a3.step_block(120.0, 0.05); // dt > several particles' criterion ⇒ genuinely mixed levels
+        }
+        let e1 = energy(&a3);
+        assert!(
+            (e1 - e0).abs() < 0.03 * e0.abs().max(1.0),
+            "block leapfrog conserves energy: {e0:.4e} → {e1:.4e} ({:.2}%)",
+            100.0 * (e1 - e0) / e0.abs()
+        );
     }
 
     #[test]
