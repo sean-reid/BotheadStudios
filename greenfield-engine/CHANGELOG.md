@@ -9,6 +9,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **GPU SPH-EOS-gravity kernel, verified** (`shaders/sph_step.wgsl` + `tools/sph-verify`, `docs/33` stage 4a)
+  — the space-band self-gravitating condensed-matter force step (SPH density + Tillotson pressure + Monaghan
+  artificial viscosity + direct self-gravity + du/dt) ported to WGSL compute, for the giant impact at N~10⁵.
+  Verified headless on the RTX 2070 (native Vulkan wgpu) against an independent f64 CPU computation of the
+  same equations: acceleration RMS relative error 1.9e-6 — f32 round-trip precision. One force evaluation;
+  the neighbour grid / Barnes–Hut (O(N log N)) and the integration loop + scene wiring are stages 4b/4c.
 - **Deformable-Earth giant impact — the isotopic crisis, re-measured** (`hydrostatic.rs`, `docs/33` stage
   3) — a full thermodynamic SPH giant impact between two real EOS particle bodies: the SPH internal-energy
   equation + Monaghan artificial viscosity (shock capture) + an energy-conserving KDK leapfrog with an

@@ -6,11 +6,11 @@
 //   • pressure force a_i = −Σ_j m_j (P_i/ρ_i² + P_j/ρ_j² + Π_ij) ∇W    (Monaghan artificial viscosity Π)
 //   • self-gravity   a_i += Σ_j G m_j d/(|d|²+ε²)^{3/2}                (direct O(N²); a tree is stage 4b)
 //   • energy         du_i/dt = ½ Σ_j m_j (…) (v_i−v_j)·∇W
-// STATUS: written, NOT yet GPU-verified — the standalone Vulkan-wgpu harness that runs it on the RTX 2070
-// and checks it against the CPU `hydrostatic.rs` physics (the engine's own wgpu is webgpu-only, so the
-// verify must live in a separate crate like tools/gpu-verify) is the next step. Do not wire this into any
-// scene until it is verified. O(N²) here is the first correctness pass; the neighbour grid + Barnes–Hut
-// that make it O(N log N) are stage 4b (the CPU already has both — neighbors.rs / bhtree.rs — to port).
+// VERIFIED on the RTX 2070 (tools/sph-verify): this kernel matches an independent f64 CPU computation of
+// the same equations (= hydrostatic.rs) to f32 precision — acceleration RMS rel error 1.9e-6, du/dt 3.6e-6.
+// O(N²) here is the correctness pass; the neighbour grid + Barnes–Hut that make it O(N log N) are stage 4b
+// (the CPU already has both — neighbors.rs / bhtree.rs — to port), and the KDK integration loop + scene
+// wiring are stage 4c/5. This is one FORCE evaluation, verified.
 
 const PI: f32 = 3.14159265359;
 const G: f32 = 6.674e-11;

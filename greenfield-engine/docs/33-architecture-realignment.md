@@ -20,7 +20,12 @@ measurement tests; see JOURNAL for numbers):
   7–12% ceiling (docs/31). docs/28 root-cause #1 dissolved: Earth sheds its own mantle into the disk.
   (Sub-Earth scale + coarse N — the DIRECTION, not a converged number.)
 
-**Remaining:** 4 (GPU-resident stepper at N~10⁵ — the converged isotopic number), 5 (unify containers —
+**Stage 4a DONE (2026-07-17):** the GPU force kernel `shaders/sph_step.wgsl` (SPH density + Tillotson +
+Monaghan AV + direct self-gravity + du/dt) is **verified on the RTX 2070** (`tools/sph-verify`) against an
+independent f64 CPU computation — RMS rel error 1.9e-6 (f32 precision). One O(N²) force evaluation. Ahead:
+4b (port neighbours.rs grid + bhtree for O(N log N)), 4c (KDK loop + adaptive dt on-GPU + scene wiring).
+
+**Remaining:** 4b/4c (as above), 5 (unify containers —
 fold `hydrostatic`/`AirField` into `Aggregate`), 6 (energy-tiered just-in-time particalization). The
 capability currently lives in the standalone `hydrostatic.rs`; it is NOT yet wired into the wasm scene
 (stage 4/5 work) — the deployed birth scene is still the pre-realignment `OrbitDemo`.

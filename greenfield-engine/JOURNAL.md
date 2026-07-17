@@ -5,6 +5,31 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Realignment stage 4a: the GPU SPH kernel, verified on the RTX 2070 (docs/33)
+
+**What.** Ported the space-band self-gravitating condensed-matter force step to a WGSL compute shader
+(`shaders/sph_step.wgsl`) — the same physics as the CPU `hydrostatic.rs::forces_and_dudt`, in f32: SPH
+density (cubic spline, per-pair h_ij), Tillotson EOS pressure, Monaghan artificial viscosity, direct O(N²)
+self-gravity, and the du/dt energy equation. The goal is to run the giant impact at N~10⁵ (the resolution
+the isotopic number — and accretion — need). VERIFIED against an independent f64 CPU computation of the same
+equations, headless, on the box's RTX 2070 via native Vulkan wgpu (`tools/sph-verify` — a standalone crate,
+since the engine's own wgpu is webgpu-only and can't run native Vulkan).
+
+**Verified (real GPU).** `sph-verify` (N=300, mixed iron/basalt, velocities to exercise the AV): GPU vs CPU
+**acceleration RMS relative error 1.9e-6**, max per-particle 2.2e-5, **du/dt RMS 3.6e-6** — i.e. the WGSL
+matches the CPU physics to f32 round-trip precision. The kernel is faithful.
+
+**Scope.** This is ONE force evaluation, O(N²), verified. Still ahead: 4b — port the neighbour grid +
+Barnes–Hut (the CPU already has both, `neighbors.rs`/`bhtree.rs`) for O(N log N); 4c/5 — the KDK integration
+loop on-GPU + the adaptive Courant dt + wiring into the scene (with the new **accretion operator** the
+Moon-formation diagnosis showed is also required). But the hard, error-prone part — getting the SPH+EOS+AV
++gravity physics correct in WGSL f32 — is done and proven on the real device.
+
+**Why.** docs/33 stage 4: correctness-first — verify the GPU kernel against the CPU reference on the real
+GPU before wiring it into anything (docs/30 discipline: speed must never change the answer).
+
+---
+
 ## 2026-07-17 — Can the disk accrete a Moon? Diagnosis + the Roche-disruption fix (docs/28/33)
 
 **What.** Robin, watching the deployed birth scene: "I never see particles join — no accretion into a
