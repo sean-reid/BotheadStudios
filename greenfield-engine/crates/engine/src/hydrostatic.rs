@@ -472,6 +472,62 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "dump the impact particle state to VIZ_OUT for visualisation — run with --ignored"]
+    fn dump_deformable_earth_impact_for_viz() {
+        // A FAST, smaller version of the stage-3c impact that writes the final particle state (position,
+        // provenance, orbiting-disk flag) to the JSON path in $VIZ_OUT — for a visualisation of the
+        // Earth-derived disk. Same physics, coarser N so it's quick.
+        let Some(out) = std::env::var("VIZ_OUT").ok() else { return };
+        let (core, mantle) = (Tillotson::iron(), Tillotson::basalt());
+        let mut earth = HydroBody::new_differentiated(core, mantle, 0.5 * 5.0e6, 5.0e6, 1.0e6, 1800);
+        let mut theia = HydroBody::new_differentiated(core, mantle, 0.5 * 2.7e6, 2.7e6, 1.0e6, 300);
+        relax(&mut earth, 2200);
+        relax(&mut theia, 1200);
+        let (m_earth, m_theia): (f64, f64) = (earth.mass.iter().sum(), theia.mass.iter().sum());
+        let (r_e, r_t) = (body_radius(&earth), body_radius(&theia));
+        let n_earth = earth.pos.len();
+        let contact = r_e + r_t;
+        let v = 1.15 * (2.0 * G * (m_earth + m_theia) / contact).sqrt();
+        let ec = earth.com();
+        for i in 0..earth.pos.len() { earth.pos[i] -= ec; earth.vel[i] = DVec3::ZERO; }
+        let tc = theia.com();
+        for i in 0..theia.pos.len() {
+            theia.pos[i] = theia.pos[i] - tc + DVec3::new(1.6 * contact, 1.0 * r_e, 0.0);
+            theia.vel[i] = DVec3::new(-v, 0.0, 0.0);
+        }
+        let mut body = earth;
+        body.pos.extend(theia.pos); body.vel.extend(theia.vel); body.mass.extend(theia.mass);
+        body.u.extend(theia.u); body.eos.extend(theia.eos); body.h.extend(theia.h); body.rho.extend(theia.rho);
+        for _ in 0..4000 {
+            body.compute_density();
+            let dt = body.courant_dt(0.1);
+            body.step(dt);
+        }
+        // Classify each particle (remnant / orbiting disk / escaped) as in the measurement test.
+        let com = body.com();
+        let m_total: f64 = body.mass.iter().sum();
+        let v_com: DVec3 = { let mut p = DVec3::ZERO; for i in 0..body.pos.len() { p += body.vel[i] * body.mass[i]; } p / m_total };
+        let mut radii: Vec<(f64, f64)> = (0..body.pos.len()).map(|i| ((body.pos[i] - com).length(), body.mass[i])).collect();
+        radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let (mut cum, mut r_rem, mut m_rem) = (0.0, 0.0, m_total);
+        for &(r, m) in &radii { cum += m; if cum >= 0.85 * m_total { r_rem = r; m_rem = cum; break; } }
+        let mu = G * m_rem;
+        let scale = 1.0e6; // metres → the JSON is in units of 1000 km, centred on the remnant COM
+        let mut s = String::from("{\"r_remnant\":");
+        s.push_str(&format!("{:.3},\"pts\":[", r_rem / scale));
+        for i in 0..body.pos.len() {
+            let rel_p = body.pos[i] - com;
+            let peri = crate::orbit::perigee(rel_p, body.vel[i] - v_com, mu);
+            let cls = match peri { None => 2, Some(p) if p > r_rem => 1, Some(_) => 0 }; // 0 remnant,1 disk,2 escaped
+            if i > 0 { s.push(','); }
+            s.push_str(&format!("[{:.3},{:.3},{:.3},{},{}]", rel_p.x / scale, rel_p.y / scale, rel_p.z / scale, if i < n_earth { 0 } else { 1 }, cls));
+        }
+        s.push_str("]}");
+        std::fs::write(&out, s).unwrap();
+        println!("wrote {} particles to {out}", body.pos.len());
+    }
+
+    #[test]
     #[ignore = "the deformable-Earth giant impact (relax two bodies + collide) — run with --ignored"]
     fn a_deformable_earth_impact_measures_the_disk_provenance() {
         // docs/33 stage 3c — THE ISOTOPIC-CRISIS RE-MEASUREMENT. The rigid-boundary Earth put a ceiling on
