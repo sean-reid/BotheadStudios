@@ -95,12 +95,21 @@ impl Tillotson {
         (dp_drho + p / (rho * rho) * dp_du).max(0.0)
     }
 
-    // ---- Cited parameter sets (Melosh 1989, Table AII.3; Benz, Cameron & Melosh 1989 for iron). ----
-    // FLAGGED: these live here for stage 1; migrating them into data/materials.json (a `tillotson` block
-    // alongside `thermal`) is the source-of-truth follow-up (docs/04). ANEOS/M-ANEOS give a better vapor
-    // curve and are the flagged upgrade path; the closure is swappable per material.
+    // ---- Parameter sets. PROVENANCE / HONESTY (docs/33): ----
+    // BASALT is VERIFIED against Benz & Asphaug 1999 (Table 2): ρ₀=2700, A=B=26.7 GPa, E₀=487 MJ/kg,
+    // E_iv=4.72, E_cv=18.2 MJ/kg, α=β=5 (A = the bulk modulus; B = A). This is the material stage 2a
+    // settled with, and it matches exactly.
+    // GRANITE, DUNITE, IRON below are the standard Melosh-1989-family values as commonly transcribed in the
+    // giant-impact literature — but I have NOT confirmed them against the primary table (Melosh 1989 p.234;
+    // Benz, Cameron & Melosh 1989): the source PDFs were not text-extractable online. Treat them as
+    // PROVISIONAL — verify against the primary source before making a physics claim that depends on them.
+    // (Known correction applied: dunite ρ₀ = 3320, per Chau et al. 2018.) A prior differentiated-body
+    // experiment (stage 2b) puffed up, which may reflect a bad transcribed parameter here AND/OR the
+    // equal-volume SPH init — both flagged, both to be resolved before the layered planet is trusted.
+    // FLAGGED follow-up: migrate the verified sets into data/materials.json (a `tillotson` block alongside
+    // `thermal`, docs/04); ANEOS/M-ANEOS are the better-vapor-curve upgrade (the closure is swappable).
 
-    /// Granite (Melosh 1989). Continental-crust analog.
+    /// Granite (Melosh 1989 — PROVISIONAL, unverified against the primary table). Continental-crust analog.
     pub fn granite() -> Self {
         Tillotson {
             rho0: 2680.0,
@@ -132,12 +141,13 @@ impl Tillotson {
         }
     }
 
-    /// Dunite / olivine (Benz, Cameron & Melosh 1989). The engine's PERIDOTITE mantle analog — the standard
-    /// giant-impact mantle material (peridotite is olivine+pyroxene; dunite is olivine, the closest cited
-    /// Tillotson set).
+    /// Dunite / olivine — the engine's PERIDOTITE mantle analog (peridotite is olivine+pyroxene; dunite is
+    /// olivine, the standard giant-impact mantle material). PROVISIONAL: ρ₀=3320 is confirmed (Chau et al.
+    /// 2018); the moduli/energies are transcribed and UNVERIFIED against the primary table — `cap_b` in
+    /// particular is suspect (a differentiated body using it puffed up). Verify before relying on it.
     pub fn peridotite() -> Self {
         Tillotson {
-            rho0: 3500.0,
+            rho0: 3320.0,
             a: 0.5,
             b: 1.4,
             cap_a: 1.31e11,
@@ -150,7 +160,7 @@ impl Tillotson {
         }
     }
 
-    /// Iron (Benz, Cameron & Melosh 1989). The engine's core material.
+    /// Iron (Benz, Cameron & Melosh 1989 — PROVISIONAL, unverified against the primary table). Core material.
     pub fn iron() -> Self {
         Tillotson {
             rho0: 7800.0,

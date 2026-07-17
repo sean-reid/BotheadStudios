@@ -5,6 +5,34 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Honesty pass: EOS parameter provenance + stage-2b puff-up (docs/33)
+
+**What.** Two honest corrections while extending stage 2 to a layered/differentiated planet (stage 2b):
+
+1. **EOS parameter provenance.** Stage 1's tests verify only SELF-CONSISTENCY (cold P=0, K=A, continuity),
+   NOT agreement with the literature — so a wrong-but-self-consistent parameter passes. I had written the
+   Tillotson params from memory and labeled them "cited." Verified what I could: **BASALT matches Benz &
+   Asphaug 1999 (Table 2) exactly** (ρ₀=2700, A=B=26.7 GPa, E₀=487, E_iv=4.72, E_cv=18.2 MJ/kg, α=β=5) —
+   which is why stage 2a settled cleanly. GRANITE, DUNITE, IRON I could NOT verify online (papers cite
+   Melosh 1989 p.234 but don't reproduce the table; PDFs weren't text-extractable), so `eos.rs` now flags
+   them **PROVISIONAL — unverified against the primary table**. One confirmed fix: dunite ρ₀ 3500 → **3320**
+   (Chau et al. 2018). No false "cited" claim stands.
+
+2. **Stage 2b (differentiated iron-core + peridotite-mantle body) PUFFED UP** — RMS radius blew from 2000 km
+   to ~15,700 km, mantle density collapsed to 507 kg/m³. The prototype's assertions were too weak and it
+   FALSELY passed; I reverted it. Two likely causes, both flagged: (a) the equal-volume / **unequal-mass**
+   SPH init corrupts density at the core–mantle interface — proper differentiated bodies need **equal-mass
+   particles + adaptive smoothing length** (standard SPH); (b) a bad transcribed parameter (dunite `cap_b`
+   is suspect). Deferred until both are resolved: verified params + equal-mass/adaptive-h init.
+
+**Verified.** EOS self-consistency 6/6 still green after the dunite-ρ₀ correction; single-material stage 2a
+(basalt, verified params) stands as the solid milestone. Stage 2b reverted, not shipped.
+
+**Why.** No-fudge (docs/23): don't claim "cited" without verifying, and don't ship a test that passes on a
+physically wrong (puffed-up) body. Recorded the real state rather than a green checkmark.
+
+---
+
 ## 2026-07-17 — Realignment stage 2: a particle planet holds itself up (self-gravitating EOS body, docs/33)
 
 **What.** Added `hydrostatic.rs` — a self-gravitating condensed-matter body that holds itself in hydrostatic
