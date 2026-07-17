@@ -9,6 +9,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Deformable-Earth giant impact — the isotopic crisis, re-measured** (`hydrostatic.rs`, `docs/33` stage
+  3) — a full thermodynamic SPH giant impact between two real EOS particle bodies: the SPH internal-energy
+  equation + Monaghan artificial viscosity (shock capture) + an energy-conserving KDK leapfrog with an
+  adaptive Courant timestep (verified: a relaxed head-on collision conserves total energy to ~3% and
+  shock-heats, IE up 4.9×). Then the payoff: a differentiated Theia into a **deformable differentiated
+  proto-Earth** yields an orbiting disk that is **58% EARTH-derived** — versus the rigid-boundary ceiling of
+  7–12% (docs/31). With Earth as real matter that sheds its own mantle, Earth material dominates the disk —
+  the direction the isotopic crisis demands (docs/28 root-cause #1 dissolved). Sub-Earth scale + coarse N:
+  the direction, not a converged number (the value awaits the GPU N, stage 4).
 - **Self-gravitating EOS body — a particle planet in hydrostatic equilibrium** (`hydrostatic.rs`, `docs/33`
   stage 2) — composes the shared kernels (`eos::Tillotson` + the SPH kernel + `bhtree` self-gravity) into a
   cloud of particles that holds itself up under its own gravity via EOS pressure, instead of the rigid

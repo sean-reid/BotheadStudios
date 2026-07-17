@@ -5,6 +5,37 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Realignment stage 3c: a DEFORMABLE Earth resolves the isotopic-crisis DIRECTION (docs/33)
+
+**What.** The scientific payoff of the whole realignment: collided a differentiated Theia into a
+**deformable, self-gravitating, differentiated proto-Earth** (both real EOS particle bodies, relaxed first)
+obliquely at ~mutual escape speed, integrated the aftermath with the shock-capturing SPH integrator (3a),
+and MEASURED the bound orbiting disk by provenance (Earth particles vs Theia). Disk = bound material whose
+orbital **perigee is above the remnant surface** (genuinely orbiting, separated from the planet body —
+`orbit::perigee` about the 85%-mass remnant). No dial; the composition EMERGES.
+
+**MEASURED (native, #[ignore], ~446 s).** `a_deformable_earth_impact_measures_the_disk_provenance`
+(M_e=1.75e24 kg ≈ 0.29 M⊕, M_t=2.76e23, v≈7.3 km/s, N≈2100):
+- **Orbiting disk 0.207 M☾ — 58% EARTH-derived** (Earth 8.75e21 | Theia 6.43e21 kg).
+- Remnant: Earth 1.72e24 | Theia 2.22e23 kg; escaped: 2.1e22 | 4.7e22 kg.
+
+**THE FINDING.** The rigid-boundary Earth capped the disk at **7–12% Earth** (docs/31 — only the excavated
+cap could reach orbit). With Earth as REAL MATTER that can shed its own mantle, the disk jumps to **58%
+Earth-derived** — Earth material not only reaches orbit, it DOMINATES the disk. This is the direction the
+isotopic crisis demands (the real Moon is isotopically Earth-like), and it is exactly docs/28 root-cause #1
+(the rigid boundary) being dissolved. Earth is now a participant in its own catastrophe.
+
+**Honest caveats (no-fudge).** Sub-Earth scale (0.29 M⊕), coarse N (~2100 — a resolution/scale IOU,
+docs/28), and the post-impact remnant is hot/expanded (R_remnant 9086 km), so the disk is defined beyond
+that. **58% is the DIRECTION** (rigid ~10% → deformable ~58%), NOT a converged number — the converged
+value waits for the GPU N (stage 4). A first attempt with a too-head-on geometry merged with no disk and
+mis-measured (counted the whole extended Earth as "disk" — 89%); that artifact was rejected and the
+measurement fixed to the perigee-above-remnant criterion.
+
+**Verified.** Full fast suite 151/151; wasm builds. Stages 1→3c all green.
+
+---
+
 ## 2026-07-17 — Realignment stage 3a: dynamical SPH — energy equation + artificial viscosity (docs/33)
 
 **What.** Turned the isothermal planet into a full thermodynamic SPH body for the impact: added to
