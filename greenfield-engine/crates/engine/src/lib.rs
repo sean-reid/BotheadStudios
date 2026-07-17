@@ -29,6 +29,7 @@ mod emission;
 mod eos;
 mod granular;
 mod gravity;
+mod hydrostatic;
 mod impact;
 mod planet;
 mod tides;

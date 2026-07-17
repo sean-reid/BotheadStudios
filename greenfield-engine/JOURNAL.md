@@ -5,6 +5,34 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Realignment stage 2: a particle planet holds itself up (self-gravitating EOS body, docs/33)
+
+**What.** Added `hydrostatic.rs` — a self-gravitating condensed-matter body that holds itself in hydrostatic
+equilibrium as REAL MATTER (a cloud of particles), instead of the rigid analytic boundary the impact scene
+uses (docs/28 root cause #1). It is the "merge" docs/32 §3 identified: it COMPOSES the shared kernels rather
+than forking them — `eos::Tillotson` pressure (stage 1) + the one SPH kernel `atmosphere::sph_w/dw` +
+`bhtree::BarnesHut` self-gravity. `HydroBody::new_sphere` fills a sphere with equal-mass particles at ρ₀,
+each with `u=c·T`; `relax_step` settles it (damped) under self-gravity + the symmetric SPH-EOS pressure
+force `a=−Σm(P_i/ρ_i²+P_j/ρ_j²)∇W` with `P=Tillotson(ρ,u)`. The only new physics is the condensed EOS; at
+unification (docs/33 stage 5) this folds INTO `Aggregate` so a planet and its debris are one particle
+system — for now it's a focused, independently-verified module (correctness-first).
+
+**Verified (native, #[ignore], ~215 s).** `a_self_gravitating_eos_body_settles_into_hydrostatic_balance`:
+a 1500 km basalt body (N=3000) relaxed under self-gravity + Tillotson pressure —
+- **Stable:** settled RMS radius **1383 km**, spread **1.1%** over the last steps (no collapse/explosion).
+- **Hydrostatic balance pointwise:** dP/dr vs −ρ(r)·g(r) [g=G·M(<r)/r² from the enclosed particle mass] —
+  at r=484 km, −902 vs −1081 (17%); at r=761 km, **−1660 vs −1617 (3%)** — right sign, within SPH operator
+  tolerance (cf. atmosphere.rs's 3D balance at ~35%).
+- **Central pressure 2.29 GPa** vs the uniform-density self-gravity estimate 3.17 GPa — same order, a real
+  planet pressure.
+Full fast suite 151/151; wasm builds. Isothermal (u fixed) this stage — the adiabatic energy equation
+under compression is the stage 2b/3 refinement. Not yet in a scene.
+
+**Why.** The prerequisite for dissolving the rigid boundary (docs/28 #1, docs/31): a planet that is real
+matter can shed its own mantle into the disk. Proves the merge works before touching the tested `Aggregate`.
+
+---
+
 ## 2026-07-17 — Realignment stage 1: the Tillotson condensed-matter EOS (docs/33)
 
 **What.** Added `eos.rs` — the **Tillotson equation of state**, `P(ρ, u)` for condensed matter across cold /
