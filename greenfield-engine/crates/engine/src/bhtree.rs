@@ -133,6 +133,33 @@ impl BarnesHut {
         (0..self.n).map(|i| self.accel_on(i, 0, pos, mass)).collect()
     }
 
+    /// Softened self-gravity on ONLY the `active` bodies (others get `DVec3::ZERO`) — the block-timestep
+    /// fast path (docs/30 stage 3): a coasting particle's gravity is not recomputed until its own kick, so
+    /// per-sub-step traversal cost drops from O(N log N) to O(N_active log N). The tree is still built over
+    /// ALL current positions, so the active bodies see every other body correctly.
+    pub fn accelerations_active(&self, pos: &[DVec3], mass: &[f64], active: &[bool]) -> Vec<DVec3> {
+        if self.nodes.is_empty() {
+            let mut acc = vec![DVec3::ZERO; self.n];
+            for i in 0..self.n {
+                if !active[i] {
+                    continue;
+                }
+                for j in 0..self.n {
+                    if i == j {
+                        continue;
+                    }
+                    let d = pos[j] - pos[i];
+                    let r2 = d.length_squared() + self.soft2;
+                    acc[i] += d * (G * mass[j] / (r2 * r2.sqrt()));
+                }
+            }
+            return acc;
+        }
+        (0..self.n)
+            .map(|i| if active[i] { self.accel_on(i, 0, pos, mass) } else { DVec3::ZERO })
+            .collect()
+    }
+
     /// Acceleration on body `i` from the subtree rooted at `node` (iterative-free recursion over the tree).
     fn accel_on(&self, i: usize, node: usize, pos: &[DVec3], mass: &[f64]) -> DVec3 {
         let nd = &self.nodes[node];

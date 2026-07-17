@@ -496,6 +496,15 @@ impl Aggregate {
 
     /// Softened mutual-gravity acceleration on every particle (N-body).
     pub fn accelerations(&mut self) -> Vec<DVec3> {
+        self.accelerations_masked(None)
+    }
+
+    /// [`accelerations`] with an optional gravity-active mask (docs/30 stage 3): when `grav_active` is set,
+    /// the O(N log N) self-gravity is evaluated ONLY for the marked (active) particles — the block-timestep
+    /// fast path. Everything else (short-range contact/SPH, boundary, external gravity) is computed as usual
+    /// for all, so the active particles get their FULL correct force; unmarked particles' self-gravity is
+    /// left zero (their entry is stale and `step_block` only reads the active ones).
+    fn accelerations_masked(&mut self, grav_active: Option<&[bool]>) -> Vec<DVec3> {
         let p = &self.particles;
         let mut acc = vec![self.gravity; p.len()]; // uniform external gravity (0 for a rubble pile)
         // External extended-body gravity source (e.g. the planet the debris falls back to). OUTSIDE the
@@ -534,8 +543,12 @@ impl Aggregate {
         // self-gravitating pile — a cohesive solid's own gravity is ~0 and skips it.
         if self.self_gravity {
             let bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, 0.5, self.softening);
-            for (a, g) in acc.iter_mut().zip(bh.accelerations(&sr_pos, &masses)) {
-                *a += g;
+            let g = match grav_active {
+                Some(active) => bh.accelerations_active(&sr_pos, &masses, active),
+                None => bh.accelerations(&sr_pos, &masses),
+            };
+            for (a, gi) in acc.iter_mut().zip(g) {
+                *a += gi;
             }
         }
         // Every declared massive body, one law each (see `gravity_bodies`) — the Sun keeps the
@@ -782,10 +795,12 @@ impl Aggregate {
     /// evolution (positions/velocities under the full force field); the heat/vapor/dissipation coupling is
     /// left to the synchronized [`step`] path for now.
     ///
-    /// STATUS: this is the verified block INTEGRATOR — it conserves energy and reproduces the global-dt
-    /// result (tested). It recomputes the full force each sub-step (CORRECTNESS first), so the actual speed
-    /// win — evaluating forces only on the ACTIVE subset each sub-step — is the flagged next increment; this
-    /// proves the scheduler is right before we make it fast.
+    /// STATUS: verified (conserves energy, reproduces the global-dt result) AND fast — the O(N log N)
+    /// self-gravity is now evaluated only on the ACTIVE subset each sub-step (a coasting particle's gravity
+    /// is not recomputed until its own kick). Short-range contact/SPH are still computed for all each
+    /// sub-step (cheap, and keeps contact reactions symmetric), and the heat/vapor/dissipation coupling
+    /// stays on the synchronized [`step`] path — so this is the mechanical block integrator, not yet a
+    /// drop-in for the full thermodynamic impact step (that coupling is the flagged next increment).
     pub fn step_block(&mut self, dt: f64, eta: f64) {
         if dt <= 0.0 || self.particles.is_empty() {
             return;
@@ -819,16 +834,22 @@ impl Aggregate {
             for b in self.particles.iter_mut() {
                 b.pos += b.vel * dt_min;
             }
-            // Recompute the force field at the new positions (full for now — subset is the perf follow-up).
-            let new_acc = self.accelerations();
-            // Second half-kick for every particle ENDING one of its own steps at this tick.
+            // ACTIVE = particles ENDING one of their own steps at this tick — only these need a fresh force
+            // (for their closing half-kick). The expensive self-gravity is evaluated for the active set
+            // ONLY; short-range forces are still computed for all (cheap, and keeps contact reactions
+            // symmetric), but only the active particles' entries are read.
+            let active: Vec<bool> =
+                (0..self.particles.len()).map(|i| (sub + 1) % stride(level[i]) == 0).collect();
+            let new_acc = self.accelerations_masked(Some(&active));
+            // Second half-kick for the active particles, and refresh ONLY their stored accel — a coasting
+            // particle keeps the force from its last kick, so it genuinely coasts (the O(N)→O(N_active) win).
             for i in 0..self.particles.len() {
-                if (sub + 1) % stride(level[i]) == 0 {
+                if active[i] {
                     let dt_i = dt_min * stride(level[i]) as f64;
                     self.particles[i].vel += new_acc[i] * (0.5 * dt_i);
+                    acc[i] = new_acc[i];
                 }
             }
-            acc = new_acc;
         }
     }
 
@@ -1105,6 +1126,53 @@ mod tests {
         assert!(dt[0] > 0.0 && dt[0].is_finite(), "positive finite dt for real accel");
         assert!(dt[2].is_infinite(), "unaccelerated body is unconstrained");
         assert!((dt[1] / dt[0] - 10.0).abs() < 1e-6, "dt ∝ 1/√|a|: 100× accel ⇒ dt/10");
+    }
+
+    #[test]
+    #[ignore = "block-timestep speedup benchmark — run with --ignored"]
+    fn step_block_speedup_bench() {
+        use std::time::Instant;
+        // The giant-impact aftermath shape: a few violent particles (a dense fast core) among many
+        // quiescent orbiters (a sparse slow halo) — a wide range of dynamical times. Gravity only, so step()
+        // is a pure mechanical KDK and the comparison is apples-to-apples.
+        let mut s = 0x9911_2233u64;
+        let mut rng = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 40) as f64 / (1u64 << 24) as f64 - 0.5
+        };
+        let mut ps = Vec::new();
+        for _ in 0..2000 {
+            let dir = DVec3::new(rng(), rng(), rng()).normalize_or_zero();
+            ps.push(Body { pos: dir * (5.0e6 + rng().abs() * 5.0e6), vel: DVec3::ZERO, mass: 1.0e18 });
+        }
+        for _ in 0..200 {
+            ps.push(Body { pos: DVec3::new(rng(), rng(), rng()) * 1.0e5, vel: DVec3::ZERO, mass: 1.0e20 });
+        }
+        let (soft, dt, eta) = (3.0e4, 40.0, 0.05);
+        let mut probe = Aggregate::new(ps.clone(), soft);
+        let acc0 = probe.accelerations();
+        let tmin = probe.particle_timesteps(&acc0, eta).iter().cloned().fold(f64::INFINITY, f64::min);
+        let n_global = (dt / tmin).ceil().max(1.0) as usize;
+        let mut g = Aggregate::new(ps.clone(), soft);
+        let mut gacc = g.accelerations();
+        let t0 = Instant::now();
+        for _ in 0..n_global {
+            g.step(&mut gacc, dt / n_global as f64);
+        }
+        let t_global = t0.elapsed().as_secs_f64();
+        let mut b = Aggregate::new(ps, soft);
+        let t1 = Instant::now();
+        b.step_block(dt, eta);
+        let t_block = t1.elapsed().as_secs_f64();
+        println!("\nN=2200 (2000 slow halo + 200 fast core), dt={dt}, fastest needs {n_global} sub-steps");
+        println!("global sub-stepping: {:.1} ms", t_global * 1e3);
+        println!(
+            "block-timestep:      {:.1} ms   → {:.1}× faster",
+            t_block * 1e3,
+            t_global / t_block.max(1e-9)
+        );
     }
 
     #[test]
