@@ -5,6 +5,22 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Stage 4c prepped for a fresh session + landing hero shipped (docs/34)
+
+**What.** Two things closing out a long session. (1) Built + deployed the **landing-page hero N-body
+field** (front-end handoff): a real 2-D velocity-Verlet `F = G·m/r²` sim in `web/src/landing.ts` with honest
+live telemetry (bodies / steps / Σ½mv²) and drag-to-toss — the page no longer over-promises. Verified (tsc,
+vite, rig-screenshot), live on integrity.bothead.net. (2) Wrote **`docs/34-stage-4c-pickup.md`** — a
+self-contained spec so a new session executes stage 4c without re-deriving: the verified 4a/4b foundation
+(`sph_step.wgsl` force kernel + grid, `tools/sph-verify`), the four 4c sub-tasks (GPU KDK integration loop +
+adaptive dt → high-N impact for the converged number → accretion operator → browser scene wiring), and the
+session's hard-won gotchas (engine wgpu is webgpu-only → verify in a standalone Vulkan crate; the grid
+cell-membership guard; relax-before-collide; f32 Earth-relative frame; verify-before-wire).
+
+**State.** Realignment stages 1–3 + 4a + 4b DONE and verified; 4c prepped. Working tree clean, all pushed.
+
+---
+
 ## 2026-07-17 — Realignment stage 4b: the SPH neighbour grid on GPU, verified (docs/33)
 
 **What.** Added a spatial-hash **neighbour grid** to `shaders/sph_step.wgsl` so the short-range SPH
