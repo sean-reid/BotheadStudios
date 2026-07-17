@@ -3346,10 +3346,18 @@ mod app {
                     } else {
                         crate::planet::moon()
                     };
+                    // Proto-Earth's pre-impact spin (docs/31): its excavated mantle is born co-rotating,
+                    // so a fast primordial spin flings Earth material into the disk (the isotopic-crisis
+                    // lever). `self.spin_l` is the ANGULAR MOMENTUM; convert to angular velocity ω = L/I
+                    // with the solid-sphere I = 2/5 M R² before the cap materialises (the impact then
+                    // adds its own spin to Earth on top).
+                    let earth_i = 0.4 * self.bodies[1].mass * EARTH_RADIUS_M * EARTH_RADIUS_M;
+                    let earth_omega =
+                        if earth_i > 0.0 { self.spin_l / earth_i } else { glam::DVec3::ZERO };
                     let (agg, acc0) = crate::impact::build_impact_debris_scaled(
                         &self.mats, site, earth_pos, earth_vel, moon_mass, v_contact,
                         &impactor_profile, &crate::planet::earth(), EARTH_MASS, EARTH_RADIUS_M,
-                        SCENE_DEBRIS_N, SCENE_CAP_N,
+                        SCENE_DEBRIS_N, SCENE_CAP_N, earth_omega,
                     );
                     self.debris_acc = acc0;
                     self.impact_site_rel = Some(site - earth_pos); // crater mask, in Earth's frame

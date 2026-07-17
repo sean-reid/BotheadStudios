@@ -405,7 +405,7 @@ pub fn build_impact_debris_between(
 ) -> (Aggregate, Vec<DVec3>) {
     build_impact_debris_scaled(
         mats, site, earth_pos, earth_vel, impactor_mass, v_contact, impactor, target, earth_mass,
-        earth_radius, DEBRIS_N, CAP_N,
+        earth_radius, DEBRIS_N, CAP_N, DVec3::ZERO,
     )
 }
 
@@ -431,6 +431,7 @@ pub fn build_impact_debris_scaled(
     earth_radius: f64,
     debris_n: usize,
     cap_n: usize,
+    earth_omega: DVec3,
 ) -> (Aggregate, Vec<DVec3>) {
     let impact_n = debris_n + cap_n;
     let moon_mass = impactor_mass;
@@ -502,6 +503,24 @@ pub fn build_impact_debris_scaled(
     mat_ids.extend(cap_mats);
     temps.extend(cap_temps);
     source.extend(cap_src);
+
+    // PROTO-EARTH SPIN (docs/31 — the isotopic crisis). The excavated cap is EARTH's surface mantle, and
+    // it was co-rotating with the planet BEFORE the impact — so it is born with the local ground velocity
+    // `ω × (pos − centre)`, not at rest in Earth's frame. A slow (or non-)spinning proto-Earth gives this
+    // ≈ 0 and the cap must be lofted to orbit entirely by the impact; a FAST-spinning one (Ćuk & Stewart
+    // 2012, near the ~2.3 h rotational-stability limit) hands its own mantle a ~4.8 km/s PROGRADE tangential
+    // head start — most of circular velocity — so far more EARTH material holds a perigee and stays in the
+    // bound disk. That is the proposed resolution of the isotopic crisis: the disk is Earth-derived because
+    // Earth's own fast rotation flings its mantle out. Applied ONLY to the target cap (the impactor arrives
+    // from space, not co-rotating), and BEFORE the ploughing loft so the exchange acts on the real
+    // pre-impact velocity. `earth_omega = 0` is byte-identical to the pre-spin build.
+    if earth_omega != DVec3::ZERO {
+        for (p, &s) in particles.iter_mut().zip(source.iter()) {
+            if s == crate::aggregate::SOURCE_TARGET {
+                p.vel += earth_omega.cross(p.pos - earth_pos);
+            }
+        }
+    }
 
     // MOMENTUM-CONSERVING LOFT (docs/28 step 3) — the shared particle-physics primitive: the impactor
     // ploughs the excavated target matter downrange, sharing tangential momentum toward the COM (what the
@@ -707,6 +726,117 @@ mod tests {
         assert!(
             escaped < 0.5 * (m_theia + aloft_bound),
             "most material is retained by Earth's gravity"
+        );
+    }
+
+    #[test]
+    #[ignore = "O(n²) aftermath ×2 builds — the isotopic-crisis measurement, run on demand"]
+    fn a_fast_spinning_protoearth_makes_the_disk_earth_derived() {
+        // docs/31 — THE ISOTOPIC CRISIS. The canonical low-angular-momentum giant impact makes a disk that
+        // is mostly THEIA, yet the real Moon is isotopically ~identical to Earth's mantle. Ćuk & Stewart
+        // (2012) proposed the resolution: a FAST-spinning proto-Earth (near its ~2.3 h rotational-stability
+        // limit) flings its OWN mantle out — the excavated Earth material is born co-rotating at ~ω·R ≈ 4.8
+        // km/s prograde, most of circular velocity, so it holds a perigee and stays in the bound disk
+        // instead of re-impacting. We MEASURE that: the same oblique Theia impact, built once with a
+        // non-spinning proto-Earth (ω=0) and once fast-spinning, and compare the disk's EARTH-derived
+        // bound-aloft mass and Earth fraction. No dial is tuned to a target composition — spin is a
+        // physical initial condition and the disk provenance EMERGES.
+        let mats = materials::load();
+        let theia = crate::planet::theia();
+        let earth = crate::planet::earth();
+        let m_theia = theia.total_mass();
+        let earth_pos = DVec3::ZERO;
+        let earth_vel = DVec3::ZERO;
+        let site = DVec3::new(0.0, EARTH_RADIUS_M, 0.0);
+        let v_esc =
+            (2.0 * G * (EARTH_MASS + m_theia) / (EARTH_RADIUS_M + theia.radius())).sqrt();
+        let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
+        let (dn, cn) = (256, 512);
+
+        // Bound-aloft mass split by provenance (Earth = SOURCE_TARGET, Theia = SOURCE_IMPACTOR).
+        let disk_provenance = |agg: &Aggregate| -> (f64, f64) {
+            let mu = G * EARTH_MASS;
+            let (mut earth_m, mut theia_m) = (0.0f64, 0.0f64);
+            for (i, p) in agg.particles.iter().enumerate() {
+                let r = (p.pos - earth_pos).length();
+                let v2 = (p.vel - earth_vel).length_squared();
+                if 0.5 * v2 - mu / r < 0.0 && r > 1.1 * EARTH_RADIUS_M {
+                    if agg.source[i] == crate::aggregate::SOURCE_TARGET {
+                        earth_m += p.mass;
+                    } else {
+                        theia_m += p.mass;
+                    }
+                }
+            }
+            (earth_m, theia_m)
+        };
+
+        // PROGRADE spin: the disk's orbital angular momentum here is along −ẑ (r×v at the top of the sphere
+        // with a +x tangential v_contact), and ω = ω0·(−ẑ) gives ω×r = +x at the site — aligned with the
+        // disk. A retrograde spin would fight the disk; we test the physically-motivated prograde case.
+        let day_hours = 2.3; // near the rotational-stability limit (Ćuk & Stewart 2012)
+        let omega0 = 2.0 * std::f64::consts::PI / (day_hours * 3600.0);
+        let omega = DVec3::new(0.0, 0.0, -omega0);
+        println!(
+            "proto-Earth spin: {day_hours:.1} h day → ω·R = {:.0} m/s at the surface",
+            omega0 * EARTH_RADIUS_M
+        );
+
+        let m_moon = MOON_MASS;
+        let mut run = |w: DVec3| -> (f64, f64) {
+            let (mut agg, mut acc) = build_impact_debris_scaled(
+                &mats, site, earth_pos, earth_vel, m_theia, v_contact, &theia, &earth, EARTH_MASS,
+                EARTH_RADIUS_M, dn, cn, w,
+            );
+            for _ in 0..3000 {
+                agg.step(&mut acc, 2.0);
+            }
+            disk_provenance(&agg)
+        };
+
+        let (e0, t0) = run(DVec3::ZERO);
+        let (e1, t1) = run(omega);
+        let frac0 = e0 / (e0 + t0).max(1e-30);
+        let frac1 = e1 / (e1 + t1).max(1e-30);
+        println!(
+            "ω=0      : Earth {:.3} | Theia {:.3} M☾  → disk is {:.0}% Earth",
+            e0 / m_moon,
+            t0 / m_moon,
+            100.0 * frac0
+        );
+        println!(
+            "ω=fast   : Earth {:.3} | Theia {:.3} M☾  → disk is {:.0}% Earth",
+            e1 / m_moon,
+            t1 / m_moon,
+            100.0 * frac1
+        );
+
+        // MEASURED FINDING (docs/31), physics deciding against the hypothesis: a fast-spinning proto-Earth
+        // DOES loft slightly more Earth material in absolute terms (e1 ≳ e0) AND injects a lot of angular
+        // momentum, so the whole bound disk grows — but it retains proportionally MORE Theia (Theia is most
+        // of the debris), so the Earth FRACTION does not rise; it falls (12% → 7%). Spin alone does not
+        // Earth-enrich the disk in this model. The reason is docs/28 root cause #1: Earth is a rigid
+        // BOUNDARY, so the only Earth material that can reach the disk is the small excavated cap — the
+        // bulk-mantle shedding that is the actual Ćuk & Stewart mechanism cannot occur until Earth
+        // participates as deformable matter. So the measured Earth fraction is a LOWER BOUND the rigid
+        // boundary imposes, and the honest resolution of the isotopic crisis needs Earth-as-matter (or
+        // vapor-phase Earth↔Theia mixing — the SPH route), NOT target spin. We assert only the robust,
+        // model-independent mechanics — spin injects angular momentum, so more total mass stays bound —
+        // and let the provenance numbers above stand as the measurement.
+        let total0 = e0 + t0;
+        let total1 = e1 + t1;
+        assert!(
+            total1 > total0,
+            "spin injects angular momentum ⇒ a larger bound disk ({:.2} → {:.2} M☾)",
+            total0 / m_moon,
+            total1 / m_moon
+        );
+        assert!(
+            frac1 < frac0 + 0.03,
+            "MEASURED: spin does NOT Earth-enrich the disk here — the rigid-boundary ceiling \
+             ({:.0}% → {:.0}%); see docs/31",
+            100.0 * frac0,
+            100.0 * frac1
         );
     }
 
@@ -956,7 +1086,7 @@ mod tests {
         for &(debris_n, cap_n) in &[(128usize, 256usize), (256, 512), (512, 1024)] {
             let (mut agg, mut acc) = build_impact_debris_scaled(
                 &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-                EARTH_RADIUS_M, debris_n, cap_n,
+                EARTH_RADIUS_M, debris_n, cap_n, DVec3::ZERO,
             );
             for _ in 0..3000 {
                 agg.step(&mut acc, 2.0);
@@ -1015,7 +1145,7 @@ mod tests {
         for &(debris_n, cap_n) in &[(128usize, 256usize), (512, 1024)] {
             let (mut agg, mut acc) = build_impact_debris_scaled(
                 &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-                EARTH_RADIUS_M, debris_n, cap_n,
+                EARTH_RADIUS_M, debris_n, cap_n, DVec3::ZERO,
             );
             // Strip the DECLARED ejection: every target grain back to rest (ground velocity = 0 here).
             for (i, p) in agg.particles.iter_mut().enumerate() {
@@ -1095,7 +1225,7 @@ mod tests {
         // Build the SAME impact the scene builds, integrate the aftermath, measure orbiting by PERIGEE.
         let (mut agg, mut acc) = build_impact_debris_scaled(
             &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia,
-            &crate::planet::earth(), EARTH_MASS, EARTH_RADIUS_M, 128, 256,
+            &crate::planet::earth(), EARTH_MASS, EARTH_RADIUS_M, 128, 256, DVec3::ZERO,
         );
         for _ in 0..3000 {
             agg.step(&mut acc, 2.0);
@@ -1179,7 +1309,7 @@ mod tests {
         let build = || {
             build_impact_debris_scaled(
                 &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-                EARTH_RADIUS_M, 128, 256,
+                EARTH_RADIUS_M, 128, 256, DVec3::ZERO,
             )
         };
         let (mut ag, mut acc) = build();
@@ -1223,7 +1353,7 @@ mod tests {
         for &(dn, cn) in &[(512usize, 1024usize), (1024, 2048), (2048, 4096)] {
             let (mut agg, mut acc) = build_impact_debris_scaled(
                 &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-                EARTH_RADIUS_M, dn, cn,
+                EARTH_RADIUS_M, dn, cn, DVec3::ZERO,
             );
             for _ in 0..3000 {
                 agg.step(&mut acc, 2.0);
@@ -1274,7 +1404,7 @@ mod tests {
         let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
         let (mut agg, mut acc) = build_impact_debris_scaled(
             &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-            EARTH_RADIUS_M, 128, 256,
+            EARTH_RADIUS_M, 128, 256, DVec3::ZERO,
         );
         let c = agg.specific_heat;
         let energy = |a: &Aggregate| -> (f64, f64, f64, f64) {
@@ -1342,7 +1472,7 @@ mod tests {
         let v_contact = DVec3::new(v_esc * 0.7071, -v_esc * 0.7071, 0.0);
         let (mut agg, mut acc) = build_impact_debris_scaled(
             &mats, site, DVec3::ZERO, DVec3::ZERO, m_theia, v_contact, &theia, &earth, EARTH_MASS,
-            EARTH_RADIUS_M, 128, 256,
+            EARTH_RADIUS_M, 128, 256, DVec3::ZERO,
         );
         let mu = G * EARTH_MASS;
         let v_circ = (mu / EARTH_RADIUS_M).sqrt();

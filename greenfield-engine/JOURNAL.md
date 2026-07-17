@@ -5,6 +5,43 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-16 — The isotopic crisis: physics says proto-Earth spin is NOT the lever (docs/31)
+
+**What.** Opened the isotopic crisis (docs/31, "Option C"): the canonical impact makes a **Theia-dominated**
+disk, but the real Moon is isotopically Earth-like. Tested **Ćuk & Stewart (2012)'s** proposed resolution —
+a *fast-spinning* proto-Earth flings its own mantle into the disk. Implemented proto-Earth spin honestly:
+the excavated Earth cap is surface mantle that was **co-rotating before the impact**, so each `SOURCE_TARGET`
+grain is now born with `ω × (pos − centre)` (added in `build_impact_debris_scaled` before the ploughing
+loft, so the momentum exchange acts on the real pre-impact velocity; `earth_omega = 0` is byte-identical to
+before). Scene wired: `lib.rs` converts `spin_l → ω = L/I` (solid sphere) and passes it, default **zero**
+(unknown IC, flagged) — nothing changes on screen; the plumbing just lets a spin be *explored*.
+
+**MEASURED (physics deciding against the hypothesis).** `a_fast_spinning_protoearth_makes_the_disk_earth_
+derived` (#[ignore], N=256+512, 3000×2 s), non-spinning vs a 2.3 h-day proto-Earth (ω·R ≈ 4835 m/s):
+- ω=0    : Earth **0.162** | Theia 1.241 M☾ → disk is **12 % Earth**
+- ω=fast : Earth **0.181** | Theia 2.412 M☾ → disk is **7 % Earth**
+
+A fast spin lofts *slightly* more Earth material (0.162→0.181) and injects a lot of angular momentum, so the
+whole bound disk grows (1.40→2.59 M☾) — but it retains proportionally **more Theia**, so the Earth *fraction*
+FALLS, 12 %→7 %. **Spinning the target does not resolve the crisis in our model.**
+
+**Why — and the real lever.** Direct consequence of docs/28 root cause #1: **Earth is a rigid boundary**, so
+the only Earth material that can reach the disk is the small excavated cap. The actual Ćuk & Stewart
+mechanism is a spinning proto-Earth shedding its **bulk mantle** — which a rigid analytic sphere cannot do.
+So 7 % is a LOWER BOUND the rigid boundary imposes, and adding spin only speeds up the material that *is*
+free to move (overwhelmingly Theia). The honest resolution needs **Earth-as-deformable-matter** (docs/28 #1)
+or **vapor-phase Earth↔Theia mixing** (now partly reachable via the SPH vapor field, docs/26/27) — NOT
+target spin. Documented in docs/31 with the next experiments.
+
+**Why.** No-fudge (docs/23): we set a physical initial condition (spin) and let the disk provenance EMERGE;
+when it emerged *against* the hypothesis we recorded that, and the test now asserts only the robust mechanics
+(spin ⇒ larger bound disk) plus the measured ceiling (fraction does not rise), printing the provenance split.
+
+**Verified (native).** Full fast suite 145/145; the measurement test green with the corrected (measured)
+assertions; wasm builds; scene byte-unchanged at the default zero spin.
+
+---
+
 ## 2026-07-16 — The accelerated compute module: neighbour grid + Barnes–Hut + block timesteps (docs/30)
 
 **What.** Built the reusable **accelerated particle compute module** (docs/30) so the impact disk can run

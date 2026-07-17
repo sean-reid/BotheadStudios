@@ -10,6 +10,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **Proto-Earth spin + the isotopic crisis** (`docs/31`) — the excavated Earth cap is surface mantle that
+  co-rotated before the impact, so `build_impact_debris_scaled` now takes an `earth_omega` and gives each
+  target grain its co-rotating velocity `ω × (pos − centre)` before the ploughing loft (`ω = 0` is
+  byte-identical to before); the scene converts `spin_l → ω = L/I` and passes it, default zero (unknown
+  IC, flagged — no on-screen change). MEASURED (`a_fast_spinning_protoearth_makes_the_disk_earth_derived`):
+  a fast-spinning proto-Earth (2.3 h day, Ćuk & Stewart 2012) does NOT Earth-enrich the disk — it grows the
+  whole bound disk (1.40 → 2.59 M☾) but the Earth fraction falls (12 % → 7 %), because Earth is a rigid
+  boundary (docs/28 #1) and only the small excavated cap can reach the disk. The honest resolution needs
+  Earth-as-matter or vapor-phase mixing, not target spin. Physics deciding against the hypothesis, recorded.
 - **Accelerated particle compute module** (`docs/30`) — a reusable O(N log N) substrate for ANY particle
   system (weather, clouds, fluids, not just impact), each stage proven against its exact/θ-bounded
   reference so speed never changes the answer. **Neighbour grid** (`neighbors.rs`): O(N) short-range pair
