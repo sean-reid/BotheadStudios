@@ -3195,7 +3195,7 @@ mod app {
                 let mut left = years;
                 while left > 0.0 {
                     let step = left.min(50.0);
-                    crate::tides::secular_step(
+                    let (_merged, shed) = crate::tides::secular_step(
                         &mut self.geo_moonlets,
                         &mut self.spin_l,
                         self.bodies[1].mass,
@@ -3203,6 +3203,9 @@ mod app {
                         crate::tides::EARTH_K2_OVER_Q,
                         step * year_s,
                     );
+                    // A moonlet that decayed inside the Roche limit was shredded: its mass rains onto Earth
+                    // (angular momentum already added to the spin in secular_step). Mass is conserved.
+                    self.bodies[1].mass += shed;
                     left -= step;
                 }
                 self.sim_since_impact += years * year_s;

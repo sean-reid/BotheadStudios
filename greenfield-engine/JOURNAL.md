@@ -5,6 +5,37 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Can the disk accrete a Moon? Diagnosis + the Roche-disruption fix (docs/28/33)
+
+**What.** Robin, watching the deployed birth scene: "I never see particles join — no accretion into a
+Moon; and geologic time makes a giant ball ROLL ON EARTH'S SURFACE, not orbit." Investigated both.
+
+**Diagnosis (can a near-spherical Moon emerge in the current system? NO):**
+- **Primary — the collisionless-N ceiling + NO accretion operator.** The scene disk is ~1536 chunks each
+  **471 km radius, 0.017 M☾** — collisionless at this N (docs/28's flagged LOD ceiling; real SPH disks use
+  10⁴–10⁶). The contact law is fine (restitution 0.40 → ~84% collision-energy loss; self-gravity ~3500×
+  cohesion at 471-km grains, correctly the glue). The real gap: **there is no fusion/growth operator** —
+  debris `bonds` is empty and never populated, particle masses never grow, the devs deleted the merge
+  closure and bet on emergence. So a bound clump renders as a loose cluster of 471-km balls, never a
+  growing sphere. **A round Moon needs BOTH higher N (stage 4) AND a coarse-grained accretion law** (a
+  bound rubble clump → one body with a grown radius). That accretion operator is a new realignment element.
+- **The "ball on the surface" was a real BUG (fixed).** A sub-synchronous geologic moonlet correctly
+  migrates inward (Phobos' fate), but `tides::secular_step` CLAMPED its orbit at 1.2 R⊕ and the renderer
+  drew a full-mass ball overlapping Earth — no Roche limit enforced.
+
+**Fix.** `tides::secular_step` now enforces the **fluid Roche limit** `d = 2.44·R·(ρ_p/ρ_m)^⅓` (≈ 3.0 R⊕
+for Earth + rock): a moonlet that decays inside it is **tidally SHREDDED** — removed, its mass + orbital
+angular momentum raining onto the planet (mass returned to the caller and added to Earth in `lib.rs`; L
+added to the spin). Removed the 1.2 R⊕ floor clamp. So a sub-synchronous moonlet disrupts instead of
+rolling on the surface, and a Moon that forms just outside Roche migrates out honestly.
+
+**Verified (native).** New `a_sub_synchronous_moonlet_disrupts_at_roche_not_on_the_surface`: moonlet at
+3.2 R⊕ + 24 h day → disrupts at the 3.02 R⊕ Roche limit, sheds its full 0.30 M☾, total mass + angular
+momentum conserved. The existing one-Moon test still forms a Moon just outside Roche that migrates to 29 R⊕
+(L drift 5e-15). Full fast suite 152/152; wasm builds. Deployed.
+
+---
+
 ## 2026-07-17 — Render-truth: the crater and continents CO-ROTATE with the crust (birth scene)
 
 **What.** Fixed a render-frame mismatch Robin caught while watching the deployed birth scene (he read

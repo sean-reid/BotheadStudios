@@ -25,6 +25,16 @@ fold `hydrostatic`/`AirField` into `Aggregate`), 6 (energy-tiered just-in-time p
 capability currently lives in the standalone `hydrostatic.rs`; it is NOT yet wired into the wasm scene
 (stage 4/5 work) — the deployed birth scene is still the pre-realignment `OrbitDemo`.
 
+**Stage 4 also needs an ACCRETION operator (new, 2026-07-17).** Diagnosis of "the disk never accretes a
+Moon": at the scene N (~1536 chunks) the disk is collisionless (docs/28 ceiling) AND there is no
+fusion/growth operator at all — particle masses never grow, so a bound clump renders as a cluster of
+471-km balls, never a sphere. Higher N (stage 4) is necessary but NOT sufficient: a near-spherical Moon
+also needs a **coarse-grained accretion law** — a gravitationally-bound rubble clump promoted to a single
+body with a grown radius, honestly (mass/momentum/energy conserved). Pair this with stage 4. (Roche physics
+now exists: `tides::secular_step` shreds sub-Roche moonlets — the geologic "ball on the surface" bug is
+fixed — but that is the aftermath; the live-disk accretion operator is the missing piece.) WGSL kernel
+`shaders/sph_step.wgsl` is written (unverified) as the stage-4 GPU stepper start.
+
 ## 1. The principles (restated)
 
 From the existing design record (docs/13/15/16/17/23/24) and Robin's three framings (2026-07-16/17):
