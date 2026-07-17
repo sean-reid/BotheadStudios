@@ -20,9 +20,12 @@ because **we are our own first customers** and pin exact engine versions in our 
   an f64 CPU reference (final-state RMS pos 3.1e-4 / vel 5.7e-4 / u 5.1e-4 — tracking, not diverging). Stage
   4c.2 adds `tools/impact-run` (GPU relaxation `cs_relax` + adaptive-dt KDK impact + provenance) and runs the
   deformable-Earth giant impact at N up to 35 000 on the RTX 2070 (minutes, vs the CPU's ~2100-particle cap):
-  energy conserved to 0.3–0.5 % over ~10 h of aftermath, and the orbiting disk's **Earth-derived fraction
-  converges upward with resolution — 28 %→33 %→50 % (N=2100→14000→35000)** toward the CPU's 58 %, confirming
-  and strengthening the Earth-majority disk (the isotopic-crisis direction, docs/31). Stage 4c.3 adds the
+  energy conserved to 0.3–0.5 % over ~10 h of aftermath, disk mass (~0.13–0.19 M☾), remnant radius, and
+  escape speed robust across runs. The disk's Earth-derived *fraction* (28–50 % in samples, vs the CPU's
+  58 %) has large run-to-run scatter — two identical N=35000 runs gave 50 % and 29 % (GPU-non-determinism ×
+  chaotic amplification) — so it reproduces the deformable-Earth mechanism (Earth material orbits, docs/31)
+  but the precise fraction remains an IOU pending an ensemble average + deterministic reduction + higher N.
+  Stage 4c.3 adds the
   **accretion / growth operator** (`accretion.rs`): friends-of-friends bound-clump detection gated on genuine
   self-boundedness AND the remnant's Roche limit, promoting each qualifying clump to one body at its COM —
   conserving mass, momentum, and centre of mass exactly (TDD-verified to <1e-12), the growth law a round Moon

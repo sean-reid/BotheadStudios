@@ -27,12 +27,41 @@ alone. (2) `roche_gate_blocks_accretion_inside_the_limit` — the *same* clump a
 inside it. (3) `unbound_hot_group_does_not_accrete` — a spatially-tight but hot (KE ≫ binding) group is
 classified unbound and rejected. Honest about what promotion cannot conserve: internal random KE is absorbed
 as heat (physical for inelastic accretion) and internal spin L is folded in — both reported, never dropped.
-Full fast suite 155/155. Next: 4c.4 (browser scene wiring) — and a demonstration of the operator on a real
-high-N `impact-run` disk.
+Full fast suite 155/155.
+
+**Demonstration on a real disk.** Wired a `moon_candidate` scan into `tools/impact-run` (the same FoF +
+self-bound + Roche logic, reimplemented standalone like sph-verify) and ran it on the N=35 000 aftermath: the
+disk (0.14 M☾, 29 % Earth) contains **21 clumps, 16 of them self-bound**, and the largest bound clump outside
+Roche is **0.023 M☾ (31 particles), 10 % Earth** — a proto-moonlet SEED, not a full Moon. Honest: at this N
+and only ~9 h of aftermath the disk has begun to clump but is far from accreting a lunar-mass body (real Moon
+accretion takes years–decades and/or ≫10⁵ particles). The operator correctly finds the bound clumps; growing
+them to a Moon is a longer-time / higher-N run, not a code gap. Next: 4c.4 (browser scene wiring).
 
 ---
 
-## 2026-07-17 — Stage 4c.2: high-N giant impact on the GPU — the disk number CONVERGES to Earth-majority (docs/33/34)
+## 2026-07-17 — CORRECTION to stage 4c.2: the disk composition has large run-to-run SCATTER, not clean convergence
+
+**What I got wrong.** The 4c.2 entry below reported the disk Earth-fraction "converging monotonically
+28→33→50 %" toward the CPU's 58 %, from ONE run per N. Re-running the **identical** N=35 000 config (same
+binary, same seeds — the build is deterministic) gave **29 %**, not 50 %. Two samples at the same config,
+21 points apart. The cause is honest and physical: the GPU grid-insert uses `atomicAdd` for bucket slots, so
+neighbour-iteration order is non-deterministic across runs; f32 sums are non-associative; and 11 000 chaotic
+integration steps amplify that seed into a macroscopically different disk. **So there is no clean monotonic
+convergence — the composition has ~20-point run-to-run scatter, and 28/33/50/29 % are samples of a
+distribution around ~30–40 %, consistent with the CPU's 58 % only within that large scatter.** The
+no-fudge rule (CLAUDE.md #5) required recording this rather than keeping the favourable sample.
+
+**What still stands (robust across all runs).** The MECHANISM — Earth material reaches orbit in quantity —
+and the disk **mass** (~0.13–0.19 M☾), **remnant radius** (~9000 km), **escape speed**, and **energy
+conservation** (0.3–0.5 % over ~10 h) are all stable run-to-run. Only the Earth *fraction* of the disk is
+scatter-dominated at these N. A converged fraction needs an **ensemble** (average many realisations) and/or
+a **deterministic reduction** (order-independent summation), plus higher N — all future work. The
+deformable-Earth qualitative result (Earth-derived material orbits, tens of % of the disk) is reproduced;
+the precise fraction remains an IOU, now with a measured scatter attached.
+
+---
+
+## 2026-07-17 — Stage 4c.2: high-N giant impact on the GPU (deformable-Earth disk at N up to 35 000) (docs/33/34)
 
 **What.** Built `tools/impact-run` — a standalone offline harness that runs the deformable-Earth giant impact
 end-to-end on the RTX 2070 using the verified `sph_step.wgsl` kernels: build two differentiated EOS bodies →
@@ -48,25 +77,24 @@ the orbiting disk is Earth-derived) was explicitly a coarse-N / sub-scale IOU �
 not converged. Stage 4 exists to lift the resolution on the GPU.
 
 **Verified (RTX 2070).** Energy conserved to **0.3–0.5%** across ~10 h of simulated aftermath at every N
-(the relaxed-body + shock-capturing-AV discipline holds; IE rises ~3× from shock heating). The Earth-fraction
-of the orbiting disk **CONVERGES monotonically upward with resolution toward the CPU's f64/Barnes–Hut value**:
+(the relaxed-body + shock-capturing-AV discipline holds; IE rises ~3× from shock heating). Samples measured:
 
 | run                    |   N    | disk Earth-frac | disk mass | R_remnant | relaxed R_earth |
 |------------------------|-------:|----------------:|----------:|----------:|----------------:|
 | GPU (direct grav, f32) |  2 100 |           28 %  | 0.19 M☾   | 9208 km   | 4245 km         |
 | GPU                    | 14 000 |           33 %  | 0.13 M☾   | 9127 km   | 4482 km         |
-| GPU                    | 35 000 |         **50 %**| 0.13 M☾   | 8834 km   | 4679 km         |
+| GPU                    | 35 000 |           50 %  | 0.13 M☾   | 8834 km   | 4679 km         |
+| GPU (re-run, same cfg) | 35 000 |           29 %  | 0.14 M☾   | 9047 km   | 4679 km         |
 | CPU (Barnes–Hut, f64)  |  2 100 |           58 %  | 0.21 M☾   | 9086 km   | —               |
 
-The disk **mass** (~0.13 M☾), **remnant radius**, and **escape speed** agree across CPU and GPU throughout;
-only the disk's *composition* was resolution-sensitive, and it climbs 28→33→50 % as N grows — while the
-relaxed Earth radius trends toward the physical 5000 km (4245→4482→4679), i.e. low N under-resolves Earth's
-own mantle-shedding and *understates* the Earth fraction. So the deformable-Earth result is not just
-reproduced but strengthened: **the orbiting disk is Earth-majority, and more so at higher resolution** — the
-isotopic-crisis direction (docs/31), now on a convergent footing. Honest caveats: single realization per N
-(chaotic), still sub-Earth scale, direct O(N²) gravity (a GPU Barnes–Hut is the next optimization if N≫10⁵),
-and a true converged fraction wants N≥10⁵. Run: `cd tools/impact-run && cargo run --release -- [earth_n]
-[steps]`. Next: 4c.3 (accretion operator) and 4c.4 (browser scene wiring).
+**Read this table with the CORRECTION above:** the two 35 000-particle rows are the SAME config (50 % vs
+29 %), so the Earth-fraction column is scatter-dominated (~20 points, GPU-non-determinism × chaos) — do NOT
+read 28→33→50 as convergence. What IS robust across every row: the disk **mass** (~0.13–0.19 M☾), **remnant
+radius** (~9000 km), **escape speed**, and energy conservation. The deformable-Earth mechanism (Earth-derived
+material reaches orbit, tens of % of the disk) reproduces on GPU; the precise fraction is an IOU pending an
+ensemble average + a deterministic (order-independent) reduction + higher N. Honest caveats: sub-Earth scale,
+direct O(N²) gravity (a GPU Barnes–Hut is the next optimization if N≫10⁵). Run: `cd tools/impact-run &&
+cargo run --release -- [earth_n] [steps]`. Next: 4c.3 (accretion operator) and 4c.4 (browser scene wiring).
 
 ---
 

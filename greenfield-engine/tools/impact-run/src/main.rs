@@ -452,6 +452,7 @@ fn measure_disk(body: &[Particle], n_earth: usize, m_earth: f64, m_theia: f64, v
     }
     let mu = G * m_remnant;
     let (mut e_disk, mut t_disk, mut e_esc, mut t_esc, mut e_rem, mut t_rem) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut disk_idx: Vec<usize> = Vec::new(); // the orbiting-disk particles (Moon-candidate feedstock)
     for (i, p) in body.iter().enumerate() {
         let rel_p = [p.pos[0] as f64 - com[0], p.pos[1] as f64 - com[1], p.pos[2] as f64 - com[2]];
         let rel_v = [p.vel[0] as f64 - v_com[0], p.vel[1] as f64 - v_com[1], p.vel[2] as f64 - v_com[2]];
@@ -459,7 +460,7 @@ fn measure_disk(body: &[Particle], n_earth: usize, m_earth: f64, m_theia: f64, v
         let m = p.mass as f64;
         match perigee(rel_p, rel_v, mu) {
             None => { if is_earth { e_esc += m } else { t_esc += m } }
-            Some(pg) if pg > r_remnant => { if is_earth { e_disk += m } else { t_disk += m } }
+            Some(pg) if pg > r_remnant => { if is_earth { e_disk += m } else { t_disk += m } disk_idx.push(i); }
             Some(_) => { if is_earth { e_rem += m } else { t_rem += m } }
         }
     }
@@ -470,4 +471,90 @@ fn measure_disk(body: &[Particle], n_earth: usize, m_earth: f64, m_theia: f64, v
     println!("  ORBITING DISK (perigee > remnant): Earth {:.3e} | Theia {:.3e} kg = {:.3} M_moon  → {:.0}% EARTH", e_disk, t_disk, disk / m_moon, earth_frac);
     println!("  remnant: Earth {:.3e} | Theia {:.3e} kg · escaped: Earth {:.3e} | Theia {:.3e} kg", e_rem, t_rem, e_esc, t_esc);
     println!("  → Earth material {} reach orbit", if e_disk > 0.0 { "DID" } else { "did NOT" });
+
+    moon_candidate(body, &disk_idx, n_earth, r_remnant, m_remnant, com);
+}
+
+// The accretion operator (stage 4c.3) applied to the orbiting disk: friends-of-friends over the disk
+// particles, then report the largest SELF-BOUND clump outside Roche as the Moon candidate. Mirrors the
+// engine's verified `accretion.rs` (FoF + internal-KE+self-PE<0 + Roche gate); reimplemented here because
+// this GPU tool is standalone (same reason sph-verify reimplements the physics).
+fn moon_candidate(body: &[Particle], disk_idx: &[usize], n_earth: usize, r_remnant: f64, m_remnant: f64, com: [f64; 3]) {
+    let m_moon = 7.342e22;
+    if disk_idx.len() < 2 {
+        println!("  MOON CANDIDATE: none (disk has < 2 particles)");
+        return;
+    }
+    // Linking length = 2× the mean disk smoothing length (particles within a smoothing length touch).
+    let mean_h: f64 = disk_idx.iter().map(|&i| body[i].h as f64).sum::<f64>() / disk_idx.len() as f64;
+    let link = 2.0 * mean_h;
+    let link2 = link * link;
+    // union-find over the disk subset (O(k²); k = disk particle count, a small fraction of N)
+    let k = disk_idx.len();
+    let mut parent: Vec<usize> = (0..k).collect();
+    fn find(p: &mut [usize], i: usize) -> usize {
+        let mut r = i;
+        while p[r] != r { r = p[r]; }
+        let mut c = i;
+        while p[c] != r { let nx = p[c]; p[c] = r; c = nx; }
+        r
+    }
+    for a in 0..k {
+        for b in (a + 1)..k {
+            let (pa, pb) = (body[disk_idx[a]].pos, body[disk_idx[b]].pos);
+            let d2 = ((pa[0] - pb[0]) as f64).powi(2) + ((pa[1] - pb[1]) as f64).powi(2) + ((pa[2] - pb[2]) as f64).powi(2);
+            if d2 <= link2 {
+                let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                if ra != rb { parent[ra] = rb; }
+            }
+        }
+    }
+    let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for a in 0..k { let r = find(&mut parent, a); groups.entry(r).or_default().push(disk_idx[a]); }
+    // Roche limit of the remnant for a ~basalt-density clump.
+    let rho_rem = m_remnant / (4.0 / 3.0 * std::f64::consts::PI * r_remnant.powi(3));
+    // Largest self-bound clump.
+    let (mut best_m, mut best_e, mut best_n, mut best_bound_outside) = (0.0f64, 0.0f64, 0usize, false);
+    let mut n_bound = 0;
+    for members in groups.values() {
+        if members.len() < 2 { continue; }
+        let m: f64 = members.iter().map(|&i| body[i].mass as f64).sum();
+        let mut cv = [0.0f64; 3];
+        let mut cp = [0.0f64; 3];
+        let mut vol = 0.0;
+        for &i in members {
+            let p = &body[i];
+            for x in 0..3 { cv[x] += p.vel[x] as f64 * p.mass as f64; cp[x] += p.pos[x] as f64 * p.mass as f64; }
+            vol += p.mass as f64 / p.rho as f64;
+        }
+        for x in 0..3 { cv[x] /= m; cp[x] /= m; }
+        let clump_rho = if vol > 0.0 { m / vol } else { 2700.0 };
+        let ke: f64 = members.iter().map(|&i| { let p = &body[i]; 0.5 * p.mass as f64 * (((p.vel[0] as f64 - cv[0]).powi(2)) + ((p.vel[1] as f64 - cv[1]).powi(2)) + ((p.vel[2] as f64 - cv[2]).powi(2))) }).sum();
+        let mut pe = 0.0;
+        for a in 0..members.len() {
+            for b in (a + 1)..members.len() {
+                let (ia, ib) = (members[a], members[b]);
+                let d = [(body[ia].pos[0] - body[ib].pos[0]) as f64, (body[ia].pos[1] - body[ib].pos[1]) as f64, (body[ia].pos[2] - body[ib].pos[2]) as f64];
+                let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1.0);
+                pe -= G * body[ia].mass as f64 * body[ib].mass as f64 / r;
+            }
+        }
+        let bound = ke + pe < 0.0;
+        let d_roche = 2.44 * r_remnant * (rho_rem / clump_rho).cbrt();
+        let dist = ((cp[0] - com[0]).powi(2) + (cp[1] - com[1]).powi(2) + (cp[2] - com[2]).powi(2)).sqrt();
+        let outside = dist > d_roche;
+        if bound { n_bound += 1; }
+        if bound && outside && m > best_m {
+            best_m = m;
+            best_e = members.iter().filter(|&&i| i < n_earth).map(|&i| body[i].mass as f64).sum();
+            best_n = members.len();
+            best_bound_outside = true;
+        }
+    }
+    println!("  ACCRETION (link={:.0} km): {} disk clumps, {} self-bound", link / 1e3, groups.values().filter(|m| m.len() >= 2).count(), n_bound);
+    if best_bound_outside {
+        println!("  MOON CANDIDATE: largest bound+outside-Roche clump = {:.3e} kg = {:.3} M_moon ({} particles) → {:.0}% EARTH", best_m, best_m / m_moon, best_n, 100.0 * best_e / best_m);
+    } else {
+        println!("  MOON CANDIDATE: none yet (no bound clump outside Roche — disk still dispersed; needs more time / N)");
+    }
 }
