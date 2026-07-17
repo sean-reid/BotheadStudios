@@ -5,6 +5,77 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-16 — The accelerated compute module: neighbour grid + Barnes–Hut + block timesteps (docs/30)
+
+**What.** Built the reusable **accelerated particle compute module** (docs/30) so the impact disk can run
+at high N without the O(N²) wall — a general substrate (any particle system: weather, clouds, fluids), not
+an impact special-case. Four stages, each its own crate/module with a brute-force fallback below a size
+threshold and a test that pins it to the exact/near-exact reference:
+
+- **Stage 1a/1b — neighbour grid** (`neighbors.rs`). A spatial-hash `NeighborGrid::build(pos, cell)` +
+  `for_each_pair` that finds every short-range pair in O(N) instead of O(N²), then wired into the contact
+  and SPH density/pressure loops (one `sr_grid` built per step from shared `sr_pos`/`masses`). Brute-force
+  below 512 bodies. Test: `grid_finds_exactly_the_brute_force_pairs` (exact — the grid is not an
+  approximation).
+- **Stage 1c — Barnes–Hut self-gravity** (`bhtree.rs`). An octree caching per-node COM+mass; a particle
+  uses a node as ONE source when its angular size `(2·half)/dist < θ` (θ=0.5), turning O(N²) self-gravity
+  into O(N log N). Same Plummer softening as the direct sum — the same physics, grouped. Test:
+  `barnes_hut_matches_brute_force_within_theta_bound` (RMS < 1% at θ=0.5; θ→0 recovers brute force to 1e-9).
+- **Stage 3 — block timesteps** (`aggregate.rs`). A per-particle timestep criterion (`particle_timesteps`:
+  √(ε/|a|) free-fall, capped by the |v|/|a| turnaround), then a hierarchical **block KDK** integrator
+  (`step_block`): power-of-two rungs, the quiescent disk coasts while the shocked/vapor core sub-steps.
+  The subset-force pass (`accelerations_masked` + `BarnesHut::accelerations_active`) recomputes gravity
+  only for the bodies being kicked this sub-step — O(N_active log N). Thermo (PdV cooling, radiation,
+  phase flip, dissipation heating) was extracted into `apply_thermo` and now runs each sub-step, so
+  `step_block` is a faithful full-physics drop-in for `step()`. Wired into the space scene.
+
+Also this pass: the impact scene now runs at **high N (512 debris + 1024 cap)** with the cap-mass fix
+restored (`cap_mass` summed from the real per-grain target masses, not the `moon_mass·CAP_N/DEBRIS_N`
+bookkeeping that the 07-15 entry flagged as ≈6.5× high); and two **watching** tools so the agent can see
+what Robin sees — `rig/birth_shot.mjs` (headless-Chromium screenshots of birth.html at timed marks) and a
+"📷 Share view" button on the space band that POSTs the live canvas.
+
+**Why.** docs/30: temporal + spatial coherence is the "MPEG for physics" — most of the cloud barely moves
+per step (the block scheduler's coasting rungs are the delta-frames; the grid/tree are the spatial
+compression). Getting the disk to lunar-mass resolution needs O(N log N), and the module has to be generic
+because the same substrate runs every future particle system. No-fudge (docs/23): every accelerator is
+proven against its exact/θ-bounded reference, so speed never changes the answer.
+
+**Verified (native).** Full suite green; `grid_finds_exactly_the_brute_force_pairs`,
+`barnes_hut_matches_brute_force_within_theta_bound`, `contact_grid_matches_brute_force`,
+`particle_timesteps_shrink_with_acceleration`, `step_block_conserves_energy_and_matches_global_dt`, and
+— the decisive one — `birth_impact_with_step_block_reproduces_the_disk`: the REAL coupled impact gives
+**global step() 0.772 M☾ vs block step_block 0.788 M☾** (matches). `step_block_speedup_bench` measures
+**5.5× faster** on an aftermath-shape cloud (1330 ms → 241 ms). On-screen: deployed to
+integrity.bothead.net (build 20260716.081104) and rig-watched — the disk forms and evolves identically to
+the global integrator (T+24m: 2.44 M☾ in 42 accreting moonlets, Earth-origin material aloft), no regression.
+
+---
+
+## 2026-07-15 — Vapor gets a real pressure field: SPH + a latent-heat reservoir (docs/26/27, docs/28 item 5)
+
+**What.** Replaced the vapor "overlap hack" with a real **SPH pressure field** so the impact-generated
+vapor expands and cools as a gas from first principles, not a scripted push. `aggregate.rs`: a cubic-spline
+kernel gives each vapor particle a density ρ=Σm_jW(r,h); pressure P=ρ·R_s·T; a symmetric,
+momentum-conserving pressure force; and a PdV energy equation so expansion does real work and the gas
+cools itself. Then a **latent-heat reservoir** (docs/28): the pressure reads the *thermal* temperature
+`T − L_v/c`, so the energy locked in the vaporization latent heat is not double-counted as pressure — the
+vapor holds heat honestly on the phase boundary instead of over-puffing. Also shipped the
+`disk_orbit_vs_resolution` diagnostic sweep (the disk grows toward lunar mass with N: 0.77→1.27→1.41 M☾ at
+N=384/768/1536).
+
+**Why.** docs/26/27: the atmosphere/vapor must be *matter under its own pressure*, not a visual. The old
+overlap repulsion was a fudge (docs/23); SPH is the honest continuum form, and the latent-heat correction
+keeps the first law intact across the solid↔vapor phase change (docs/28 item 5).
+
+**Verified (native).** `vapor_sph_expands_and_cools_conserving_energy` — a hot vapor ball expands under
+its own pressure and self-cools (80k → 18.5k K), total energy conserved to within drift; the latent-heat
+fix dropped a spurious vapor↔vapor dissipation heating that had inflated both temperature and disk mass
+(disk 0.066 → 0.132 M☾, peak T 52k → 18.5k K — honest physics over the bigger-but-wrong number). Full
+suite green.
+
+---
+
 ## 2026-07-15 — The Moon becomes Earth-derived: a momentum-conserving loft breaks the 0.000 deficit
 
 **What.** Closed docs/28 step 3. Earth (target) material now LOFTS into the bound proto-lunar disk —

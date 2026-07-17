@@ -10,6 +10,42 @@ because **we are our own first customers** and pin exact engine versions in our 
 ## [Unreleased]
 
 ### Added
+- **Accelerated particle compute module** (`docs/30`) — a reusable O(N log N) substrate for ANY particle
+  system (weather, clouds, fluids, not just impact), each stage proven against its exact/θ-bounded
+  reference so speed never changes the answer. **Neighbour grid** (`neighbors.rs`): O(N) short-range pair
+  finding, wired into the contact + SPH loops (`grid_finds_exactly_the_brute_force_pairs`,
+  `contact_grid_matches_brute_force`). **Barnes–Hut self-gravity** (`bhtree.rs`): octree COM grouping at
+  θ=0.5 turns O(N²) gravity into O(N log N), same softening as the direct sum
+  (`barnes_hut_matches_brute_force_within_theta_bound` — RMS < 1%, θ→0 exact). **Block timesteps**
+  (`aggregate.rs`): per-particle timestep criterion + hierarchical block-KDK `step_block` — the quiescent
+  disk coasts while the shocked/vapor core sub-steps, with a subset-force pass
+  (`accelerations_masked` + `BarnesHut::accelerations_active`) recomputing gravity only for the bodies
+  kicked this sub-step, and full thermo (extracted to `apply_thermo`) run each sub-step. **5.5× faster**
+  on an aftermath-shape cloud (`step_block_speedup_bench`) while reproducing the coupled impact disk
+  (`birth_impact_with_step_block_reproduces_the_disk` — global 0.772 vs block 0.788 M☾). Wired into the
+  space scene and running at high N (512 debris + 1024 cap, cap-mass summed from real per-grain masses).
+- **Agent-watches-the-scene tooling** — `rig/birth_shot.mjs` screenshots birth.html under headless
+  Chromium at timed marks so the agent can see the disk form; a "📷 Share view" button on the space band
+  POSTs the live canvas to a receiver. (Public-site receiver `tools/shot-server.mjs` staged, not installed.)
+- **Vapor SPH pressure field + latent-heat reservoir** (`docs/26`/`27`, `docs/28` item 5) — impact vapor
+  now expands and self-cools as a real gas: cubic-spline SPH density, `P=ρ·R_s·T`, a symmetric
+  momentum-conserving pressure force, and a PdV energy equation (expansion does work → the gas cools).
+  Pressure reads the *thermal* temperature `T − L_v/c` so the vaporization latent heat is not
+  double-counted as pressure. Replaces the vapor "overlap hack" (a docs/23 fudge). Test:
+  `vapor_sph_expands_and_cools_conserving_energy` (80k → 18.5k K, energy conserved).
+- **Momentum-conserving loft in the shared particle physics** (`granular::plough_loft`, `docs/28` step 3)
+  — when a fast body ploughs slower target matter, the along-track momentum is shared inelastically toward
+  the impactor↔cap centre-of-mass velocity (the physical maximum drag, no dial) and Σ(m·v) is exactly
+  conserved. This is what makes the Moon **Earth-derived** — target material now lofts into the bound disk
+  (Earth 0.083 M☾ aloft, up from a dead 0.000 at every resolution) once the cap mass is physical. One law
+  for every band (space wired; terrain a flagged follow-up). Tests:
+  `plough_loft_conserves_momentum_and_lofts_the_lighter_target`, and the disk provenance guardrails.
+- **Materials-honest per-grain contact** (`docs/23`) — the aggregate contact law reads each grain's
+  material (`Contact::mix` per pair: radius arithmetic-mean, stiffness harmonic-mean, damping/friction
+  geometric-mean, cohesion min), so iron collides as iron and peridotite as peridotite instead of every
+  grain being bulk basalt. Fixes the over-massed excavation cap — grain mass is now real `ρ·V` at the
+  local density (`furrow_target_grains`), ≈0.31× the impactor rather than a bookkeeping 2×. Tests:
+  `contact_mix_is_idempotent_and_bounded`, `mixed_material_contact_conserves_momentum`.
 - **Bodies as particle aggregates** (`docs/21`) — the gravitational skeleton for making celestial
   destruction a *simulation, not a mock*. `aggregate.rs`: a body is a cloud of particles bound by
   softened N-body self-gravity; `binding_energy`, `kinetic_energy_com`, `rms_radius`, `com`. A cold
