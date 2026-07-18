@@ -18,6 +18,7 @@
 //! history, radiogenic heating and convection — future physics, flagged. Phase and pressure are computed.
 
 use crate::materials::Material;
+use glam::DVec3;
 
 /// One concentric layer: real material + observed mean density/temperature profile across it.
 #[derive(Clone, Debug)]
@@ -111,6 +112,21 @@ impl LayeredBody {
             return 0.0;
         }
         G * self.enclosed_mass(r) / (r * r)
+    }
+
+    /// Gravitational acceleration (m/s²) at a world `point` for a body centred at `center` — the
+    /// positioned, sample-anywhere vector form of [`gravity_at`](Self::gravity_at): `−r̂ · G·M(<r)/r²`
+    /// over the real differentiated [`enclosed_mass`](Self::enclosed_mass) profile (Gauss interior → 0 at
+    /// the centre; monopole `G·M_total/r²` outside, since `enclosed_mass` saturates to the total). This is
+    /// the T0 **bulk** gravity a particalized region feels (docs/39): a particle at `point` is pulled
+    /// toward `center` by the mass enclosed below it. Zero within 1 m of the centre (matches `gravity_at`).
+    pub fn acceleration_at(&self, point: DVec3, center: DVec3) -> DVec3 {
+        let d = point - center;
+        let r = d.length();
+        if r < 1.0 {
+            return DVec3::ZERO;
+        }
+        -(d / r) * self.gravity_at(r)
     }
 
     /// Surface pressure (Pa), EMERGENT: the weight of the declared atmosphere column spread over the
@@ -311,6 +327,33 @@ mod tests {
         );
         let g = e.gravity_at(e.radius());
         assert!((g - 9.81).abs() < 0.3, "surface gravity ≈ 9.8 m/s² (got {g:.2})");
+    }
+
+    #[test]
+    fn positioned_gravity_matches_the_radial_profile_and_the_gauss_limits() {
+        // docs/39 39a: the vector `acceleration_at(point, center)` is the T0 bulk gravity a particalized
+        // region feels — it must equal the scalar `gravity_at(r)` in magnitude, point at the centre, be a
+        // monopole outside, and fall toward zero at the centre (Gauss interior).
+        let e = earth();
+        let c = DVec3::new(1.0e6, -2.0e6, 3.0e6); // arbitrary body centre
+        let big_r = e.radius();
+        let dir = DVec3::new(0.3, -0.5, 0.81).normalize();
+        for &r in &[0.05 * big_r, 0.2 * big_r, 0.5 * big_r, 0.9 * big_r, big_r, 1.5 * big_r, 5.0 * big_r] {
+            let a = e.acceleration_at(c + dir * r, c);
+            let g = e.gravity_at(r);
+            assert!((a.length() - g).abs() <= 1.0e-6 * g.max(1.0e-9), "|a| == gravity_at(r) at r={r:.3e}");
+            assert!(a.normalize().dot(-dir) > 1.0 - 1.0e-9, "gravity points toward the centre at r={r:.3e}");
+        }
+        // Exterior → the monopole G·M_total/r².
+        let r_ext = 3.0 * big_r;
+        let g_mono = G * e.total_mass() / (r_ext * r_ext);
+        let a_ext = e.acceleration_at(c + dir * r_ext, c);
+        assert!((a_ext.length() - g_mono).abs() < 1.0e-6 * g_mono, "exterior is a monopole");
+        // Centre → exactly zero; and g falls toward the centre (Gauss interior, ∝ r in a uniform core).
+        assert_eq!(e.acceleration_at(c, c), DVec3::ZERO);
+        let deep = e.acceleration_at(c + dir * (0.04 * big_r), c).length();
+        let mid = e.acceleration_at(c + dir * (0.10 * big_r), c).length();
+        assert!(deep < mid, "gravity falls toward the centre (got deep {deep:.3} ≥ mid {mid:.3})");
     }
 
     #[test]
