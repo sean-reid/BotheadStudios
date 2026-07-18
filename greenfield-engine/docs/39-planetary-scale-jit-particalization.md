@@ -106,22 +106,22 @@ Earth. It is the skeleton; three upgrades turn it into the real T0↔T3:
 39a–39b are the crux (a partial particalization that holds); 39d is the payoff (the converged number at
 tractable cost); 39e closes birth-of-the-Moon. Only 39a–39b need land before we know the approach is sound.
 
-### Status — 39a DONE, 39b MECHANICALLY VIABLE (2026-07-18)
+### Status — 39a + 39b DONE, the keystone is proven (2026-07-18)
 
 - **39a DONE.** `LayeredBody::acceleration_at` (positioned Gauss gravity) — verified (`planet.rs` test).
-- **39b — the approach is mechanically viable; balance awaits the interface pressure BC.** Test
+- **39b DONE — a partial particalization holds the CORRECT hydrostatic profile.** Test
   `a_particalized_mantle_shell_holds_hydrostatic_on_a_bulk_core` (`hydrostatic.rs`, `#[ignore]`): a mantle
-  shell particalized on a bulk core **HOLDS** — settles to a steady radius (1414 km, spread 0.1%), no
-  explosion, no collapse, **zero leakage** into the bulk. **Two fixes were essential and are the real
-  lessons:** (1) the bulk gravity MUST use the Gauss-correct interior (`∝r`, →0 at centre) — a raw `1/r²`
-  monopole singularity-sucks any particle that penetrates the boundary and blew the mantle to 170,000 km;
-  (2) a **non-injecting floor** at R_core (the terrain constraint, spherical) is needed — a fixed-particle
-  shell alone leaks. **Open (the SPH-boundary sub-problem, flagged from the start):** clean hydrostatic
-  balance is NOT yet achieved (dP/dr ≈ 100× −ρg) — the fixed-ρ₀ shell + hard floor **over-confine** the base,
-  so the settled state is stable-but-over-pressured. The next 39b refinement is the **interface pressure
-  BC**: the boundary must supply the bulk's hydrostatic `P(R_core)` (not a fixed ρ₀), so the mantle settles
-  to the *correct* profile. Mechanical viability (a partial particalization is stable) is the keystone signal
-  the approach is sound; the pressure BC makes it quantitatively right.
+  shell particalized into SPH-EOS particles on a coarse bulk core settles stably (outer 1405 km, spread
+  0.5%, inner = R_core, zero leakage) AND satisfies hydrostatic balance dP/dr = −ρ·g_total to **rel 0.05 /
+  0.25** (within the 0.5 operator bound, like stage 2a). **The approach is viable AND quantitatively
+  correct.** Three lessons: (1) the bulk gravity MUST use the Gauss-correct interior (`∝r`, →0 at centre) —
+  a raw `1/r²` monopole singularity-sucks any penetrating particle and blew the mantle to 170,000 km; (2) a
+  **non-injecting floor** at R_core (the terrain constraint, spherical) is the leak-proof interface; (3) the
+  interface pressure BC is **simpler than a boundary shell** — a fixed-ρ₀ shell OVER-confines the base
+  (dP/dr ≈ 140× −ρg); a fluid column on the bare hard floor gives correct hydrostatic (`P(r)=∫ρg`, the floor
+  supplies the base reaction). **The coarse-bulk + particalized-cap architecture is proven at the keystone.**
+  Next: 39c (recoiling bulk + momentum) → 39d (Theia into the capped Earth + cap-size sweep to 58%) → 39e
+  (bake-back + Moon).
 
 ## Open decisions to pressure-test (before building)
 

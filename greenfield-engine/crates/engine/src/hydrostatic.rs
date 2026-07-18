@@ -413,9 +413,10 @@ mod tests {
             .map(|i| fib_dir(i, n_target, 1.7) * (rc3 + (rs3 - rc3) * (i as f64 + 0.5) / n_target as f64).cbrt())
             .collect();
         let n = pos.len();
-        let boundary_top = r_core + 3.0 * s; // the bottom ~1.5 smoothing lengths are the FIXED interface
-        let fixed: Vec<bool> = pos.iter().map(|p| p.length() < boundary_top).collect();
-        let n_fixed = fixed.iter().filter(|&&f| f).count();
+        // The mantle is a FLUID COLUMN resting on the non-injecting floor at R_core (a hard-wall boundary
+        // gives correct hydrostatic: P(r)=∫ρg, the floor supplies the base reaction). No fixed-ρ₀ shell —
+        // it over-compressed the base (mobile particles packed into it). The floor is the interface.
+        let fixed = vec![false; n];
         let mut body = HydroBody {
             vel: vec![DVec3::ZERO; n],
             mass: vec![m_i; n],
@@ -476,19 +477,18 @@ mod tests {
         let spread = last.iter().map(|r| (r - mean).abs()).fold(0.0, f64::max) / mean;
         let inner = (0..n).filter(|&i| !fixed[i]).map(|i| body.pos[i].length()).fold(f64::INFINITY, f64::min);
         println!(
-            "39b ({n} particles, {n_fixed} fixed boundary) settled: mantle outer {:.0} km (spread {:.1}%), inner {:.0} km (R_core {:.0} km)",
+            "39b ({n} particles, fluid column on the R_core floor) settled: mantle outer {:.0} km (spread {:.1}%), inner {:.0} km (R_core {:.0} km)",
             mean / 1e3, spread * 100.0, inner / 1e3, r_core / 1e3
         );
         assert!(spread < 0.06, "mantle must settle to a steady outer radius (spread {spread:.2})");
         assert!(mean > 0.7 * r_surf && mean < 1.15 * r_surf, "mantle outer radius stays sane (got {mean:.3e})");
         assert!(inner > 0.8 * r_core, "mantle did NOT collapse into the core (inner {inner:.3e} vs R_core {r_core:.3e})");
 
-        // (2) Pressure DECREASES outward (a real structural invariant) — and we PRINT the hydrostatic-balance
-        // residual as a diagnostic. It is NOT yet asserted: the naive boundary (fixed-ρ₀ shell + hard floor)
-        // OVER-CONFINES the base, so the settled state is a stable-but-over-pressured configuration, not clean
-        // hydrostatic balance (dP/dr ≈ 140× −ρg). Getting the CORRECT profile needs the boundary PRESSURE to
-        // match the bulk's hydrostatic P(R_core) instead of a fixed ρ₀ — the interface pressure BC, the next
-        // 39b refinement (docs/39; the SPH-boundary sub-problem flagged from the start). IOU, not hidden.
+        // (2) HYDROSTATIC BALANCE in the mobile mantle: dP/dr = −ρ·g_total, g_total = G(M_bulk + M_particles(<r))/r²
+        // — the mantle settles to the CORRECT profile, not just a stable one. The interface is the non-injecting
+        // floor at R_core (a fluid column on a hard wall gives P(r)=∫ρg with the floor supplying the base
+        // reaction) — no fixed-ρ₀ shell (that over-confined the base to ~140× −ρg). This is the whole keystone:
+        // a PARTIAL particalization on a coarse bulk is quantitatively self-consistent.
         let dr = 0.10 * r_surf;
         let mut checked = 0;
         for &r in &[0.9e6_f64, 1.15e6] {
@@ -502,8 +502,9 @@ mod tests {
             let m_enc = m_bulk + enclosed_mass(&body, c, r);
             let expect = -rho_mid * g * m_enc / (r * r);
             let rel = (dpdr - expect).abs() / expect.abs().max(1.0);
-            println!("39b [DIAGNOSTIC — balance awaits the interface pressure BC] @ r={:.0} km: dP/dr {:.3e} vs −ρg_total {:.3e} (rel {:.1})", r / 1e3, dpdr, expect, rel);
+            println!("39b hydrostatic @ r={:.0} km: dP/dr {:.3e} vs −ρg_total {:.3e} (rel {:.2})", r / 1e3, dpdr, expect, rel);
             assert!(dpdr < 0.0, "pressure must DECREASE outward at r={r:.3e}");
+            assert!(rel < 0.5, "mantle holds hydrostatic balance (bulk + self) at r={r:.3e} (rel {rel:.2})");
             checked += 1;
         }
         assert!(checked >= 1, "at least one mantle shell must be testable");
