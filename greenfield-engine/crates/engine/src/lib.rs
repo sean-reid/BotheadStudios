@@ -3314,8 +3314,12 @@ mod app {
                 if relaxing.is_some() {
                     return; // still building — no dynamics/read-back this frame
                 }
-                // DYNAMICS PHASE: KDK substeps on the GPU + async read-back for the HUD/disk-stats.
-                const SPH_SUBSTEPS: u32 = 8;
+                // DYNAMICS PHASE: KDK substeps on the GPU + async read-back for the HUD/disk-stats. dt is the
+                // conservative shock-safe FIXED value from `assemble_impact` (a frame-lagged Courant dt applied
+                // across many substeps OVERSHOOTS the live shock and explodes — a proper per-substep adaptive
+                // dt is future work). At N~700 this still puffs somewhat rather than forming a clean orbiting
+                // disk — the GPU impact is a WORK-IN-PROGRESS demo (the button), not yet the birth scene.
+                const SPH_SUBSTEPS: u32 = 20;
                 if let Some(sph) = self.gpu_sph.as_mut() {
                     let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-step") });
                     sph.encode_kdk(&mut enc, SPH_SUBSTEPS);

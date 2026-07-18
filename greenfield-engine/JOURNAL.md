@@ -5,6 +5,31 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — REVERT: the birth scene goes back to the Aggregate — the GPU impact "loses its orbits" (docs/35)
+
+**What Robin caught.** On the deployed GPU birth scene the debris disperses instead of forming an orbiting
+disk/Moon — "we lost orbits." Diagnosed (rig-watch): the **remnant radius grows without bound** — 5994 → 8277
+km over 20 s (fixed dt), and worse (→21687 km) with a frame-lagged adaptive dt. Cause: **spurious energy
+injection**. The browser GPU impact must use a FIXED dt (WebGPU forbids the blocking read-back the offline
+adaptive dt needs); a fixed dt can't hold through the shock (c spikes ~4×) so it pumps energy in and the
+material puffs apart. A frame-lagged Courant dt (computed on the CPU from the one-frame-old snapshot) is
+WORSE — applied across 20 substeps it overshoots the live shock and explodes. So at browser resolution
+(N~700, no per-substep adaptive dt) the impact is not energy-conserving enough to orbit — unlike the offline
+`tools/impact-run` (N~35k, per-step adaptive dt, energy conserved 0.3–0.5 %).
+
+**What I did wrong.** I deployed the GPU impact as the default birth scene having verified it *ran*, not that
+it produced a good orbiting result — violating my own docs/35 guardrail ("keep the CPU path until the GPU
+replacement is verified good"). Corrected: **reverted `birth.html` to the CPU `Aggregate` scene** (which lofts
+an orbiting disk → moonlets → a Moon; rig-confirmed restored: 1536 fragments, disk 2.84 M☾ in 2 moonlets) and
+**redeployed**. The GPU SPH impact stays the "🌋 GPU Impact" **button** — a WIP physics demo — until its
+energy conservation is fixed. The `Space` tab's Sun–Earth–Moon orbits were never affected (rig-verified:
+Moon orbiting at ~1.02 km/s). Removed the failed frame-lagged `courant_dt`; the button keeps the shock-safe
+fixed dt (puffs slowly but doesn't explode). **Next (to make the GPU impact orbit):** a true per-substep
+adaptive dt (a GPU Courant reduction feeding the next substep in-kernel, no CPU round-trip), full GPU relax
+(`cs_relax`), and higher N — then re-promote to the birth scene.
+
+---
+
 ## 2026-07-17 — Stage 5 migration, increment 2c: geologic hand-off from the GPU disk (docs/35)
 
 **What.** The Geologic button now works in the GPU birth scene (was an Aggregate-only path). New

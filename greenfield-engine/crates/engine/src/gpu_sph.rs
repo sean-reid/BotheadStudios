@@ -145,9 +145,11 @@ pub fn assemble_impact(earth: &crate::hydrostatic::HydroBody, theia: &crate::hyd
     push_body(&mut out, theia, 1, theia_off, theia_vel);
     let softening = earth.softening.min(theia.softening) as f32;
     let min_h = out.iter().map(|p| p.h).fold(f32::INFINITY, f32::min);
-    // Conservative FIXED dt: resolve the sound speed (~5 km/s) AND the inbound impactor (WebGPU forbids the
-    // adaptive read-back, so it stays fixed and small enough to hold through the shock).
-    let dt = (0.05 * min_h as f64 / (5000.0 + v_esc)) as f32;
+    // Conservative FIXED dt (WebGPU forbids the blocking read-back the offline adaptive dt uses). It must hold
+    // through the SHOCK, where the sound speed spikes ~3–4× — so it is sized against a peak signal speed, not
+    // the initial one, or the step injects energy and the remnant puffs apart instead of orbiting (measured).
+    let c_peak = 20_000.0; // ~4× the ~5 km/s bar sound speed, the compressed-shock ceiling
+    let dt = (0.05 * min_h as f64 / (c_peak + v_esc)) as f32;
     (out, [SphEos::basalt(), SphEos::iron()], softening, dt)
 }
 

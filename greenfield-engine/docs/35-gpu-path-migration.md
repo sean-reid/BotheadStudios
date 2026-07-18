@@ -39,6 +39,12 @@ increment 4 (terrain probe) forces it. Recommendation: (b) — keep both laws on
      `sph_relax` chunked-CPU-relax phase in `advance` + pure `assemble_impact` → the birth scene auto-starts
      the GPU impact without freezing the main thread. `birth.html` rig-verified in dev (no hang). Replay
      restarts it.
+   - **REVERTED (2026-07-17): birth scene is back on the CPU `Aggregate`.** The GPU impact at browser N (~700,
+     fixed dt — WebGPU forbids the blocking read-back the offline adaptive dt uses) injects energy at the shock
+     and DISPERSES (remnant radius grows without bound) instead of forming an orbiting disk — so it fails the
+     "verified good before retiring the CPU path" guardrail. `birth.html` → `start_birth` again; the GPU SPH
+     impact stays the "🌋 GPU Impact" button (WIP). **To re-promote:** a true per-substep adaptive dt (a GPU
+     Courant reduction in-kernel, no CPU round-trip), full GPU relax, higher N — THEN the birth scene.
    - **DONE 2c (geologic hand-off from the GPU disk):** `gpu_sph::disk_moonlets` (bound clumps via
      `accretion` → `tides::Moonlet` at ~3.8 R⊕, or the whole bound-disk mass if no tight clump yet);
      `enter_geologic_time` branches on `sph_active`. `moon_debris` now dormant in `OrbitDemo`. Rig-verified
