@@ -97,6 +97,37 @@ real north star — *one contact law at every scale* — without an impossible s
 4a–4b are the core of increment 4 and its acceptance test (rest/pile/crater). 4c–4e extend into increment 5
 (retire `Aggregate`, WGSL-from-Rust). Scope this session: **4a + 4b**, then reassess.
 
+### Implementation reality check (found on starting 4a — plan revised)
+
+Starting 4a exposed a false premise. The GPU granular `contact_accel` (`particle_step.wgsl:132`) is **not** a
+force-level mirror of the Rust `granular::contact_accel` (`granular.rs:172`), and *shouldn't* be: the GPU puts
+the normal **damping into the implicit solver's tensor** (`g = θ²·dt²·k + θ·dt·c`, `:169`) and keeps only the
+spring in the explicit force (`f_rep = k·max(overlap,0)`, `:149`), whereas the Rust force is fully explicit
+(`f_rep = (k·overlap − c_damp·v_n)`, `:192`). The two are **structurally different by design** — the granular
+law is fused with the θ-implicit integrator we deliberately kept scene-selected. So a `sph-verify`-style
+force-equivalence check (4a) is **not applicable** to the granular path (the forces legitimately differ; only
+the full integrated step agrees).
+
+And that verification already exists at the right level: **`tools/gpu-verify`** drives `particle_step.wgsl` on
+the RTX 2070 and verifies the granular *behavior* (contact-repel + momentum, resting stack, angle of repose vs
+μ, crater-fill, restitution), and `granular.rs` is unit-tested. So the "one law, proven" keystone is **already
+met** — 4a as scoped is redundant.
+
+**Revised increments (skip 4a; the law is already GPU-verified behaviorally):**
+- **4b′ — EOS normal tier in the terrain shader (the composite law, in terrain).** Add the Tillotson-EOS
+  normal response to `particle_step.wgsl`, energy-selected against the granular penalty (u vs melt/vapor from
+  `eos.rs`), so a hot meteor develops real pressure/melt (T3) while rest/pile/crater stay pure granular
+  (T1/T2). *Verify:* `gpu-verify` behaviors unchanged at low energy + a new high-energy scene (melt at
+  contact, granular ejecta). This is the substantive "one composite law" step for terrain.
+- **4c′ — Retire the third solver: the probe onto the GPU path.** Port the probe from the CPU cohesive
+  `Aggregate` to GPU grains. NOTE the gap: the probe uses persistent bonds with a break-strain (0.06), while
+  the GPU has only *range-based cohesion* (`COH_RANGE=0.15`) — so this needs GPU persistent-bond tracking
+  (bond list + break-on-strain), a real feature, not just reusing cohesion. Highest value (most advances
+  "delete `Aggregate`") but the largest piece. *Verify:* probe rests and shatters emergently as today.
+
+Verification levels are law-appropriate, not uniform: **granular → behavioral (`gpu-verify`)** because it's
+integrator-fused; **SPH-EOS → force-equivalence (`sph-verify`)** because its force is separable.
+
 ## Guardrails
 - The terrain scene is **deployed** (integrity.bothead.net). No commit may leave it broken; rig-watch every
   visual step (CLAUDE.md #4). Keep the CPU/old path alive until the GPU replacement is rig-verified.
