@@ -510,6 +510,156 @@ mod tests {
         assert!(checked >= 1, "at least one mantle shell must be testable");
     }
 
+    // docs/39 39c/39d: the coarse bulk as a RECOILING body — a uniform-density core of `mass` below
+    // `r_base`, at `pos` with velocity `vel`. Gauss gravity: monopole G·M/r² outside r_base, linear
+    // G·M·r/r_base³ inside (→0 at centre; a raw 1/r² singularity-sucks penetrating particles — the 39b lesson).
+    struct Bulk {
+        pos: DVec3,
+        vel: DVec3,
+        mass: f64,
+        r_base: f64,
+    }
+    impl Bulk {
+        fn accel_at(&self, p: DVec3) -> DVec3 {
+            let d = p - self.pos;
+            let r = d.length();
+            if r < 1.0 {
+                return DVec3::ZERO;
+            }
+            let gg = if r >= self.r_base { G * self.mass / (r * r) } else { G * self.mass * r / self.r_base.powi(3) };
+            -(d / r) * gg
+        }
+    }
+
+    /// Bulk gravity on every particle + the bulk's recoil acceleration (Newton's 3rd: a_bulk = −Σ mᵢ·gᵢ/M).
+    fn bulk_forces(body: &HydroBody, bulk: &Bulk) -> (Vec<DVec3>, DVec3) {
+        let mut g = vec![DVec3::ZERO; body.pos.len()];
+        let mut ab = DVec3::ZERO;
+        for i in 0..body.pos.len() {
+            let gi = bulk.accel_at(body.pos[i]);
+            g[i] = gi;
+            ab -= gi * (body.mass[i] / bulk.mass);
+        }
+        (g, ab)
+    }
+
+    /// Non-injecting spherical floor at r_base: a particle cannot sink into the rigid bulk; its removed
+    /// inward RELATIVE velocity is credited to the bulk (Σp conserved), and no KE is injected.
+    fn bulk_floor(body: &mut HydroBody, bulk: &mut Bulk) {
+        for i in 0..body.pos.len() {
+            let d = body.pos[i] - bulk.pos;
+            let r = d.length();
+            if r < bulk.r_base && r > 1.0 {
+                let nrm = d / r;
+                body.pos[i] = bulk.pos + nrm * bulk.r_base;
+                let vn = (body.vel[i] - bulk.vel).dot(nrm);
+                if vn < 0.0 {
+                    let dv = nrm * vn;
+                    body.vel[i] -= dv;
+                    bulk.vel += dv * (body.mass[i] / bulk.mass);
+                }
+            }
+        }
+    }
+
+    /// One bulk-coupled KDK step (energy + momentum conserving): particle SPH-EOS + self-gravity + AV
+    /// (`forces_and_dudt`) + bulk gravity, and the bulk recoils from the back-reaction.
+    fn step_coupled(body: &mut HydroBody, bulk: &mut Bulk, dt: f64) {
+        body.compute_density();
+        let (a1, du1) = body.forces_and_dudt();
+        let (g1, ab1) = bulk_forces(body, bulk);
+        for i in 0..body.pos.len() {
+            body.vel[i] += (a1[i] + g1[i]) * (0.5 * dt);
+            body.u[i] = (body.u[i] + du1[i] * (0.5 * dt)).max(0.0);
+        }
+        bulk.vel += ab1 * (0.5 * dt);
+        for i in 0..body.pos.len() {
+            body.pos[i] += body.vel[i] * dt;
+        }
+        bulk.pos += bulk.vel * dt;
+        bulk_floor(body, bulk);
+        body.compute_density();
+        let (a2, du2) = body.forces_and_dudt();
+        let (g2, ab2) = bulk_forces(body, bulk);
+        for i in 0..body.pos.len() {
+            body.vel[i] += (a2[i] + g2[i]) * (0.5 * dt);
+            body.u[i] = (body.u[i] + du2[i] * (0.5 * dt)).max(0.0);
+        }
+        bulk.vel += ab2 * (0.5 * dt);
+    }
+
+    fn total_momentum(body: &HydroBody, bulk: &Bulk) -> DVec3 {
+        body.vel.iter().zip(&body.mass).map(|(v, &m)| *v * m).sum::<DVec3>() + bulk.vel * bulk.mass
+    }
+
+    /// Build a mantle shell [r_core, r_surf] of `n` basalt SPH particles at ρ₀ number density (docs/39 cap).
+    fn build_mantle_cap(eos: Tillotson, r_core: f64, r_surf: f64, n: usize) -> HydroBody {
+        let m_i = eos.rho0 * FOUR_THIRDS_PI * (r_surf.powi(3) - r_core.powi(3)) / n as f64;
+        let s = (m_i / eos.rho0).cbrt();
+        let (rc3, rs3) = (r_core.powi(3), r_surf.powi(3));
+        let pos: Vec<DVec3> = (0..n)
+            .map(|i| fib_dir(i, n, 1.7) * (rc3 + (rs3 - rc3) * (i as f64 + 0.5) / n as f64).cbrt())
+            .collect();
+        HydroBody {
+            vel: vec![DVec3::ZERO; n],
+            mass: vec![m_i; n],
+            u: vec![840.0 * 300.0; n],
+            eos: vec![Eos::Tillotson(eos); n],
+            h: vec![2.0 * s; n],
+            softening: 0.5 * s,
+            rho: vec![eos.rho0; n],
+            pos,
+        }
+    }
+
+    #[test]
+    #[ignore = "bulk-recoil momentum conservation (~hundreds of steps) — run with --ignored"]
+    fn the_recoiling_bulk_conserves_total_momentum() {
+        // docs/39 39c: the coarse bulk RECOILS (it moved from a fixed monopole in 39b to a body {pos,vel}).
+        // With only internal forces — bulk↔particle gravity (equal & opposite), particle SPH+self-gravity,
+        // and the non-injecting floor (credited to the bulk) — TOTAL momentum (bulk + particles) is conserved
+        // under dynamical KDK. Kick the cap sideways; the bulk recoils via gravity, but Σp stays put.
+        let eos = Tillotson::basalt();
+        let (r_core, r_surf) = (0.6e6_f64, 1.5e6_f64);
+        let mut cap = build_mantle_cap(eos, r_core, r_surf, 1500);
+        let m_bulk = FOUR_THIRDS_PI * r_core.powi(3) * eos.rho0;
+        let mut bulk = Bulk { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: m_bulk, r_base: r_core };
+        // Relax the cap onto the (fixed) bulk first (as 39b), then start the dynamical recoil test.
+        let dt_relax = cap.relax_dt(0.2);
+        for _ in 0..1500 {
+            cap.compute_density();
+            let acc = cap.accelerations();
+            let (g, _) = bulk_forces(&cap, &bulk);
+            for i in 0..cap.pos.len() {
+                cap.vel[i] = (cap.vel[i] + (acc[i] + g[i]) * dt_relax) * 0.95;
+                cap.pos[i] += cap.vel[i] * dt_relax;
+            }
+            bulk_floor(&mut cap, &mut bulk);
+        }
+        // Clean start: zero velocities, then kick the cap sideways (Σp₀ = m_cap·v_kick).
+        for v in cap.vel.iter_mut() {
+            *v = DVec3::ZERO;
+        }
+        let v_kick = DVec3::new(300.0, 0.0, 0.0);
+        for v in cap.vel.iter_mut() {
+            *v += v_kick;
+        }
+        let p0 = total_momentum(&cap, &bulk);
+        cap.compute_density();
+        let dt = cap.courant_dt(0.15);
+        for _ in 0..300 {
+            step_coupled(&mut cap, &mut bulk, dt);
+        }
+        let p1 = total_momentum(&cap, &bulk);
+        let drift = (p1 - p0).length() / p0.length().max(1.0);
+        println!(
+            "39c momentum: Σp₀ {:.3e} → Σp₁ {:.3e} (drift {:.2e}); bulk recoiled to v={:.1} m/s",
+            p0.length(), p1.length(), drift, bulk.vel.length()
+        );
+        assert!(bulk.vel.length() > 1.0, "the bulk must actually RECOIL (got {:.2e} m/s)", bulk.vel.length());
+        assert!(drift < 1.0e-3, "total momentum (bulk + particles) conserved (drift {drift:.2e})");
+    }
+
     #[test]
     #[ignore = "dynamical two-body shock (~thousands of steps) — run with --ignored"]
     fn a_head_on_collision_conserves_energy_and_shock_heats() {
