@@ -3086,6 +3086,22 @@ mod app {
         /// first-order), demote everything else into Earth (it has landed or will), retire the
         /// particle cloud, and hand evolution to the validated secular law.
         pub fn enter_geologic_time(&mut self) {
+            // GPU-path hand-off (docs/35 stage 5, 2c): if the GPU SPH impact is running, promote its orbiting
+            // disk's bound clumps to moonlets around the real Earth, retire the GPU sim, and go geologic — the
+            // GPU replacement for the Aggregate hand-off below.
+            if self.sph_active {
+                let moonlets = crate::gpu_sph::disk_moonlets(&self.sph_snapshot, EARTH_RADIUS_M);
+                if moonlets.is_empty() {
+                    return; // no orbiting disk yet — keep the impact running rather than blanking the scene
+                }
+                self.geo_moonlets = moonlets;
+                self.sph_active = false;
+                self.gpu_sph = None;
+                self.sph_relax = None;
+                self.camera.zoom = 1.0; // back out from the impact framing to the Earth–Moon geologic view
+                self.geologic = true;
+                return;
+            }
             let Some(agg) = self.moon_debris.as_ref() else { return };
             let earth = self.bodies[1];
             let mu = crate::orbit::G * earth.mass;

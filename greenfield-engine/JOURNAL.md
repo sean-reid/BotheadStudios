@@ -5,6 +5,30 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Stage 5 migration, increment 2c: geologic hand-off from the GPU disk (docs/35)
+
+**What.** The Geologic button now works in the GPU birth scene (was an Aggregate-only path). New
+`gpu_sph::disk_moonlets`: from the read-back disk it finds the self-bound clumps (the `accretion` operator)
+and promotes each to a `tides::Moonlet` orbiting the REAL Earth just outside Roche (~3.8 R⊕), carrying the
+clump's mass; if no tight clump has formed yet it promotes the whole bound-disk mass as one moonlet (in
+geologic time the disk accretes a Moon regardless). `OrbitDemo::enter_geologic_time` branches on `sph_active`:
+promote → retire the GPU sim → hand to the validated secular tidal law. Guarded so clicking Geologic before a
+disk exists is a no-op (keeps impacting) rather than blanking the scene. With the birth scene fully on GpuSph,
+`moon_debris` (`Aggregate`) is now dormant in `OrbitDemo` — functionally retired (the struct deletion waits on
+step 5, once the terrain probe also migrates).
+
+**Verified (rig-watch, release build — `web/rig/birth_geologic.mjs`).** Birth impact → disk forms (disk
+0.12–0.23 M☾, up to 68% Earth) → `enter_geologic_time()` → `disk_stats_json` returns the GEOLOGIC JSON
+(geologic mode active, populated from the GPU disk) and the scene transitions to the geologic Earth view
+(grain-shell Earth, camera backed out, HUD "T+1641y after impact"). Native + wasm build clean. Honest notes:
+(1) the promoted moonlet then decays under the secular law because this scene gives Earth no spin (a
+sub-synchronous moonlet migrates in and shreds at Roche — the existing `tides` physics, not a hand-off bug;
+giving the birth Earth a spin, or seeding the moonlet further out, is geologic-scene polish). (2) In the
+UNOPTIMIZED dev build the chunked CPU relax pegs the birth scene to ~1 fps for ~30 s (700 particles × 640
+relax steps); release is ~10× faster and fine — GPU relax (`cs_relax`) is the proper future fix for dev too.
+
+---
+
 ## 2026-07-17 — Stage 5 migration, increment 2b: the Birth-of-the-Moon scene runs on GpuSph (docs/35)
 
 **What.** The "Birth of the Moon" scene now runs the **GPU SPH deformable-Earth impact** instead of the CPU

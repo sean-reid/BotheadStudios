@@ -223,6 +223,67 @@ pub fn disk_stats_json(particles: &[SphParticle]) -> String {
     )
 }
 
+/// Promote the GPU impact's orbiting disk to geologic-time moonlets (docs/35 stage 5, 2c): find the disk's
+/// self-bound clumps (the `accretion` operator) and turn each into a `tides::Moonlet` orbiting the REAL Earth
+/// just outside the Roche limit (~3.8 R⊕, the real Moon's formation distance), carrying the clump's actual
+/// mass. The secular tidal law then migrates/merges them. This is the GPU-path replacement for the
+/// `Aggregate`-based `enter_geologic_time` hand-off. Returns an empty vec if there's no bound disk yet.
+pub fn disk_moonlets(particles: &[SphParticle], earth_radius: f64) -> Vec<crate::tides::Moonlet> {
+    use glam::DVec3;
+    if particles.len() < 2 {
+        return Vec::new();
+    }
+    let m_total: f64 = particles.iter().map(|p| p.mass as f64).sum();
+    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+    let vel = |p: &SphParticle| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
+    let com: DVec3 = particles.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
+    let v_com: DVec3 = particles.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
+    let mut radii: Vec<(f64, f64)> = particles.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
+    radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
+    for &(r, m) in &radii {
+        cum += m;
+        if cum >= 0.85 * m_total {
+            r_remnant = r;
+            m_remnant = cum;
+            break;
+        }
+    }
+    let mu = crate::orbit::G * m_remnant;
+    // Disk particles (bound, perigee above the remnant).
+    let (mut dp, mut dv, mut dm, mut dr) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for pt in particles {
+        if matches!(crate::orbit::perigee(pos(pt) - com, vel(pt) - v_com, mu), Some(pg) if pg > r_remnant) {
+            dp.push(pos(pt));
+            dv.push(vel(pt));
+            dm.push(pt.mass as f64);
+            dr.push(pt.rho.max(1.0) as f64);
+        }
+    }
+    if dp.len() < 2 {
+        return Vec::new();
+    }
+    let mean_h: f64 = particles.iter().map(|p| p.h as f64).sum::<f64>() / particles.len() as f64;
+    let clumps = crate::accretion::find_clumps(&dp, &dv, &dm, &dr, 2.0 * mean_h, crate::orbit::G, 1.0e4, com, m_remnant, r_remnant);
+    // Each self-bound clump → a moonlet just outside the real-Earth Roche limit (~3.8 R⊕).
+    let moonlets: Vec<crate::tides::Moonlet> = clumps
+        .iter()
+        .filter(|c| c.accretes())
+        .map(|c| crate::tides::Moonlet { a: 3.8 * earth_radius, mass: c.mass })
+        .collect();
+    if !moonlets.is_empty() {
+        return moonlets;
+    }
+    // No tight self-bound clump yet, but there IS bound orbiting disk: in geologic time it accretes a Moon, so
+    // promote the whole bound-disk mass to one moonlet (the secular tidal law then migrates/circularises it).
+    let disk_mass: f64 = dm.iter().sum();
+    if disk_mass > 0.0 {
+        vec![crate::tides::Moonlet { a: 3.8 * earth_radius, mass: disk_mass }]
+    } else {
+        Vec::new()
+    }
+}
+
 fn relax_body(b: &mut crate::hydrostatic::HydroBody, steps: usize) {
     let dt = b.relax_dt(0.2);
     for _ in 0..steps {
