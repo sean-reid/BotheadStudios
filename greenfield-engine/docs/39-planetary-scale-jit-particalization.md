@@ -106,6 +106,23 @@ Earth. It is the skeleton; three upgrades turn it into the real T0↔T3:
 39a–39b are the crux (a partial particalization that holds); 39d is the payoff (the converged number at
 tractable cost); 39e closes birth-of-the-Moon. Only 39a–39b need land before we know the approach is sound.
 
+### Status — 39a DONE, 39b MECHANICALLY VIABLE (2026-07-18)
+
+- **39a DONE.** `LayeredBody::acceleration_at` (positioned Gauss gravity) — verified (`planet.rs` test).
+- **39b — the approach is mechanically viable; balance awaits the interface pressure BC.** Test
+  `a_particalized_mantle_shell_holds_hydrostatic_on_a_bulk_core` (`hydrostatic.rs`, `#[ignore]`): a mantle
+  shell particalized on a bulk core **HOLDS** — settles to a steady radius (1414 km, spread 0.1%), no
+  explosion, no collapse, **zero leakage** into the bulk. **Two fixes were essential and are the real
+  lessons:** (1) the bulk gravity MUST use the Gauss-correct interior (`∝r`, →0 at centre) — a raw `1/r²`
+  monopole singularity-sucks any particle that penetrates the boundary and blew the mantle to 170,000 km;
+  (2) a **non-injecting floor** at R_core (the terrain constraint, spherical) is needed — a fixed-particle
+  shell alone leaks. **Open (the SPH-boundary sub-problem, flagged from the start):** clean hydrostatic
+  balance is NOT yet achieved (dP/dr ≈ 100× −ρg) — the fixed-ρ₀ shell + hard floor **over-confine** the base,
+  so the settled state is stable-but-over-pressured. The next 39b refinement is the **interface pressure
+  BC**: the boundary must supply the bulk's hydrostatic `P(R_core)` (not a fixed ρ₀), so the mantle settles
+  to the *correct* profile. Mechanical viability (a partial particalization is stable) is the keystone signal
+  the approach is sound; the pressure BC makes it quantitatively right.
+
 ## Open decisions to pressure-test (before building)
 
 1. **Rigid vs deformable bulk.** First version: the bulk is *rigid* (recoils as one body, doesn't deform) —
