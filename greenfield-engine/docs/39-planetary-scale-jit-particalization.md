@@ -120,8 +120,21 @@ tractable cost); 39e closes birth-of-the-Moon. Only 39a–39b need land before w
   interface pressure BC is **simpler than a boundary shell** — a fixed-ρ₀ shell OVER-confines the base
   (dP/dr ≈ 140× −ρg); a fluid column on the bare hard floor gives correct hydrostatic (`P(r)=∫ρg`, the floor
   supplies the base reaction). **The coarse-bulk + particalized-cap architecture is proven at the keystone.**
-  Next: 39c (recoiling bulk + momentum) → 39d (Theia into the capped Earth + cap-size sweep to 58%) → 39e
-  (bake-back + Moon).
+- **39c DONE.** The bulk RECOILS (a body {pos,vel,mass}); a bulk-coupled KDK step (Gauss gravity +
+  Newton's-3rd back-reaction + non-injecting floor credited to the bulk) conserves total momentum to drift
+  8.6e-4. Test `the_recoiling_bulk_conserves_total_momentum` (`hydrostatic.rs`).
+- **39d DONE — the payoff, with a decisive finding.** `the_cap_size_dials_the_disk_earth_fraction`
+  (`hydrostatic.rs`, `#[ignore]`): Theia into a capped Earth (bulk core + particalized basalt mantle cap).
+  **The approach WORKS:** both caps produce a real MIXED (Earth+Theia) orbiting disk (~0.2 M☾) whose Earth
+  fraction — **25% (thick cap) / 33% (thin cap)** — is clearly **above the rigid-boundary 7–12% ceiling**
+  (docs/31). So the particalized cap sheds Earth's own mantle, reproducing the deformable-Earth mechanism at
+  a fraction of the particle count. **THE FINDING (resolves decision #1 — a RIGID bulk plateaus below 58%):**
+  the Earth-SHED mass is **~constant (0.056 M☾) regardless of cap thickness** — only the cap's *near-surface*
+  shocks and sheds; the rigid bulk **reflects the deep shock** instead of doing the deep mantle-shedding that
+  gets the all-particle case to 58%. So a rigid bulk is a partial win (7–12% → ~25–33%, not → 58%), and the
+  cap-size dial is not monotonic at coarse N (scatter + the rigid-bulk limit). **Reaching 58% needs a
+  DEFORMABLE bulk** (so the shock propagates into it) — the next lever, a revision to the rigid-bulk-first
+  choice. Next: 39e (bake-back + Moon) and/or a deformable-bulk variant to close the gap to 58%.
 
 ## Open decisions to pressure-test (before building)
 
