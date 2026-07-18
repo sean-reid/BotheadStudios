@@ -410,6 +410,14 @@ async function main(): Promise<void> {
       if (demo.earth_day_hours() > 0) {
         physics.push(`Earth day <b>${demo.earth_day_hours().toFixed(1)} h</b>`);
       }
+      // GPU SPH impact (docs/33 stage 5): live disk provenance from the read-back particle field.
+      const gpuDisk = demo.gpu_disk_stats_json();
+      if (gpuDisk !== "null") {
+        const g = JSON.parse(gpuDisk) as { disk: number; earth_pct: number; moon: number };
+        physics.push(
+          `GPU impact · disk <b>${g.disk.toFixed(2)}</b> M☾ (<b>${g.earth_pct}%</b> Earth) · moon <b>${g.moon.toFixed(2)}</b> M☾`,
+        );
+      }
       hud.update({
         title: `<b>${windowTitle}</b> · Sun · Earth · ${body3} · frame <b>${demo.focus_label()}</b>`,
         physics,

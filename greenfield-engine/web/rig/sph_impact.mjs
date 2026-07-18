@@ -23,7 +23,8 @@ for (const dt of marks) {
   await p.waitForTimeout(dt);
   t += dt;
   await p.screenshot({ path: `${out}/sph-${t}ms.png` });
-  console.log(`shot t+${t}ms`);
+  const stats = await p.evaluate(() => window.__demo?.gpu_disk_stats_json?.() ?? 'no-method');
+  console.log(`shot t+${t}ms · disk ${stats}`);
 }
 await b.close();
 console.log('done');

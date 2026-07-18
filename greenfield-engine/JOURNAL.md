@@ -5,6 +5,29 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Stage 5 migration, increment 1: GPU→CPU read-back + live disk stats (docs/35)
+
+**What.** Robin chose to unify the scenes onto the **GPU SPH path** (retire the CPU `Aggregate` from the live
+scenes) — the high-payoff, high-risk direction. Wrote the increment plan in **`docs/35-gpu-path-migration.md`**
+(sequence, guardrails, and the one open design decision flagged for later: pure-SPH-EOS vs SPH-EOS+granular on
+the GPU). Increment 1 is the universal prerequisite — nothing can migrate until the scene can read GPU
+particle state back. Added two-phase async read-back to `GpuSph` (`begin_readback`/`take_readback`, mirroring
+`GpuParticles`; WebGPU forbids blocking maps, so it copies one frame and collects the next). `OrbitDemo`
+reads back each frame into `sph_snapshot`; `gpu_sph::disk_stats_json` measures the orbiting disk on it
+(remnant = 85%-mass body, perigee-above-remnant classification, provenance split) and the largest self-bound
+clump via the verified `accretion` operator; `OrbitDemo::gpu_disk_stats_json()` exposes it to JS, shown in the
+birth HUD. `mod gpu_sph` is now `#[cfg(target_arch="wasm32")]` (it's only used by the wasm-only `mod app`; the
+native SPH reference stays in `tools/`).
+
+**Verified.** Native + wasm builds clean. Rig-watch (`web/rig/sph_impact.mjs`, RTX 2070): triggered the GPU
+impact, and the HUD shows the **live read-back disk provenance updating each frame** — e.g. `disk 0.35 M☾
+(8% Earth) · moon 0.07 M☾` at t+8.5 s, evolving as the remnant + debris disk form. The read-back → CPU
+measurement → JSON → HUD path works end-to-end. (The low/jumpy Earth% is the chaotic N~1050 browser run — a
+live visualization, not the converged number; `tools/impact-run` remains the faithful measurement.) Next
+increment (docs/35 step 2): put the "Birth of the Moon" scene fully on `GpuSph` and retire `moon_debris`.
+
+---
+
 ## 2026-07-17 — Stage 5 (begin): the EOS seam — one pressure abstraction across air and rock (docs/33 §4.5)
 
 **What.** Stage 5 is "retire the forks — unify the particle containers." The blocker the fork map surfaced:

@@ -143,6 +143,78 @@ pub fn build_deformable_impact(n_earth: usize, n_theia: usize, relax_steps: usiz
     (out, [SphEos::basalt(), SphEos::iron()], softening, dt)
 }
 
+/// Measure the orbiting disk of a read-back SPH particle set (docs/33 stage 5, mirrors
+/// `tools/impact-run::measure_disk`): remnant = the 85%-mass inner body; a particle is DISK if bound with
+/// perigee above the remnant surface. Split by provenance (Earth prov 0 vs Theia prov 1), and report the
+/// largest self-bound clump (the Moon candidate) via the verified `accretion` operator. Returns HUD JSON.
+pub fn disk_stats_json(particles: &[SphParticle]) -> String {
+    use glam::DVec3;
+    const M_MOON: f64 = 7.342e22;
+    let n = particles.len();
+    if n == 0 {
+        return String::from("null");
+    }
+    let m_total: f64 = particles.iter().map(|p| p.mass as f64).sum();
+    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+    let vel = |p: &SphParticle| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
+    let com: DVec3 = particles.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
+    let v_com: DVec3 = particles.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
+    // Remnant radius = smallest radius about the COM enclosing 85% of the mass.
+    let mut radii: Vec<(f64, f64)> = particles.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
+    radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
+    for &(r, m) in &radii {
+        cum += m;
+        if cum >= 0.85 * m_total {
+            r_remnant = r;
+            m_remnant = cum;
+            break;
+        }
+    }
+    let mu = crate::orbit::G * m_remnant;
+    let (mut e_disk, mut t_disk, mut esc) = (0.0f64, 0.0f64, 0.0f64);
+    for p in particles {
+        let m = p.mass as f64;
+        match crate::orbit::perigee(pos(p) - com, vel(p) - v_com, mu) {
+            None => esc += m,
+            Some(pg) if pg > r_remnant => {
+                if p.prov == 0 { e_disk += m } else { t_disk += m }
+            }
+            Some(_) => {}
+        }
+    }
+    let disk = e_disk + t_disk;
+    let earth_pct = if disk > 0.0 { 100.0 * e_disk / disk } else { 0.0 };
+    // Moon candidate: the largest self-bound clump in the disk (the verified accretion operator).
+    let (dp, dv, dm, dr): (Vec<DVec3>, Vec<DVec3>, Vec<f64>, Vec<f64>) = {
+        let (mut p, mut v, mut m, mut r) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for pt in particles {
+            let peri = crate::orbit::perigee(pos(pt) - com, vel(pt) - v_com, mu);
+            if matches!(peri, Some(pg) if pg > r_remnant) {
+                p.push(pos(pt));
+                v.push(vel(pt));
+                m.push(pt.mass as f64);
+                r.push(pt.rho.max(1.0) as f64);
+            }
+        }
+        (p, v, m, r)
+    };
+    let mut biggest = 0.0f64;
+    if dp.len() >= 2 {
+        let mean_h: f64 = particles.iter().map(|p| p.h as f64).sum::<f64>() / n as f64;
+        let clumps = crate::accretion::find_clumps(&dp, &dv, &dm, &dr, 2.0 * mean_h, crate::orbit::G, 1.0e4, com, m_remnant, r_remnant);
+        biggest = clumps.iter().filter(|c| c.accretes()).map(|c| c.mass).fold(0.0, f64::max);
+    }
+    format!(
+        "{{\"disk\":{:.3},\"earth_pct\":{:.0},\"remnant_km\":{:.0},\"escaped\":{:.3},\"moon\":{:.3}}}",
+        disk / M_MOON,
+        earth_pct,
+        r_remnant / 1e3,
+        esc / M_MOON,
+        biggest / M_MOON,
+    )
+}
+
 fn relax_body(b: &mut crate::hydrostatic::HydroBody, steps: usize) {
     let dt = b.relax_dt(0.2);
     for _ in 0..steps {
@@ -199,6 +271,11 @@ pub struct GpuSph {
     capacity: u32,
     count: u32,
     params: SphParams,
+    // Two-phase async read-back (WebGPU forbids blocking on a map, so a copy+map_async is started one frame
+    // and its result collected the next — mirrors `GpuParticles::begin_readback`/`take_readback`).
+    readback_staging: Option<wgpu::Buffer>,
+    readback_count: u32,
+    readback_ready: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl GpuSph {
@@ -272,6 +349,9 @@ impl GpuSph {
             kick_drift: mk("cs_kick_drift"), kick: mk("cs_kick"), relax_k: mk("cs_relax"),
             particles, params_buf, eos_buf, acc, dudt, signal, grid_count, grid_bucket, bind, capacity: cap, count: 0,
             params: SphParams { n: 0, softening: 0.0, av_alpha: 1.0, av_beta: 2.0, cell_size: 1.0, table_mask: SPH_TABLE_SIZE - 1, bucket_k: SPH_BUCKET_K, dt: 0.0, damp: 1.0, _p0: 0.0, _p1: 0.0, _p2: 0.0 },
+            readback_staging: None,
+            readback_count: 0,
+            readback_ready: std::rc::Rc::new(std::cell::Cell::new(false)),
         }
     }
 
@@ -335,5 +415,48 @@ impl GpuSph {
             self.force_eval(enc);
             self.pass(enc, &self.kick, self.count);
         }
+    }
+
+    /// Phase 1 of read-back: copy the live particles into a MAP_READ staging buffer and start the async map.
+    /// No-op if empty or a read-back is already in flight. WebGPU maps are non-blocking, so the result is
+    /// collected a later frame via [`take_readback`](Self::take_readback).
+    pub fn begin_readback(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.count == 0 || self.readback_staging.is_some() {
+            return;
+        }
+        let size = self.count as u64 * std::mem::size_of::<SphParticle>() as u64;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sph-readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_buffer_to_buffer(&self.particles, 0, &staging, 0, size);
+        queue.submit(std::iter::once(enc.finish()));
+        self.readback_ready.set(false);
+        let flag = self.readback_ready.clone();
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+            if res.is_ok() {
+                flag.set(true);
+            }
+        });
+        self.readback_count = self.count;
+        self.readback_staging = Some(staging);
+    }
+
+    /// Phase 2: if the in-flight read-back completed, return the snapshotted particles and clear the state.
+    /// `None` while pending or when nothing is in flight.
+    pub fn take_readback(&mut self) -> Option<Vec<SphParticle>> {
+        if !self.readback_ready.get() {
+            return None;
+        }
+        let staging = self.readback_staging.take()?;
+        let data = staging.slice(..).get_mapped_range();
+        let out = bytemuck::cast_slice::<u8, SphParticle>(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        self.readback_ready.set(false);
+        Some(out)
     }
 }

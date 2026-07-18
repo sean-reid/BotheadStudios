@@ -29,7 +29,8 @@ mod damage;
 mod emission;
 mod eos;
 mod granular;
-mod gpu_sph;
+#[cfg(target_arch = "wasm32")] // WebGPU host for sph_step.wgsl; only the browser scene uses it (mod app is
+mod gpu_sph; //                    wasm-only). The native SPH reference lives in tools/sph-verify + impact-run.
 mod gravity;
 mod hydrostatic;
 mod impact;
@@ -2486,6 +2487,9 @@ mod app {
         sph_cam: UniformSlot,               // view-proj + Earth display origin + scale for the particle shader
         sph_active: bool,
         sph_dt: f32, // fixed integration timestep (chosen at build; WebGPU forbids the adaptive read-back)
+        /// Latest async read-back of the GPU SPH particles (one frame behind) — for the HUD/disk-stats and
+        /// (later) the momentum mirror. Empty until the first read-back completes.
+        sph_snapshot: Vec<crate::gpu_sph::SphParticle>,
     }
 
     // Moon-shot Stage A constants.
@@ -2755,6 +2759,7 @@ mod app {
                 sph_cam,
                 sph_active: false,
                 sph_dt: 0.0,
+                sph_snapshot: Vec::new(),
             })
         }
 
@@ -3225,7 +3230,18 @@ mod app {
             self.gpu_sph = Some(sph);
             self.sph_dt = dt;
             self.sph_active = true;
+            self.sph_snapshot.clear();
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
+        }
+
+        /// Disk-provenance stats of the live GPU SPH impact (docs/33 stage 5), computed from the latest
+        /// read-back: orbiting-disk mass (M☾), its Earth %, remnant radius, escaped mass, and the largest
+        /// self-bound clump (Moon candidate). `"null"` before the first read-back. JS reads this for the HUD.
+        pub fn gpu_disk_stats_json(&self) -> String {
+            if !self.sph_active {
+                return String::from("null");
+            }
+            crate::gpu_sph::disk_stats_json(&self.sph_snapshot)
         }
 
         /// Advance the PHYSICS by `real_dt` wall-clock seconds. Fixed sim-timestep substeps whose
@@ -3241,10 +3257,15 @@ mod app {
             // adaptive read-back); ~8 substeps/frame plays the ~10 h aftermath out over a few seconds.
             if self.sph_active {
                 const SPH_SUBSTEPS: u32 = 8;
-                if let Some(sph) = self.gpu_sph.as_ref() {
+                if let Some(sph) = self.gpu_sph.as_mut() {
                     let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-step") });
                     sph.encode_kdk(&mut enc, SPH_SUBSTEPS);
                     self.queue.submit(std::iter::once(enc.finish()));
+                    // Read back the particle state (one frame behind) for the HUD / disk-stats.
+                    if let Some(snap) = sph.take_readback() {
+                        self.sph_snapshot = snap;
+                    }
+                    sph.begin_readback(&self.device, &self.queue);
                 }
                 return;
             }

@@ -9,6 +9,10 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **GPU impact read-back + live disk stats** (`gpu_sph.rs`, `docs/35` — the GPU-path migration) — `GpuSph`
+  gained two-phase async GPU→CPU read-back, and the browser birth scene now shows the live orbiting-disk
+  provenance (mass, Earth %, remnant radius, largest self-bound clump) from the read-back particle field. The
+  first increment of unifying the scenes onto the one GPU SPH path (retiring the CPU `Aggregate`).
 - **EOS abstraction — one pressure law across air and rock** (`eos.rs`, `docs/33` stage 5) — a new `Eos` enum
   (`Tillotson` | `IdealGas`) with `pressure`/`sound_speed_sq`, so the shared SPH machinery is parameterized by
   the equation of state instead of hardcoding it. `hydrostatic::HydroBody` now carries `Vec<Eos>` (was
