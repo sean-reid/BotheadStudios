@@ -15,8 +15,11 @@
 //!   5. classify each particle remnant / orbiting-disk / escaped by the perigee-above-remnant
 //!      criterion and split the disk by provenance (Earth vs Theia)                       [CPU]
 //!
-//! Usage: `cargo run --release -- [earth_n] [steps]`  (defaults 1800 / 4000 — the CPU 3c config, for a
-//! cross-check; pass larger earth_n to converge). Verification of the kernel itself lives in tools/sph-verify.
+//! Usage (docs/40 #3): `cargo run --release -- ensemble [earth_n] [t_hours] [K]` — K perturbed-IC variable-res
+//! impacts each integrated to the SAME physical epoch `t_hours`, reporting the converged Earth-fraction ±stdev.
+//! Or `cargo run --release -- [earth_n] [t_hours]` for one verbose run. The disk RE-ACCRETES, so the fraction
+//! is epoch-dependent — comparing N at a fixed epoch is what makes it converge (docs/41). Kernel verification
+//! lives in tools/sph-verify.
 
 const SHADER: &str = include_str!("../../../shaders/sph_step.wgsl");
 
@@ -130,6 +133,75 @@ fn build_differentiated(core_radius: f64, total_radius: f64, u_specific: f64, ta
         ps.push(mk([d[0] * rr, d[1] * rr, d[2] * rr], MAT_BASALT, basalt.rho0 as f64));
     }
     (ps, m_i)
+}
+
+// docs/40 #3 step 1 — VARIABLE-RESOLUTION ("LOD") differentiated body (ports hydrostatic.rs run_lod_impact):
+// a COARSE iron core (particle mass `m_fine*coarse_factor`, larger `h`) + a FINE basalt mantle (mass `m_fine`).
+// `sph_step.wgsl` handles mixed h/mass natively (per-pair h_ij=½(h_i+h_j); grid cell_size = max h), so this is
+// just seeding — no kernel change. #1 found the deformable coarse core is the win (63% vs the rigid ~25%).
+// Returns (particles, m_fine) — m_fine sets the finest spacing (softening).
+fn build_lod(core_radius: f64, total_radius: f64, u_specific: f64, m_fine: f64, coarse_factor: f64, provenance: u32) -> (Vec<Particle>, f64) {
+    let (iron, basalt) = (eos_iron(), eos_basalt());
+    const FTP: f64 = 4.0 / 3.0 * std::f64::consts::PI;
+    let m_coarse = m_fine * coarse_factor;
+    let m_core = iron.rho0 as f64 * FTP * core_radius.powi(3);
+    let m_mantle = basalt.rho0 as f64 * FTP * (total_radius.powi(3) - core_radius.powi(3));
+    let n_core = (m_core / m_coarse).round().max(1.0) as usize;
+    let n_mantle = (m_mantle / m_fine).round().max(1.0) as usize;
+    let mut ps = Vec::with_capacity(n_core + n_mantle);
+    let mk = |pos: [f64; 3], mat: u32, rho0: f64, m: f64| Particle {
+        pos: [pos[0] as f32, pos[1] as f32, pos[2] as f32],
+        h: smoothing_for(m, rho0) as f32,
+        vel: [0.0; 3],
+        u: u_specific as f32,
+        mass: m as f32,
+        mat,
+        rho: rho0 as f32,
+        prov: provenance,
+    };
+    for i in 0..n_core {
+        let rr = core_radius * ((i as f64 + 0.5) / n_core as f64).cbrt();
+        let d = fib_dir(i, n_core, 0.0);
+        ps.push(mk([d[0] * rr, d[1] * rr, d[2] * rr], MAT_IRON, iron.rho0 as f64, m_coarse));
+    }
+    let (rc3, rt3) = (core_radius.powi(3), total_radius.powi(3));
+    for i in 0..n_mantle {
+        let rr = (rc3 + (rt3 - rc3) * (i as f64 + 0.5) / n_mantle as f64).cbrt();
+        let d = fib_dir(i, n_mantle, 1.7);
+        ps.push(mk([d[0] * rr, d[1] * rr, d[2] * rr], MAT_BASALT, basalt.rho0 as f64, m_fine));
+    }
+    (ps, m_fine)
+}
+
+// docs/40 #3 step 3 — deterministic per-(run,particle,axis) jitter in [-1,1). A splitmix64 hash, NOT
+// `Math.random`/rand: the ensemble must be reproducible (same K → same numbers), the perturbation only breaks
+// the microscopic symmetry so each run is an independent chaotic realization of the SAME macroscopic impact.
+fn hash_jitter(run: u64, i: u64, axis: u64) -> f64 {
+    let mut x = run
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ i.wrapping_mul(0xD1B5_4A32_D192_ED03)
+        ^ axis.wrapping_mul(0xCA5A_8263_9512_1157)
+        ^ 0x2545_F491_4F6C_DD1D;
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    (x as f64 / u64::MAX as f64) * 2.0 - 1.0
+}
+
+// docs/40 #3 step 2 — order-independent reduction. Sorting the terms by magnitude then Kahan-summing makes the
+// sum invariant to the order the terms arrive in (GPU readback / classification order), so measuring the same
+// snapshot twice gives a bit-identical fraction. (The SIM still scatters — chaos — but the MEASUREMENT is
+// deterministic; that separation is the whole point of the ensemble.)
+fn sum_oi(terms: &mut Vec<f64>) -> f64 {
+    terms.sort_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap());
+    let (mut s, mut c) = (0.0f64, 0.0f64); // Kahan compensated summation
+    for &t in terms.iter() {
+        let y = t - c;
+        let z = s + y;
+        c = (z - s) - y;
+        s = z;
+    }
+    s
 }
 
 fn com(ps: &[Particle]) -> [f64; 3] {
@@ -275,7 +347,11 @@ impl Gpu {
     // Damped GPU relaxation at a fixed dt (chosen from the initial signal min) for `steps` steps.
     fn relax(&self, particles: &[Particle], eos: &[Eos], soft: f64, cfl: f64, damp: f64, steps: usize) -> Vec<Particle> {
         let cell_size = particles.iter().map(|p| p.h).fold(0.0f32, f32::max);
-        let mut params = Params { n: particles.len() as u32, softening: soft as f32, av_alpha: AV_ALPHA, av_beta: AV_BETA, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0, damp: damp as f32, _p0: 0.0, _p1: 0.0, _p2: 0.0 };
+        // AV-FREE relaxation (docs/35): the CPU `HydroBody::relax_step` settles on gravity + SPH pressure only
+        // (`accelerations()`, no Monaghan AV). AV is a velocity-dependent dissipation for APPROACHING particles;
+        // leaving it on during the damped settle corrupts the equilibrium and the subsequent impact DISPERSES
+        // (loses orbits) — the docs/35 GPU finding. AV is restored (α=1,β=2) for the impact, where the shock is.
+        let mut params = Params { n: particles.len() as u32, softening: soft as f32, av_alpha: 0.0, av_beta: 0.0, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0, damp: damp as f32, _p0: 0.0, _p1: 0.0, _p2: 0.0 };
         let b = self.make_buffers(particles, eos, &params);
         // dt from the initial state (density → signal); fixed for the relaxation.
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -299,14 +375,17 @@ impl Gpu {
         self.read_particles(&b)
     }
 
-    // KDK impact with adaptive Courant dt (per-step signal read-back). Returns final particles and the total
-    // physical time integrated. `probe` (optional) receives (step, dt, t) callbacks for progress.
-    fn impact(&self, particles: &[Particle], eos: &[Eos], soft: f64, cfl: f64, steps: usize) -> (Vec<Particle>, f64) {
+    // KDK impact with adaptive Courant dt (per-step signal read-back). Integrates until the physical time
+    // reaches `t_target` seconds (or the `max_steps` safety cap), so runs at DIFFERENT N are compared at the
+    // SAME epoch — essential because the disk RE-ACCRETES over time, so the fraction is epoch-dependent and a
+    // fixed step count integrates different physical times at different N. Returns (final particles, total t).
+    fn impact(&self, particles: &[Particle], eos: &[Eos], soft: f64, cfl: f64, max_steps: usize, t_target: f64) -> (Vec<Particle>, f64) {
         let cell_size = particles.iter().map(|p| p.h).fold(0.0f32, f32::max);
         let mut params = Params { n: particles.len() as u32, softening: soft as f32, av_alpha: AV_ALPHA, av_beta: AV_BETA, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0, damp: 1.0, _p0: 0.0, _p1: 0.0, _p2: 0.0 };
         let b = self.make_buffers(particles, eos, &params);
         let mut t = 0.0f64;
-        for s in 0..steps {
+        let mut s = 0usize;
+        while t < t_target && s < max_steps {
             // eval 1 (+ signal) → read adaptive dt → half-kick+drift
             let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             self.force_eval(&mut enc, &b);
@@ -322,12 +401,14 @@ impl Gpu {
             self.dispatch(&mut enc, &b, &self.p_k, b.n);
             self.queue.submit(Some(enc.finish()));
             t += dt;
-            if s % 500 == 0 || s == steps - 1 {
+            s += 1;
+            if s % 500 == 0 {
                 self.device.poll(wgpu::Maintain::Wait);
-                println!("  impact step {:>5}/{}  dt={:.3}s  t={:.0}s ({:.2} h)", s, steps, dt, t, t / 3600.0);
+                println!("  impact step {:>5} (≤{})  dt={:.3}s  t={:.0}s ({:.2}/{:.2} h)", s, max_steps, dt, t, t / 3600.0, t_target / 3600.0);
             }
         }
         self.device.poll(wgpu::Maintain::Wait);
+        println!("  impact done: {} steps → t={:.2} h (target {:.2} h)", s, t / 3600.0, t_target / 3600.0);
         (self.read_particles(&b), t)
     }
 }
@@ -369,36 +450,53 @@ fn total_energy(ps: &[Particle], soft: f64, with_pe: bool) -> (f64, f64, f64) {
     (ke, ie, pe)
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let earth_n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1800);
-    let steps: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4000);
-    let theia_n = (earth_n / 6).max(50); // ~mass ratio 6:1 ⇒ equal particle mass (as the CPU 3c test)
+// Earth = variable-resolution (coarse iron core + fine basalt mantle); Theia = uniform differentiated at the
+// fine mass. The coarse core carries `COARSE_FACTOR`× the fine particle mass (docs/40 #1: deformable-coarse win).
+const COARSE_FACTOR: f64 = 8.0;
+const R_SURF: f64 = 5.0e6; // sub-Earth scale (tractable direct-sum); r_core = R_SURF/2
+const R_THEIA: f64 = 2.7e6; // ~1/7 Earth mass, differentiated (iron core essential — basalt sphere sheds ~0%)
 
-    let gpu = Gpu::new();
-    let eos = [eos_basalt(), eos_iron()];
-    // Sub-Earth scale (tractable): proto-Earth 5000 km, Theia 2700 km (~1/7 mass), both differentiated.
-    let (mut earth, m_i_e) = build_differentiated(0.5 * 5.0e6, 5.0e6, 1.0e6, earth_n, 0);
-    let (mut theia, m_i_t) = build_differentiated(0.5 * 2.7e6, 2.7e6, 1.0e6, theia_n, 1);
-    let soft = 0.5 * (m_i_e.min(m_i_t) / 7850.0).cbrt(); // finest (iron) spacing, like hydrostatic.rs
-    println!("build: Earth {} particles (m_i={:.2e} kg), Theia {} particles (m_i={:.2e} kg), soft={:.0} m", earth.len(), m_i_e, theia.len(), m_i_t, soft);
+// Build + relax (once) the LOD Earth and the fine Theia at the given fine mass. `earth_n` sets the TOTAL Earth
+// particle count (m_fine is solved from it and COARSE_FACTOR). Returns (earth_relaxed, theia_relaxed, soft).
+fn build_and_relax(gpu: &Gpu, eos: &[Eos], earth_n: usize) -> (Vec<Particle>, Vec<Particle>, f64) {
+    const FTP: f64 = 4.0 / 3.0 * std::f64::consts::PI;
+    let r_ic = 0.5 * R_SURF;
+    let (iron, basalt) = (eos_iron(), eos_basalt());
+    let m_mantle = basalt.rho0 as f64 * FTP * (R_SURF.powi(3) - r_ic.powi(3));
+    let m_core = iron.rho0 as f64 * FTP * r_ic.powi(3);
+    // total Earth count = n_mantle + n_core = (m_mantle + m_core/cf)/m_fine  ⇒ solve m_fine from earth_n.
+    let m_fine = (m_mantle + m_core / COARSE_FACTOR) / earth_n as f64;
+    let (mut earth, _) = build_lod(r_ic, R_SURF, 1.0e6, m_fine, COARSE_FACTOR, 0);
+    // Theia: uniform differentiated, equal particle mass ≈ m_fine (so exactly two mass classes system-wide).
+    let m_theia_tot = iron.rho0 as f64 * FTP * (0.5 * R_THEIA).powi(3) + basalt.rho0 as f64 * FTP * (R_THEIA.powi(3) - (0.5 * R_THEIA).powi(3));
+    let theia_n = (m_theia_tot / m_fine).round().max(50.0) as usize;
+    let (mut theia, _) = build_differentiated(0.5 * R_THEIA, R_THEIA, 1.0e6, theia_n, 1);
+    let soft = 0.5 * (m_fine / basalt.rho0 as f64).cbrt(); // finest (fine basalt) spacing, matches run_lod_impact
+    let n_core = earth.iter().filter(|p| p.mass as f64 > 1.5 * m_fine).count();
+    println!("build: Earth {} particles ({} coarse core @ {:.1}×m_fine + {} fine mantle), Theia {} particles, m_fine={:.2e} kg, soft={:.0} m",
+        earth.len(), n_core, COARSE_FACTOR, earth.len() - n_core, theia.len(), m_fine, soft);
 
-    // ---- relax both bodies to hydrostatic equilibrium (damped, on the GPU) ----
-    // physical relax time ~ several sound-crossing times R/c (c≈4 km/s); step count from dt below.
     println!("relaxing Earth ({} particles)...", earth.len());
-    earth = gpu.relax(&earth, &eos, soft, 0.2, 0.94, (earth_n / 3 + 1500).min(6000));
+    earth = gpu.relax(&earth, eos, soft, 0.2, 0.94, (earth.len() / 3 + 1500).min(6000));
     println!("relaxing Theia ({} particles)...", theia.len());
-    theia = gpu.relax(&theia, &eos, soft, 0.2, 0.94, (theia_n / 3 + 1500).min(6000));
+    theia = gpu.relax(&theia, eos, soft, 0.2, 0.94, (theia.len() / 3 + 1500).min(6000));
     println!("post-relax radii: R_earth={:.0} km, R_theia={:.0} km", body_radius(&earth) / 1e3, body_radius(&theia) / 1e3);
+    (earth, theia, soft)
+}
 
-    // ---- collision IC (oblique, ~mutual escape speed, impact parameter b≈R_e) ----
+// Place the relaxed bodies into the oblique collision IC, optionally apply a tiny deterministic jitter (an
+// ensemble realization), integrate the impact on the GPU, and return the order-independent measurement.
+// `jitter_run = None` is the nominal (unperturbed) impact. `verbose` prints the per-run diagnostics.
+fn run_and_measure(gpu: &Gpu, eos: &[Eos], earth_relaxed: &[Particle], theia_relaxed: &[Particle], soft: f64, t_target: f64, jitter_run: Option<u64>, verbose: bool) -> Measure {
+    const MAX_STEPS: usize = 40000; // safety cap; the physical-time target is the real stop
+    let mut earth = earth_relaxed.to_vec();
+    let mut theia = theia_relaxed.to_vec();
     let (m_earth, m_theia): (f64, f64) = (earth.iter().map(|p| p.mass as f64).sum(), theia.iter().map(|p| p.mass as f64).sum());
     let (r_e, r_t) = (body_radius(&earth), body_radius(&theia));
     let n_earth = earth.len();
     let contact = r_e + r_t;
     let v_esc = 1.15 * (2.0 * G * (m_earth + m_theia) / contact).sqrt();
-    let d0 = 1.6 * contact;
-    let b_param = 1.0 * r_e;
+    let (d0, b_param) = (1.6 * contact, 1.0 * r_e);
     let ec = com(&earth);
     for p in earth.iter_mut() {
         for k in 0..3 { p.pos[k] -= ec[k] as f32; }
@@ -412,36 +510,125 @@ fn main() {
     }
     let mut body = earth;
     body.extend(theia);
-    println!("collision: M_e={:.3e} kg, M_t={:.3e} kg, v_esc={:.0} m/s, b={:.0} km, N={}", m_earth, m_theia, v_esc, b_param / 1e3, body.len());
-
-    let with_pe = body.len() <= 40000; // O(N²) CPU PE ~seconds to ~40k; above that report IE trend only
-    let (ke0, ie0, pe0) = total_energy(&body, soft, with_pe);
-    println!("energy before: KE={:.3e} IE={:.3e}{}", ke0, ie0, if with_pe { format!(" PE={:.3e} TOT={:.3e}", pe0, ke0 + ie0 + pe0) } else { " (PE skipped, N>40000)".into() });
-
-    // ---- integrate the impact ----
-    let (body, t_total) = gpu.impact(&body, &eos, soft, 0.1, steps);
-    println!("integrated {:.0}s ({:.2} h) of aftermath in {} steps", t_total, t_total / 3600.0, steps);
-    let (ke1, ie1, pe1) = total_energy(&body, soft, with_pe);
-    if with_pe {
-        let (e0, e1) = (ke0 + ie0 + pe0, ke1 + ie1 + pe1);
-        println!("energy after:  KE={:.3e} IE={:.3e} PE={:.3e} TOT={:.3e}  (ΔTOT/|TOT0| = {:.1}%)", ke1, ie1, pe1, e1, 100.0 * (e1 - e0).abs() / e0.abs());
-    } else {
-        println!("energy after:  KE={:.3e} IE={:.3e}  (IE/IE0 = {:.2}× shock heating)", ke1, ie1, ie1 / ie0);
+    // A tiny deterministic position jitter (0.1% of the fine inter-particle spacing) breaks the microscopic
+    // symmetry so each ensemble run is an independent chaotic realization of the SAME macroscopic impact.
+    if let Some(run) = jitter_run {
+        let amp = 1.0e-3 * 2.0 * soft; // spacing = 2·soft (soft = ½·spacing)
+        for (i, p) in body.iter_mut().enumerate() {
+            for k in 0..3 { p.pos[k] += (amp * hash_jitter(run, i as u64, k as u64)) as f32; }
+        }
     }
 
-    // ---- measure the disk (perigee > remnant surface), split by provenance ----
-    measure_disk(&body, n_earth, m_earth, m_theia, v_esc);
+    let with_pe = verbose && body.len() <= 40000; // O(N²) CPU PE — only for the single-run diagnostic
+    let (ke0, ie0, pe0) = total_energy(&body, soft, with_pe);
+    if verbose {
+        println!("collision: M_e={:.3e} kg, M_t={:.3e} kg, v_esc={:.0} m/s, b={:.0} km, N={}", m_earth, m_theia, v_esc, b_param / 1e3, body.len());
+        println!("energy before: KE={:.3e} IE={:.3e}{}", ke0, ie0, if with_pe { format!(" PE={:.3e} TOT={:.3e}", pe0, ke0 + ie0 + pe0) } else { " (PE skipped)".into() });
+    }
+    let (body, t_total) = gpu.impact(&body, eos, soft, 0.1, MAX_STEPS, t_target);
+    if verbose {
+        println!("integrated {:.0}s ({:.2} h) of aftermath to the epoch target", t_total, t_total / 3600.0);
+        let (ke1, ie1, pe1) = total_energy(&body, soft, with_pe);
+        if with_pe {
+            let (e0, e1) = (ke0 + ie0 + pe0, ke1 + ie1 + pe1);
+            println!("energy after:  KE={:.3e} IE={:.3e} PE={:.3e} TOT={:.3e}  (ΔTOT/|TOT0| = {:.1}%)", ke1, ie1, pe1, e1, 100.0 * (e1 - e0).abs() / e0.abs());
+        } else {
+            println!("energy after:  KE={:.3e} IE={:.3e}  (IE/IE0 = {:.2}× shock heating)", ke1, ie1, ie1 / ie0.max(1.0));
+        }
+    }
+    let m = measure(&body, n_earth);
+    if verbose {
+        print_measure(&m, m_earth, m_theia, v_esc);
+        // step-2 self-check: the reduction is order-independent — re-measure the SAME snapshot, assert identical.
+        let m2 = measure(&body, n_earth);
+        assert_eq!(m.earth_frac.to_bits(), m2.earth_frac.to_bits(), "measurement not order-independent");
+        assert_eq!(m.disk_kg.to_bits(), m2.disk_kg.to_bits(), "measurement not order-independent");
+        println!("  [order-independent reduction verified: re-measure bit-identical]");
+    }
+    m
 }
 
-fn measure_disk(body: &[Particle], n_earth: usize, m_earth: f64, m_theia: f64, v_esc: f64) {
-    let m_total: f64 = body.iter().map(|p| p.mass as f64).sum();
-    let com = com(body);
-    let mut v_com = [0.0f64; 3];
-    for p in body {
-        for k in 0..3 { v_com[k] += p.vel[k] as f64 * p.mass as f64; }
+fn mean_std(xs: &[f64]) -> (f64, f64) {
+    let n = xs.len() as f64;
+    if n == 0.0 { return (0.0, 0.0); }
+    let mean = xs.iter().sum::<f64>() / n;
+    let var = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+    (mean, var.sqrt())
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let gpu = Gpu::new();
+    let eos = [eos_basalt(), eos_iron()];
+
+    if args.get(1).map(|s| s.as_str()) == Some("ensemble") {
+        // Usage: cargo run --release -- ensemble [earth_n] [t_hours] [K]  — integrate every run to the SAME
+        // physical epoch `t_hours` (the disk re-accretes, so the fraction is epoch-dependent; a fixed epoch is
+        // what makes the N-comparison clean — docs/41).
+        let earth_n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1800);
+        let t_hours: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(11.0);
+        let k: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
+        let t_target = t_hours * 3600.0;
+        println!("=== docs/40 #3 ENSEMBLE: K={} perturbed-IC variable-res impacts, earth_n={}, epoch={:.1} h ===", k, earth_n, t_hours);
+        let (earth, theia, soft) = build_and_relax(&gpu, &eos, earth_n);
+        let (mut fracs, mut disks, mut clumps): (Vec<f64>, Vec<f64>, Vec<f64>) = (vec![], vec![], vec![]);
+        let mut n_with_moon = 0;
+        for run in 0..k {
+            let m = run_and_measure(&gpu, &eos, &earth, &theia, soft, t_target, Some(run as u64), false);
+            if m.disk_kg > 0.0 { fracs.push(m.earth_frac); }
+            disks.push(m.disk_kg / M_MOON);
+            clumps.push(m.clump_kg / M_MOON);
+            if m.clump_kg > 0.0 { n_with_moon += 1; }
+            println!("  run {:>2}: {:>4.0}% Earth  | disk {:.3} M☾ | largest clump {:.3} M☾ ({} clumps, {} bound){}",
+                run, m.earth_frac, m.disk_kg / M_MOON, m.clump_kg / M_MOON, m.n_clumps, m.n_bound, if m.clump_kg > 0.0 { " ← Moon" } else { "" });
+        }
+        let (f_mean, f_std) = mean_std(&fracs);
+        let (d_mean, d_std) = mean_std(&disks);
+        let (c_mean, c_std) = mean_std(&clumps);
+        println!("\n=== CONVERGED (K={} runs) ===", k);
+        println!("  EARTH-FRACTION: {:.1}% ± {:.1}%  (n={} disk-forming runs; stdev = the chaos scatter)", f_mean, f_std, fracs.len());
+        println!("  DISK MASS:      {:.3} ± {:.3} M☾", d_mean, d_std);
+        println!("  LARGEST CLUMP:  {:.3} ± {:.3} M☾  · bound Moon-mass clump accreted in {}/{} runs", c_mean, c_std, n_with_moon, k);
+    } else {
+        // Single run: cargo run --release -- [earth_n] [t_hours]
+        let earth_n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1800);
+        let t_hours: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(11.0);
+        let (earth, theia, soft) = build_and_relax(&gpu, &eos, earth_n);
+        run_and_measure(&gpu, &eos, &earth, &theia, soft, t_hours * 3600.0, None, true);
     }
-    for k in 0..3 { v_com[k] /= m_total; }
-    // Remnant = smallest radius about the COM enclosing 85% of the mass.
+}
+
+// docs/40 #3 — the disk measurement as a pure, order-independent reduction returning a struct (so the ensemble
+// can aggregate over K runs). All category masses are reduced with `sum_oi` (sorted Kahan): the same particle
+// snapshot always yields a bit-identical fraction, regardless of readback/classification order.
+const M_MOON: f64 = 7.342e22;
+#[derive(Clone, Copy, Default)]
+struct Measure {
+    earth_frac: f64, // % Earth of the orbiting disk
+    disk_kg: f64,
+    e_disk: f64,
+    t_disk: f64,
+    e_rem: f64,
+    t_rem: f64,
+    e_esc: f64,
+    t_esc: f64,
+    r_remnant: f64,
+    // Moon candidate (largest self-bound clump outside Roche)
+    clump_kg: f64,
+    clump_earth_frac: f64,
+    clump_n: usize,
+    n_clumps: usize,
+    n_bound: usize,
+}
+
+fn measure(body: &[Particle], n_earth: usize) -> Measure {
+    let m_total = sum_oi(&mut body.iter().map(|p| p.mass as f64).collect());
+    let com = com(body);
+    let mut vx: Vec<f64> = body.iter().map(|p| p.vel[0] as f64 * p.mass as f64).collect();
+    let mut vy: Vec<f64> = body.iter().map(|p| p.vel[1] as f64 * p.mass as f64).collect();
+    let mut vz: Vec<f64> = body.iter().map(|p| p.vel[2] as f64 * p.mass as f64).collect();
+    let v_com = [sum_oi(&mut vx) / m_total, sum_oi(&mut vy) / m_total, sum_oi(&mut vz) / m_total];
+    // Remnant = smallest radius about the COM enclosing 85% of the mass (radius-sorted → order-independent).
     let mut radii: Vec<(f64, f64)> = body.iter().map(|p| { let d = [p.pos[0] as f64 - com[0], p.pos[1] as f64 - com[1], p.pos[2] as f64 - com[2]]; ((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt(), p.mass as f64) }).collect();
     radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     let (mut cum, mut r_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0));
@@ -451,7 +638,8 @@ fn measure_disk(body: &[Particle], n_earth: usize, m_earth: f64, m_theia: f64, v
         if cum >= 0.85 * m_total { r_remnant = r; m_remnant = cum; break; }
     }
     let mu = G * m_remnant;
-    let (mut e_disk, mut t_disk, mut e_esc, mut t_esc, mut e_rem, mut t_rem) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    // Classify into per-category term lists, then reduce order-independently.
+    let (mut e_disk, mut t_disk, mut e_esc, mut t_esc, mut e_rem, mut t_rem) = (vec![], vec![], vec![], vec![], vec![], vec![]);
     let mut disk_idx: Vec<usize> = Vec::new(); // the orbiting-disk particles (Moon-candidate feedstock)
     for (i, p) in body.iter().enumerate() {
         let rel_p = [p.pos[0] as f64 - com[0], p.pos[1] as f64 - com[1], p.pos[2] as f64 - com[2]];
@@ -459,31 +647,53 @@ fn measure_disk(body: &[Particle], n_earth: usize, m_earth: f64, m_theia: f64, v
         let is_earth = i < n_earth; // provenance also in p.prov (0=Earth); index and tag agree
         let m = p.mass as f64;
         match perigee(rel_p, rel_v, mu) {
-            None => { if is_earth { e_esc += m } else { t_esc += m } }
-            Some(pg) if pg > r_remnant => { if is_earth { e_disk += m } else { t_disk += m } disk_idx.push(i); }
-            Some(_) => { if is_earth { e_rem += m } else { t_rem += m } }
+            None => { if is_earth { e_esc.push(m) } else { t_esc.push(m) } }
+            Some(pg) if pg > r_remnant => { if is_earth { e_disk.push(m) } else { t_disk.push(m) } disk_idx.push(i); }
+            Some(_) => { if is_earth { e_rem.push(m) } else { t_rem.push(m) } }
         }
     }
+    let (e_disk, t_disk) = (sum_oi(&mut e_disk), sum_oi(&mut t_disk));
     let disk = e_disk + t_disk;
-    let earth_frac = if disk > 0.0 { 100.0 * e_disk / disk } else { 0.0 };
-    let m_moon = 7.342e22;
-    println!("\n=== DEFORMABLE-EARTH IMPACT (M_e={:.2e}, M_t={:.2e}, v={:.0} m/s, R_remnant={:.0} km) ===", m_earth, m_theia, v_esc, r_remnant / 1e3);
-    println!("  ORBITING DISK (perigee > remnant): Earth {:.3e} | Theia {:.3e} kg = {:.3} M_moon  → {:.0}% EARTH", e_disk, t_disk, disk / m_moon, earth_frac);
-    println!("  remnant: Earth {:.3e} | Theia {:.3e} kg · escaped: Earth {:.3e} | Theia {:.3e} kg", e_rem, t_rem, e_esc, t_esc);
-    println!("  → Earth material {} reach orbit", if e_disk > 0.0 { "DID" } else { "did NOT" });
+    let clump = moon_candidate(body, &disk_idx, n_earth, r_remnant, m_remnant, com);
+    Measure {
+        earth_frac: if disk > 0.0 { 100.0 * e_disk / disk } else { 0.0 },
+        disk_kg: disk,
+        e_disk,
+        t_disk,
+        e_rem: sum_oi(&mut e_rem),
+        t_rem: sum_oi(&mut t_rem),
+        e_esc: sum_oi(&mut e_esc),
+        t_esc: sum_oi(&mut t_esc),
+        r_remnant,
+        clump_kg: clump.0,
+        clump_earth_frac: clump.1,
+        clump_n: clump.2,
+        n_clumps: clump.3,
+        n_bound: clump.4,
+    }
+}
 
-    moon_candidate(body, &disk_idx, n_earth, r_remnant, m_remnant, com);
+fn print_measure(m: &Measure, m_earth: f64, m_theia: f64, v_esc: f64) {
+    println!("\n=== DEFORMABLE-EARTH IMPACT (M_e={:.2e}, M_t={:.2e}, v={:.0} m/s, R_remnant={:.0} km) ===", m_earth, m_theia, v_esc, m.r_remnant / 1e3);
+    println!("  ORBITING DISK (perigee > remnant): Earth {:.3e} | Theia {:.3e} kg = {:.3} M_moon  → {:.0}% EARTH", m.e_disk, m.t_disk, m.disk_kg / M_MOON, m.earth_frac);
+    println!("  remnant: Earth {:.3e} | Theia {:.3e} kg · escaped: Earth {:.3e} | Theia {:.3e} kg", m.e_rem, m.t_rem, m.e_esc, m.t_esc);
+    println!("  → Earth material {} reach orbit", if m.e_disk > 0.0 { "DID" } else { "did NOT" });
+    println!("  ACCRETION: {} disk clumps, {} self-bound", m.n_clumps, m.n_bound);
+    if m.clump_kg > 0.0 {
+        println!("  MOON CANDIDATE: largest bound+outside-Roche clump = {:.3e} kg = {:.3} M_moon ({} particles) → {:.0}% EARTH", m.clump_kg, m.clump_kg / M_MOON, m.clump_n, m.clump_earth_frac);
+    } else {
+        println!("  MOON CANDIDATE: none yet (no bound clump outside Roche — disk still dispersed; needs more time / N)");
+    }
 }
 
 // The accretion operator (stage 4c.3) applied to the orbiting disk: friends-of-friends over the disk
 // particles, then report the largest SELF-BOUND clump outside Roche as the Moon candidate. Mirrors the
 // engine's verified `accretion.rs` (FoF + internal-KE+self-PE<0 + Roche gate); reimplemented here because
 // this GPU tool is standalone (same reason sph-verify reimplements the physics).
-fn moon_candidate(body: &[Particle], disk_idx: &[usize], n_earth: usize, r_remnant: f64, m_remnant: f64, com: [f64; 3]) {
-    let m_moon = 7.342e22;
+// Returns (clump_kg, clump_earth_frac_%, clump_n, n_clumps, n_bound). clump_kg=0 ⇒ no bound clump outside Roche.
+fn moon_candidate(body: &[Particle], disk_idx: &[usize], n_earth: usize, r_remnant: f64, m_remnant: f64, com: [f64; 3]) -> (f64, f64, usize, usize, usize) {
     if disk_idx.len() < 2 {
-        println!("  MOON CANDIDATE: none (disk has < 2 particles)");
-        return;
+        return (0.0, 0.0, 0, 0, 0);
     }
     // Linking length = 2× the mean disk smoothing length (particles within a smoothing length touch).
     let mean_h: f64 = disk_idx.iter().map(|&i| body[i].h as f64).sum::<f64>() / disk_idx.len() as f64;
@@ -551,10 +761,10 @@ fn moon_candidate(body: &[Particle], disk_idx: &[usize], n_earth: usize, r_remna
             best_bound_outside = true;
         }
     }
-    println!("  ACCRETION (link={:.0} km): {} disk clumps, {} self-bound", link / 1e3, groups.values().filter(|m| m.len() >= 2).count(), n_bound);
+    let n_clumps = groups.values().filter(|m| m.len() >= 2).count();
     if best_bound_outside {
-        println!("  MOON CANDIDATE: largest bound+outside-Roche clump = {:.3e} kg = {:.3} M_moon ({} particles) → {:.0}% EARTH", best_m, best_m / m_moon, best_n, 100.0 * best_e / best_m);
+        (best_m, 100.0 * best_e / best_m, best_n, n_clumps, n_bound)
     } else {
-        println!("  MOON CANDIDATE: none yet (no bound clump outside Roche — disk still dispersed; needs more time / N)");
+        (0.0, 0.0, 0, n_clumps, n_bound)
     }
 }

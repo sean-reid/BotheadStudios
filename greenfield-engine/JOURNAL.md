@@ -5,6 +5,34 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-18 — #3: the disk Earth-fraction converged by ensemble → ~32% (a minority, not 58%) (docs/40→41)
+
+**What.** Built the variable-resolution ENSEMBLE in `tools/impact-run` (docs/40 #3) and converged the giant-impact
+disk Earth-fraction. New: `build_lod` (coarse iron core @8×m_fine + fine basalt mantle, all SPH-EOS on the
+unchanged `sph_step.wgsl` — no new kernel); an ORDER-INDEPENDENT disk measurement (`sum_oi` = sort+Kahan, re-measures
+bit-identical); an ensemble mode (K perturbed-IC runs via a splitmix64 index-hash jitter, mean±stdev); and a
+**physical-time epoch** stop (`ensemble <n> <t_hours> <K>`) replacing the fixed step count.
+
+**Why.** The fraction is chaos-scatter-dominated (docs/28 28–50%, #1 25↔63%), so no single run is a number — an
+ensemble mean is required. Two things had to be right first: (1) **AV-free relaxation** — the tool's `Gpu::relax`
+ran with Monaghan AV on, which DISPERSED the impact (0% Earth, remnant puffed to R≈9500 km); zeroing AV during the
+damped settle (restoring it for the shock) is the docs/35 finding the standalone crate never had, and it turned 0%
+into a real Earth-bearing disk. (2) **Fixed epoch, not fixed steps** — the disk RE-ACCRETES (mass & fraction decay
+with time), and a fixed step count integrates less physical time at higher N (finer Courant dt), confounding the
+N-comparison.
+
+**Verified (RTX 2070, native Vulkan; energy conserved 0.3–0.6% throughout).**
+- Order-independent reduction: the same snapshot re-measures bit-identical (asserted in the single-run path).
+- Re-accretion (fixed N=2400): 25%±5% / 0.19 M☾ @11 h → 12%±14% / 0.04 M☾ @23 h — the fraction is epoch-dependent.
+- Convergence at a FIXED ~8 h epoch (K=8): N=1200 **20.4%±7.2%** (under-resolved) → N=2400 **31.8%±2.7%** → N=4800
+  **32.2%±3.0%** — 2400 & 4800 statistically identical ⇒ **PLATEAU at ~32%±3%**. A disk MINORITY, decisively not the
+  all-particle 58% (which was the high tail of the low-N/early-epoch scatter). A bound Moon-mass clump accretes in
+  **8/8** runs at every N at the early epoch (largest ~0.07–0.26 M☾, sub-lunar at this sub-scale).
+- Closes #1's number (its 63% was a scatter sample) and #2's resolved Moon. Only #4 (terrain) remains. Nothing
+  deployed; `sph_step.wgsl` unchanged; engine crate untouched (change is confined to the standalone tool).
+
+---
+
 ## 2026-07-17 — Direct-sum gravity ceiling measured → GPU Barnes–Hut spec'd for a fresh session (docs/36)
 
 **What.** Measured how far the browser GPU impact's DIRECT O(N²) gravity scales before spec'ing the
