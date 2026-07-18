@@ -5,6 +5,33 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Diagnosing the GPU-impact "lost orbits": it's NOT dt injection, it's under-relaxation (docs/35)
+
+**Goal (Robin):** confidently determine whether the in-browser GPU impact is fixable before abandoning it.
+
+**Measure, don't guess.** Added an energy diagnostic — `gpu_sph::total_energy` (KE+IE+PE) + `gpu_energy_json`
+— and measured the live impact. **My earlier diagnosis was WRONG:** the total energy is CONSERVED to ~0.01 %
+with the current fixed dt (KE falls, IE rises by the same amount — shock heating, correct). So it was never
+dt energy-injection. The real cause: **under-relaxation** — I'd cut the browser relax to 640 steps for dev
+speed, vs the offline `impact-run`'s ~2200. Unrelaxed bodies carry excess energy and fling debris out (the
+3a lesson).
+
+**Result with the relax raised to 2200 (rig-measured, RTX 2070):** energy conserved 0.00–0.02 %; a coherent
+bound remnant forms (~9000 km — the SAME size as the offline run) with a debris disk (peaks ~0.35 M☾) and
+Moon-candidate clumps (up to 0.34 M☾, 12–44 % Earth). The scene shows a real giant impact (remnant + disk),
+not the earlier blown-apart dispersal. **So it is NOT insoluble — do not abandon it.**
+
+**Honest remaining gap vs the offline run:** escape is still ~15× higher (0.8–1.2 vs 0.06 M☾) and the distinct
+orbiting disk doesn't cleanly persist — the hot remnant keeps expanding (physical: hot rock → high Tillotson
+pressure, no radiative cooling yet) and the disk thins (partly a measurement artefact as the 85 %-mass remnant
+radius grows past the disk perigees). At N~700 it's a coarse, marginal disk. **Path to offline quality:** (1)
+GPU relax (`cs_relax`) so 2200 steps are milliseconds not ~15 s of CPU — the practical blocker + the key to
+(2) higher N; (3) an in-kernel per-substep adaptive dt to trim the excess escape (the fixed dt conserves TOTAL
+energy but may mis-distribute at the shock). Kept the c_peak fixed dt (energy-conserving) and the energy
+diagnostic; the GPU impact stays the button (WIP), birth scene still Aggregate. Rigs: `web/rig/sph_energy.mjs`.
+
+---
+
 ## 2026-07-17 — REVERT: the birth scene goes back to the Aggregate — the GPU impact "loses its orbits" (docs/35)
 
 **What Robin caught.** On the deployed GPU birth scene the debris disperses instead of forming an orbiting

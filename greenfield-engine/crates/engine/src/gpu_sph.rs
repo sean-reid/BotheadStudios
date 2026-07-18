@@ -286,6 +286,33 @@ pub fn disk_moonlets(particles: &[SphParticle], earth_radius: f64) -> Vec<crate:
     }
 }
 
+/// Total energy of a read-back particle set: (kinetic, internal, gravitational-PE) in J. The direct signal of
+/// energy conservation — a giant impact should hold it to a few % (offline `impact-run`: 0.3–0.5 %); a
+/// steadily rising total means the integrator is injecting energy (too-large dt at the shock) and the debris
+/// will puff apart instead of orbiting. PE is O(N²) (softened), fine at the browser's N.
+pub fn total_energy(particles: &[SphParticle], softening: f64) -> (f64, f64, f64) {
+    let (mut ke, mut ie) = (0.0f64, 0.0f64);
+    for p in particles {
+        let v2 = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1] + p.vel[2] * p.vel[2]) as f64;
+        ke += 0.5 * p.mass as f64 * v2;
+        ie += p.mass as f64 * p.u as f64;
+    }
+    let s2 = softening * softening;
+    let mut pe = 0.0f64;
+    for i in 0..particles.len() {
+        let (pi, mi) = (particles[i].pos, particles[i].mass as f64);
+        for j in (i + 1)..particles.len() {
+            let pj = particles[j].pos;
+            let dx = (pi[0] - pj[0]) as f64;
+            let dy = (pi[1] - pj[1]) as f64;
+            let dz = (pi[2] - pj[2]) as f64;
+            let r = (dx * dx + dy * dy + dz * dz + s2).sqrt();
+            pe -= crate::orbit::G * mi * particles[j].mass as f64 / r;
+        }
+    }
+    (ke, ie, pe)
+}
+
 fn relax_body(b: &mut crate::hydrostatic::HydroBody, steps: usize) {
     let dt = b.relax_dt(0.2);
     for _ in 0..steps {

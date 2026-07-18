@@ -2492,6 +2492,7 @@ mod app {
         sph_cam: UniformSlot,               // view-proj + Earth display origin + scale for the particle shader
         sph_active: bool,
         sph_dt: f32, // fixed integration timestep (chosen at build; WebGPU forbids the adaptive read-back)
+        sph_soft: f64, // gravitational softening (for the energy diagnostic's PE term)
         /// Latest async read-back of the GPU SPH particles (one frame behind) — for the HUD/disk-stats and
         /// (later) the momentum mirror. Empty until the first read-back completes.
         sph_snapshot: Vec<crate::gpu_sph::SphParticle>,
@@ -2768,6 +2769,7 @@ mod app {
                 sph_cam,
                 sph_active: false,
                 sph_dt: 0.0,
+                sph_soft: 1.0,
                 sph_snapshot: Vec::new(),
                 sph_relax: None,
             })
@@ -3252,6 +3254,7 @@ mod app {
             // launches the collision. Show the (unrelaxed) bodies at their collision positions immediately.
             let (earth, theia) = crate::gpu_sph::build_impact_bodies(600, 100);
             let (particles, eos, softening, dt) = crate::gpu_sph::assemble_impact(&earth, &theia, false);
+            self.sph_soft = softening as f64;
             let cap = particles.len() as u32;
             let mut sph = crate::gpu_sph::GpuSph::new(&self.device, cap);
             sph.upload(&self.queue, &particles, &eos, softening);
@@ -3275,6 +3278,17 @@ mod app {
             crate::gpu_sph::disk_stats_json(&self.sph_snapshot)
         }
 
+        /// Energy diagnostic of the live GPU impact (docs/35): kinetic / internal / gravitational-PE / total
+        /// (J), from the latest read-back. A steadily rising total = the integrator is injecting energy (the
+        /// remnant then puffs apart instead of orbiting). `"null"` before the first read-back.
+        pub fn gpu_energy_json(&self) -> String {
+            if !self.sph_active || self.sph_snapshot.is_empty() {
+                return String::from("null");
+            }
+            let (ke, ie, pe) = crate::gpu_sph::total_energy(&self.sph_snapshot, self.sph_soft);
+            format!("{{\"ke\":{:.4e},\"ie\":{:.4e},\"pe\":{:.4e},\"tot\":{:.4e}}}", ke, ie, pe, ke + ie + pe)
+        }
+
         /// Advance the PHYSICS by `real_dt` wall-clock seconds. Fixed sim-timestep substeps whose
         /// COUNT (not size) varies with the wall clock — so the physics rate is independent of the
         /// display frame rate (a 30 fps client and a 120 fps client simulate the same world), and the
@@ -3291,7 +3305,7 @@ mod app {
                 // the settling state, and on completion launch the collision (infall velocity + dynamics dt).
                 let relaxing = if let Some((earth, theia, steps)) = self.sph_relax.as_mut() {
                     const CHUNK: u32 = 20;
-                    const TARGET: u32 = 640;
+                    const TARGET: u32 = 2200; // match the offline relax — under-relaxed bodies fling debris out
                     crate::gpu_sph::relax_chunk(earth, CHUNK as usize);
                     crate::gpu_sph::relax_chunk(theia, CHUNK as usize);
                     *steps += CHUNK;
