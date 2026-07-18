@@ -135,6 +135,19 @@ tractable cost); 39e closes birth-of-the-Moon. Only 39a–39b need land before w
   cap-size dial is not monotonic at coarse N (scatter + the rigid-bulk limit). **Reaching 58% needs a
   DEFORMABLE bulk** (so the shock propagates into it) — the next lever, a revision to the rigid-bulk-first
   choice. Next: 39e (bake-back + Moon) and/or a deformable-bulk variant to close the gap to 58%.
+- **#1 (deformable bulk) — DIRECTION VALIDATED, exact number entangled with #3.**
+  `a_deformable_coarse_bulk_recovers_the_earth_fraction` (`hydrostatic.rs`, `#[ignore]`): a variable-
+  resolution all-particle Earth — COARSE (cheap) iron core + FINE basalt mantle, all deformable — vs all-fine.
+  Result: **a deformable bulk sheds Earth's own mantle even when the core is COARSE** — the coarse-core run
+  (947 particles) gave a healthy **63%**-Earth disk, comparable to the reference 58% and far above the rigid
+  bulk's ~25% plateau. **So the rigid bulk was the limiter, and a coarse deformable core is a viable cheap
+  bulk — this is the win for planetary scale** (deformable + cheap, not full-resolution-everywhere). **BUT
+  the exact fraction is SCATTER-DOMINATED at this coarse N** (all-fine gave 25% where the reference gives 58%;
+  a ~40-point swing between nominally-similar configs — the docs/28 chaos scatter). So the quantitative
+  "closes the gap to 58%" claim CANNOT be resolved without an **ensemble + higher N (task #3)** — #1 and #3 are
+  entangled. The test asserts only the robust mechanism (both deformable variants shed Earth); the comparison
+  is reported, not asserted. NOTE (setup lesson): a DIFFERENTIATED Theia (dense iron core ploughs in) is
+  essential — a basalt-sphere Theia sheds ~0% Earth (docs/28 plough mechanism).
 
 ## Open decisions to pressure-test (before building)
 

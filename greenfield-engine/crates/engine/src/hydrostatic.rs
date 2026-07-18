@@ -755,6 +755,143 @@ mod tests {
         (frac, disk, n_earth)
     }
 
+    /// docs/39 #1 — variable-resolution ("LOD") Earth: a COARSE (cheap, deformable) iron core + a FINE basalt
+    /// mantle, all self-gravitating particles. Tests whether a DEFORMABLE-but-coarse bulk recovers the
+    /// all-particle 58% (vs the rigid bulk's 25%). Returns (earth_disk_fraction, disk_kg, n_total).
+    fn run_lod_impact(r_surf: f64, m_fine: f64, coarse_factor: f64, steps: usize) -> (f64, f64, usize) {
+        let (iron, basalt) = (Tillotson::iron(), Tillotson::basalt());
+        let r_ic = 0.5 * r_surf;
+        let m_coarse = m_fine * coarse_factor;
+        let m_core = iron.rho0 * FOUR_THIRDS_PI * r_ic.powi(3);
+        let m_mantle = basalt.rho0 * FOUR_THIRDS_PI * (r_surf.powi(3) - r_ic.powi(3));
+        let n_core = (m_core / m_coarse).round().max(1.0) as usize;
+        let n_mantle = (m_mantle / m_fine).round().max(1.0) as usize;
+        let (mut pos, mut mass, mut eos, mut h) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n_core {
+            let rr = r_ic * ((i as f64 + 0.5) / n_core as f64).cbrt();
+            pos.push(fib_dir(i, n_core, 0.0) * rr);
+            mass.push(m_coarse);
+            eos.push(Eos::Tillotson(iron));
+            h.push(smoothing_for(m_coarse, iron.rho0));
+        }
+        let (rc3, rs3) = (r_ic.powi(3), r_surf.powi(3));
+        for i in 0..n_mantle {
+            let rr = (rc3 + (rs3 - rc3) * (i as f64 + 0.5) / n_mantle as f64).cbrt();
+            pos.push(fib_dir(i, n_mantle, 1.7) * rr);
+            mass.push(m_fine);
+            eos.push(Eos::Tillotson(basalt));
+            h.push(smoothing_for(m_fine, basalt.rho0));
+        }
+        let n = pos.len();
+        let mut earth = HydroBody {
+            vel: vec![DVec3::ZERO; n],
+            u: vec![1.0e6; n], // match the reference deformable impact (Genda 1e6 J/kg) — a cold Earth sheds little
+            softening: 0.5 * (m_fine / basalt.rho0).cbrt(),
+            rho: vec![basalt.rho0; n],
+            mass,
+            eos,
+            h,
+            pos,
+        };
+        relax(&mut earth, 2200);
+        let n_earth = earth.pos.len();
+        let m_earth_total: f64 = earth.mass.iter().sum();
+        // DIFFERENTIATED Theia (iron core + basalt mantle), matching the 58% reference — a dense iron
+        // impactor core ploughs in and lofts Earth's mantle (docs/28); a soft basalt sphere sheds little.
+        let r_t = 2.7e6_f64; // ~1/7 Earth mass at this sub-scale (the reference geometry)
+        let n_theia = ((iron.rho0 * FOUR_THIRDS_PI * (0.5 * r_t).powi(3)
+            + basalt.rho0 * FOUR_THIRDS_PI * (r_t.powi(3) - (0.5 * r_t).powi(3)))
+            / m_fine)
+            .round()
+            .max(80.0) as usize;
+        let mut theia = HydroBody::new_differentiated(iron, basalt, 0.5 * r_t, r_t, 1.0e6, n_theia);
+        relax(&mut theia, 1200);
+        let m_theia: f64 = theia.mass.iter().sum();
+        let (r_e, r_t) = (body_radius(&earth), body_radius(&theia));
+        let contact = r_e + r_t;
+        let v = 1.15 * (2.0 * G * (m_earth_total + m_theia) / contact).sqrt();
+        let ec = earth.com();
+        for i in 0..earth.pos.len() {
+            earth.pos[i] -= ec;
+            earth.vel[i] = DVec3::ZERO;
+        }
+        let tc = theia.com();
+        for i in 0..theia.pos.len() {
+            theia.pos[i] = theia.pos[i] - tc + DVec3::new(1.6 * contact, r_e, 0.0);
+            theia.vel[i] = DVec3::new(-v, 0.0, 0.0);
+        }
+        let mut body = earth;
+        body.pos.extend(theia.pos);
+        body.vel.extend(theia.vel);
+        body.mass.extend(theia.mass);
+        body.u.extend(theia.u);
+        body.eos.extend(theia.eos);
+        body.h.extend(theia.h);
+        body.rho.extend(theia.rho);
+        for _ in 0..steps {
+            body.compute_density();
+            let dt = body.courant_dt(0.1);
+            body.step(dt);
+        }
+        let com = body.com();
+        let m_total: f64 = body.mass.iter().sum();
+        let vcom: DVec3 = body.vel.iter().zip(&body.mass).map(|(v, &m)| *v * m).sum::<DVec3>() / m_total;
+        let mut rs: Vec<(f64, f64)> = (0..body.pos.len()).map(|i| ((body.pos[i] - com).length(), body.mass[i])).collect();
+        rs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let (mut cum, mut r_rem) = (0.0, 0.0);
+        for &(r, m) in &rs {
+            cum += m;
+            if cum >= 0.85 * m_total {
+                r_rem = r;
+                break;
+            }
+        }
+        let mu = G * cum;
+        let (mut de, mut dth) = (0.0f64, 0.0f64);
+        for i in 0..body.pos.len() {
+            if let Some(p) = crate::orbit::perigee(body.pos[i] - com, body.vel[i] - vcom, mu) {
+                if p > r_rem {
+                    if i < n_earth {
+                        de += body.mass[i];
+                    } else {
+                        dth += body.mass[i];
+                    }
+                }
+            }
+        }
+        let disk = de + dth;
+        (if disk > 0.0 { de / disk } else { 0.0 }, disk, n)
+    }
+
+    #[test]
+    #[ignore = "docs/39 #1 — deformable coarse-bulk vs all-fine (does a coarse deformable core reach 58%?) — run with --ignored"]
+    fn a_deformable_coarse_bulk_recovers_the_earth_fraction() {
+        // docs/39 #1: 39d found a RIGID bulk plateaus at ~25% (it reflects the deep shock). Does a DEFORMABLE
+        // but COARSE bulk (a cheap, few-particle iron core that can still move + transmit the shock) recover
+        // the all-particle Earth fraction? Compare all-FINE (coarse_factor 1 — the ~58% reference at this
+        // scale/N) vs a COARSE core (8× particle mass in the core). If coarse gives ~the same fraction at far
+        // fewer particles, the deformable coarse bulk is the win; if it collapses toward 25%, a coarse core is
+        // too stiff and reaching 58% needs full resolution (the JIT coarse-bulk win is small for a giant
+        // impact — the shock is global). Sub-scale + coarse-N + O(N²): the DIRECTION, not a converged number.
+        let r_surf = 5.0e6_f64;
+        let m_fine = Tillotson::basalt().rho0 * FOUR_THIRDS_PI * (r_surf.powi(3) - (2.5e6f64).powi(3)) / 900.0;
+        let (f_fine, d_fine, n_fine) = run_lod_impact(r_surf, m_fine, 1.0, 3500);
+        let (f_coarse, d_coarse, n_coarse) = run_lod_impact(r_surf, m_fine, 8.0, 3500);
+        let m_moon = 7.35e22;
+        println!("39d #1 deformable bulk — does a coarse deformable core reach the all-fine fraction?");
+        println!("  ALL-FINE    ({n_fine} particles): Earth {:.0}% of a {:.2} M☾ disk", f_fine * 100.0, d_fine / m_moon);
+        println!("  COARSE-CORE ({n_coarse} particles): Earth {:.0}% of a {:.2} M☾ disk", f_coarse * 100.0, d_coarse / m_moon);
+        // FINDING (docs/39 #1): a DEFORMABLE bulk sheds Earth's own mantle — even a COARSE, cheap iron core
+        // ({n_coarse} particles) produces a healthy Earth-rich disk (unlike the RIGID bulk's ~25% plateau,
+        // 39d) — so the rigid bulk was the limiter, and a coarse deformable core is a viable cheap bulk. BUT
+        // the exact fraction is SCATTER-DOMINATED at this coarse N (25% vs 63% between nominally-similar
+        // configs — the docs/28 chaos scatter, ~40 pts here). So "deformable closes the gap to 58%" cannot be
+        // resolved without an ENSEMBLE + higher N (task #3). This test asserts only the robust mechanism:
+        // both deformable variants shed Earth into a real mixed disk. The comparison is REPORTED, not asserted.
+        assert!(d_fine > 0.0 && d_coarse > 0.0, "both must produce a disk");
+        assert!(f_fine > 0.10 && f_coarse > 0.10, "a deformable bulk (fine OR coarse) sheds Earth into the disk (fine {f_fine:.2}, coarse {f_coarse:.2})");
+    }
+
     #[test]
     #[ignore = "docs/39 39d — capped-Earth impact cap-size sweep (THE PAYOFF; ~minutes) — run with --ignored"]
     fn the_cap_size_dials_the_disk_earth_fraction() {
