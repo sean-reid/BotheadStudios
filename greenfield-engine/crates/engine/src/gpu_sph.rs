@@ -101,16 +101,8 @@ pub struct SphCam {
 /// fixed dt). `n_earth`/`n_theia` are particle-count targets; `relax_steps` trades setup time for equilibrium
 /// (fewer = a snappier trigger but a slightly hotter start — the offline `tools/impact-run` is the faithful
 /// converged run; this is the in-browser visualization).
-pub fn build_deformable_impact(n_earth: usize, n_theia: usize, relax_steps: usize) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
-    let (mut earth, mut theia) = build_impact_bodies(n_earth, n_theia);
-    relax_chunk(&mut earth, relax_steps);
-    relax_chunk(&mut theia, relax_steps);
-    assemble_impact(&earth, &theia, true)
-}
-
 /// Build the two differentiated proto-bodies UNRELAXED (Earth 5000 km, Theia 2700 km ~1/7 mass — sub-Earth,
-/// tractable, same as `tools/impact-run`). The caller relaxes them (`relax_chunk`, split across frames so the
-/// wasm main thread never blocks) then places them on the collision geometry with [`assemble_impact`].
+/// tractable, same as `tools/impact-run`). [`build_far_apart`] places them far apart for GPU relaxation.
 pub fn build_impact_bodies(n_earth: usize, n_theia: usize) -> (crate::hydrostatic::HydroBody, crate::hydrostatic::HydroBody) {
     use crate::hydrostatic::HydroBody;
     let (core, mantle) = (crate::eos::Tillotson::iron(), crate::eos::Tillotson::basalt());
@@ -119,37 +111,64 @@ pub fn build_impact_bodies(n_earth: usize, n_theia: usize) -> (crate::hydrostati
     (earth, theia)
 }
 
-/// Advance a body `steps` damped-relaxation steps toward hydrostatic equilibrium (in place). Called in small
-/// chunks per frame so the relax never blocks the browser main thread.
-pub fn relax_chunk(b: &mut crate::hydrostatic::HydroBody, steps: usize) {
-    relax_body(b, steps);
+/// The distance (× the initial contact radius) at which Theia sits during the GPU relax — far enough that the
+/// two bodies' MUTUAL gravity is negligible (~1/FAR² of self-gravity) so each settles under its OWN gravity in
+/// the shared buffer, but the spatial-hash grid still keeps them in separate cells.
+const RELAX_SEPARATION: f64 = 40.0;
+
+/// Build the two UNRELAXED bodies as one SPH particle set for GPU relaxation: Earth at the origin, Theia far
+/// away (`RELAX_SEPARATION`× the contact radius), both at rest. The caller relaxes this on the GPU (`cs_relax`,
+/// milliseconds — no CPU chunking), reads it back, then [`assemble_from_relaxed`] positions the collision.
+/// Returns (particles, softening, relax_dt).
+pub fn build_far_apart(n_earth: usize, n_theia: usize) -> (Vec<SphParticle>, f32, f32) {
+    let (earth, theia) = build_impact_bodies(n_earth, n_theia);
+    let far = RELAX_SEPARATION * (5.0e6 + 2.7e6);
+    let ec = com(&earth);
+    let tc = com(&theia);
+    let mut out = Vec::with_capacity(earth.pos.len() + theia.pos.len());
+    push_body(&mut out, &earth, 0, -ec, glam::DVec3::ZERO);
+    push_body(&mut out, &theia, 1, -tc + glam::DVec3::new(far, 0.0, 0.0), glam::DVec3::ZERO);
+    let softening = earth.softening.min(theia.softening) as f32;
+    // Relaxation Courant dt (cfl·min h / max c, as the working CPU relax used). Stable at cfl 0.2 PROVIDED the
+    // caller zeroes the artificial viscosity during relax (`set_av(0,0)`) — AV stiffens the transient and would
+    // otherwise force a ~4× smaller dt (and 4× more steps).
+    let relax_dt = earth.relax_dt(0.2).min(theia.relax_dt(0.2)) as f32;
+    (out, softening, relax_dt)
 }
 
-/// Place the two (relaxed) bodies on the oblique giant-impact geometry and return the SPH particle set (Earth
-/// COM at the origin at rest; Theia offset by 1.6·contact with impact parameter b≈R_e). `infall` sets Theia's
-/// inbound velocity (1.15·v_esc) — pass `false` while relaxing (bodies shown at rest, settling) and `true` to
-/// launch the collision. Does NOT mutate the bodies (positions are offset only in the emitted particles).
-pub fn assemble_impact(earth: &crate::hydrostatic::HydroBody, theia: &crate::hydrostatic::HydroBody, infall: bool) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
-    let m_earth: f64 = earth.mass.iter().sum();
-    let m_theia: f64 = theia.mass.iter().sum();
-    let (r_e, r_t) = (body_radius(earth), body_radius(theia));
+/// After GPU relaxation of the far-apart bodies (from [`build_far_apart`]), read back the particles and place
+/// them on the oblique giant-impact geometry: Earth (prov 0) recentred at the origin at rest; Theia (prov 1)
+/// recentred then offset by 1.6·contact with impact parameter b≈R_e and the inbound velocity 1.15·v_esc — the
+/// contact radius and v_esc computed from the ACTUAL relaxed radii. Returns (particles, [basalt, iron],
+/// softening, the shock-safe impact dt).
+pub fn assemble_from_relaxed(particles: &[SphParticle]) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
+    use glam::DVec3;
+    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+    let subset = |prov: u32| -> (Vec<&SphParticle>, DVec3, f64, f64) {
+        let ps: Vec<&SphParticle> = particles.iter().filter(|p| p.prov == prov).collect();
+        let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
+        let c: DVec3 = ps.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m.max(1.0);
+        let r = ps.iter().map(|p| (pos(p) - c).length()).fold(0.0, f64::max);
+        (ps, c, m, r)
+    };
+    let (earth, ec, m_earth, r_e) = subset(0);
+    let (theia, tc, m_theia, r_t) = subset(1);
     let contact = r_e + r_t;
     let v_esc = 1.15 * (2.0 * crate::orbit::G * (m_earth + m_theia) / contact).sqrt();
     let (d0, b_param) = (1.6 * contact, r_e);
-    let ec = com(earth);
-    let tc = com(theia);
-    let mut out = Vec::with_capacity(earth.pos.len() + theia.pos.len());
-    push_body(&mut out, earth, 0, -ec, glam::DVec3::ZERO);
-    let theia_off = -tc + glam::DVec3::new(d0, b_param, 0.0);
-    let theia_vel = if infall { glam::DVec3::new(-v_esc, 0.0, 0.0) } else { glam::DVec3::ZERO };
-    push_body(&mut out, theia, 1, theia_off, theia_vel);
-    let softening = earth.softening.min(theia.softening) as f32;
+    let emit = |out: &mut Vec<SphParticle>, ps: &[&SphParticle], off: DVec3, vel: DVec3| {
+        for p in ps {
+            let q = pos(p) + off;
+            out.push(SphParticle { pos: [q.x as f32, q.y as f32, q.z as f32], vel: [vel.x as f32, vel.y as f32, vel.z as f32], ..**p });
+        }
+    };
+    let mut out = Vec::with_capacity(particles.len());
+    emit(&mut out, &earth, -ec, DVec3::ZERO);
+    emit(&mut out, &theia, -tc + DVec3::new(d0, b_param, 0.0), DVec3::new(-v_esc, 0.0, 0.0));
+    // softening = the finest (iron) spacing = min_h/4 (h = 2·(m/ρ)^⅓, softening = ½·(m/ρ)^⅓); dt is shock-safe.
     let min_h = out.iter().map(|p| p.h).fold(f32::INFINITY, f32::min);
-    // Conservative FIXED dt (WebGPU forbids the blocking read-back the offline adaptive dt uses). It must hold
-    // through the SHOCK, where the sound speed spikes ~3–4× — so it is sized against a peak signal speed, not
-    // the initial one, or the step injects energy and the remnant puffs apart instead of orbiting (measured).
-    let c_peak = 20_000.0; // ~4× the ~5 km/s bar sound speed, the compressed-shock ceiling
-    let dt = (0.05 * min_h as f64 / (c_peak + v_esc)) as f32;
+    let softening = 0.25 * min_h;
+    let dt = (0.05 * min_h as f64 / (20_000.0 + v_esc)) as f32;
     (out, [SphEos::basalt(), SphEos::iron()], softening, dt)
 }
 
@@ -313,12 +332,6 @@ pub fn total_energy(particles: &[SphParticle], softening: f64) -> (f64, f64, f64
     (ke, ie, pe)
 }
 
-fn relax_body(b: &mut crate::hydrostatic::HydroBody, steps: usize) {
-    let dt = b.relax_dt(0.2);
-    for _ in 0..steps {
-        b.relax_step(dt, 0.94);
-    }
-}
 fn com(b: &crate::hydrostatic::HydroBody) -> glam::DVec3 {
     let m: f64 = b.mass.iter().sum();
     let mut c = glam::DVec3::ZERO;
@@ -474,6 +487,16 @@ impl GpuSph {
     pub fn set_dt(&mut self, queue: &wgpu::Queue, dt: f32, damp: f32) {
         self.params.dt = dt;
         self.params.damp = damp;
+        queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+    }
+
+    /// Set the Monaghan artificial-viscosity coefficients. Zero them during RELAXATION so the force kernel is
+    /// gravity + SPH pressure only (matching the CPU relax, which has no AV) — AV stiffens the settling
+    /// transient and forces a much smaller stable dt; without it the relax is stable at the normal Courant dt
+    /// (≈4× fewer steps). Restore the shock-capture values (1, 2) for the dynamics.
+    pub fn set_av(&mut self, queue: &wgpu::Queue, alpha: f32, beta: f32) {
+        self.params.av_alpha = alpha;
+        self.params.av_beta = beta;
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
     }
 

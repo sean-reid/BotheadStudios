@@ -5,6 +5,34 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — SOLVED: the in-browser GPU impact forms an orbiting disk (GPU relax + energy-conserving dt) (docs/35)
+
+**Result.** The GPU SPH deformable-Earth impact now runs in the browser at **N≈2800**, conserving energy to
+**~0.08 %** and forming a **coherent remnant + an orbiting debris disk** (peaks ~0.6 M☾, up to ~32 % Earth,
+Moon-candidate clumps ~0.2 M☾). Rig-verified (`web/rig/sph_energy.mjs`, RTX 2070) — the "lost orbits" are back.
+
+**Two fixes on top of the diagnosis (under-relaxation, energy-conserving fixed dt):**
+1. **GPU relaxation** (`GpuSph::encode_relax` / `cs_relax`), so the ~2400 relax steps run on the GPU instead of
+   the CPU main thread — the practical blocker, and what lets N rise from ~700 to ~2800. New builders
+   `gpu_sph::build_far_apart` (the two bodies placed 40× the contact radius apart, so each self-gravitates in
+   the shared buffer with negligible mutual gravity) and `assemble_from_relaxed` (read back → compute the
+   collision geometry from the ACTUAL relaxed radii → launch). New `OrbitDemo` phase machine
+   (`SphPhase::Relaxing → Assembling → Dynamics`).
+2. **No artificial viscosity during relax** (`GpuSph::set_av(0,0)`). Debugging: the first GPU relax DIVERGED —
+   the body puffed to ~10³× (remnant "radius" 4×10⁹ m). Cause: the GPU force kernel includes Monaghan AV,
+   which the CPU relax does not; AV stiffens the settling transient so the CPU's stable Courant dt rings and
+   blows up. Zeroing AV during relax (matching the CPU) makes it stable at the normal dt — and ~4× fewer steps
+   than the smaller-dt workaround. AV is restored (1, 2) for the shock-capturing dynamics.
+
+**Honest state.** Energy conservation and the disk are solid; residual escape is still higher than the offline
+run and the disk classification wobbles as the hot remnant expands — a coarse-N demo, but a *real* one. The
+relax is still ~8–10 s (O(N²) direct gravity × ~2400 steps) — the next speed lever is a **GPU Barnes–Hut**
+tree (O(N log N)) to make it snappy and push N higher; an in-kernel per-substep adaptive dt would trim the
+escape. The GPU impact stays the "🌋 GPU Impact" button (not auto-deployed to the birth scene). Removed the
+now-dead CPU-relax helpers.
+
+---
+
 ## 2026-07-17 — Diagnosing the GPU-impact "lost orbits": it's NOT dt injection, it's under-relaxation (docs/35)
 
 **Goal (Robin):** confidently determine whether the in-browser GPU impact is fixable before abandoning it.
