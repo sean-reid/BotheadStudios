@@ -9,6 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **GPU Barnes–Hut solver, built + verified; measured NOT worth wiring in-browser** (`tools/gpu-bh-verify` +
+  `shaders/bh_gravity.wgsl`, `docs/36`→`docs/37`) — the full LBVH self-gravity pipeline (adaptive bbox → Morton
+  → interim CPU sort → Karras tree → atomic-free bottom-up COM → robust-MAC θ-traversal) as verified WGSL
+  compute kernels. Correctness proven stage-by-stage against CPU references (bbox exact, Morton bit-exact, tree
+  structural, COM <1e-6, θ=0.5 RMS 0.70 %, θ→0 recovers the exact direct sum). **Finding:** on the RTX 2070 GPU
+  direct-sum beats Barnes–Hut until **N≈128k** (BH is 0.6–0.9× at N≤32k); asymptotics are correct (direct
+  O(N²), BH O(N log N)) but the crossover sits far above the browser (N≤20k) and offline (N≈35k) regimes, so BH
+  would *reduce* in-browser fps. Recommendation: keep direct-sum for N≤~100k; BH's niche is high-N offline
+  convergence (N≳128k). No engine code changed; the GPU radix sort (docs/36 stage 3) is deferred pending the
+  high-N decision. See `docs/37`.
 - **GPU impact read-back + live disk stats** (`gpu_sph.rs`, `docs/35` — the GPU-path migration) — `GpuSph`
   gained two-phase async GPU→CPU read-back, and the browser birth scene now shows the live orbiting-disk
   provenance (mass, Earth %, remnant radius, largest self-bound clump) from the read-back particle field. The
