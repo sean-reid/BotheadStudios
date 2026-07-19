@@ -128,6 +128,8 @@ export default defineConfig({
   build: {
     rollupOptions: {
       // Multi-page: the landing page (index), the terrain slice, the space band (orbit), the two-moon test.
+      // Every page MUST be listed here — vite's dev server resolves any .html off root, so an
+      // unregistered page works in `npm run dev` and silently disappears from `npm run build`.
       input: {
         main: resolve(root, "index.html"),
         terrain: resolve(root, "terrain.html"),
@@ -135,6 +137,7 @@ export default defineConfig({
         orbit: resolve(root, "orbit.html"),
         birth: resolve(root, "birth.html"),
         twomoons: resolve(root, "twomoons.html"),
+        gpuProbe: resolve(root, "gpu-probe.html"), // cross-device GPU probe (no scene, compute only)
       },
     },
   },

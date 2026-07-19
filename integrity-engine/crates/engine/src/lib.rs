@@ -2220,6 +2220,250 @@ mod app {
         }
     }
 
+    /// A compute-only GPU probe for **cross-device** verification (JOURNAL 2026-07-19).
+    ///
+    /// WHY. Two blind spots meet here. (1) `Engine::create` acquires its adapter with
+    /// `request_adapter(HighPerformance)` and never reports what it got, so a browser run is silent
+    /// about which GPU produced it — the same ambiguity `pick_adapter` fixes natively in
+    /// `tools/gpu-verify`. (2) `GpuParticles::dispatch` splits its four stages into four separate
+    /// compute passes precisely because fusing them "happened to work on desktop Vulkan (the 2070) but
+    /// can RACE on other backends (e.g. Metal / the M4)" — and that mitigation has never been exercised
+    /// ON Metal. This probe answers both on any device with a browser: which adapter, how fast, and
+    /// whether energy stays bounded (a race injects energy).
+    ///
+    /// It drives the REAL `GpuParticles`, hence the real `shaders/particle_step.wgsl` — not a
+    /// reimplementation — so a result here is a statement about shipping code. Compute only: no canvas,
+    /// no surface. Material properties are read from the material DB, not invented (see `probe_params`).
+    ///
+    /// ASYNC SHAPE. Browser buffer mapping cannot block (`Maintain::Wait` is a no-op there), so this
+    /// uses the same two-phase pattern as `begin_readback`/`take_readback`: `start_run` records and
+    /// submits, returning immediately; JS polls `poll()` until it flips true, then reads
+    /// `result_json()`. JS brackets that with `performance.now()`. Run enough frames that the poll
+    /// granularity is a small fraction of the total — a single frame is not measurable this way.
+    #[wasm_bindgen]
+    pub struct GpuProbe {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        info: wgpu::AdapterInfo,
+        max_buffer_size: u64,
+        max_wg_per_dim: u32,
+        parts: Option<GpuParticles>,
+        snapshot: Vec<GpuParticle>,
+        n: u32,
+        frames: u32,
+        gravity: f32,
+    }
+
+    #[wasm_bindgen]
+    impl GpuProbe {
+        /// Acquire a compute-only device. `compatible_surface: None` — nothing is drawn.
+        pub async fn create() -> Result<GpuProbe, JsValue> {
+            console_error_panic_hook::set_once();
+            let _ = console_log::init_with_level(log::Level::Info);
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::BROWSER_WEBGPU,
+                ..Default::default()
+            });
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                })
+                .await
+                .ok_or_else(|| JsValue::from_str("no GPU adapter (is WebGPU enabled?)"))?;
+            let info = adapter.get_info();
+            let limits = adapter.limits();
+            let (device, queue) = adapter
+                .request_device(
+                    &wgpu::DeviceDescriptor {
+                        label: Some("gpu-probe"),
+                        required_features: wgpu::Features::empty(),
+                        required_limits: limits.clone(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await
+                .map_err(|e| JsValue::from_str(&format!("request_device failed: {e}")))?;
+            Ok(GpuProbe {
+                device,
+                queue,
+                info,
+                max_buffer_size: limits.max_buffer_size,
+                max_wg_per_dim: limits.max_compute_workgroups_per_dimension,
+                parts: None,
+                snapshot: Vec::new(),
+                n: 0,
+                frames: 0,
+                gravity: 9.81,
+            })
+        }
+
+        /// Adapter provenance. On iPadOS this is what proves the backend is Metal; everywhere it stops a
+        /// result from being ambiguous about the hardware that produced it.
+        pub fn gpu_adapter_json(&self) -> String {
+            let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(
+                "{{\"name\":\"{}\",\"backend\":\"{:?}\",\"device_type\":\"{:?}\",\"driver\":\"{}\",\"driver_info\":\"{}\",\"vendor\":{},\"device\":{},\"max_buffer_size\":{},\"max_workgroups_per_dim\":{}}}",
+                esc(&self.info.name),
+                self.info.backend,
+                self.info.device_type,
+                esc(&self.info.driver),
+                esc(&self.info.driver_info),
+                self.info.vendor,
+                self.info.device,
+                self.max_buffer_size,
+                self.max_wg_per_dim,
+            )
+        }
+
+        /// Phase 1: seed `n` grains and submit `frames × DEBRIS_SUBSTEPS` substeps, then start a
+        /// readback that fences the whole batch. Returns as soon as the work is queued.
+        pub fn start_run(&mut self, n: u32, frames: u32) {
+            let n = n.clamp(1, MAX_PARTICLES as u32);
+            self.n = n;
+            self.frames = frames.max(1);
+            self.snapshot.clear();
+
+            let mut parts = GpuParticles::new(&self.device, n, PROBE_W * PROBE_W);
+            // Flat floor at voxel 0 — the probe measures the granular step, not terrain shape.
+            parts.upload_heightfield(&self.queue, &vec![0i32; (PROBE_W * PROBE_W) as usize]);
+
+            // A cube of grains on the 1 m lattice, jittered for the same reason gpu-verify jitters: a
+            // perfect lattice is metastable and will not flow, so an unjittered pile is not a
+            // representative contact workload.
+            let side = (n as f64).cbrt().ceil() as u32;
+            let mut grains = Vec::with_capacity(n as usize);
+            for i in 0..n {
+                let (x, y, z) = (i % side, (i / side) % side, i / (side * side));
+                let j = |salt: u32| {
+                    let h = (i.wrapping_add(salt).wrapping_mul(2654435761)) ^ 0x9e37_79b9;
+                    (((h >> 8) & 0xffff) as f32 / 32768.0 - 1.0) * 0.1
+                };
+                grains.push(GpuParticle {
+                    offset: [x as f32 + j(1), 8.0 + y as f32 + j(2), z as f32 + j(3)],
+                    temp: 300.0,
+                    vel: [0.0; 3],
+                    resting: 0.0,
+                    color: [0.5, 0.5, 0.5],
+                    material: 0.0,
+                    emission: [0.0; 3],
+                    _pad: 0.0,
+                });
+            }
+            parts.append(&self.queue, &grains);
+            parts.set_params(&self.queue, &self.probe_params());
+
+            // ONE encoder for every substep of every frame — mirrors `Engine::step_physics`, which
+            // records all DEBRIS_SUBSTEPS into one encoder and submits once. Timing a
+            // submit-per-substep shape would measure driver launch overhead instead of the shader
+            // (JOURNAL 2026-07-19: that mistake made a 2.5× hardware gap look like 17%).
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpu-probe") });
+            for _ in 0..self.frames {
+                for _ in 0..DEBRIS_SUBSTEPS {
+                    parts.dispatch(&mut enc);
+                }
+            }
+            self.queue.submit(std::iter::once(enc.finish()));
+            // Fences the batch: the map callback cannot fire until the GPU has drained the queue.
+            parts.begin_readback(&self.device, &self.queue);
+            self.parts = Some(parts);
+        }
+
+        /// Phase 2: true once the GPU has finished and the grains are read back. Poll from JS.
+        pub fn poll(&mut self) -> bool {
+            let Some(parts) = self.parts.as_mut() else {
+                return false;
+            };
+            match parts.take_readback() {
+                Some(snap) => {
+                    self.snapshot = snap;
+                    true
+                }
+                None => false,
+            }
+        }
+
+        /// Energy + motion summary of the settled grains. `"null"` before the first completed run.
+        ///
+        /// UNIT GRAIN MASS: the shader carries no per-grain mass, so these are per-unit-mass figures.
+        /// That is deliberate — the check is the INVARIANT (`tot` must never rise between runs of
+        /// increasing `frames`), not an absolute energy claim. A backend race shows up here as rising
+        /// total energy, which is exactly how gpu-verify's scene I detects fudges natively.
+        pub fn result_json(&self) -> String {
+            if self.snapshot.is_empty() {
+                return String::from("null");
+            }
+            let (mut ke, mut pe, mut vmax) = (0.0f64, 0.0f64, 0.0f64);
+            for p in &self.snapshot {
+                let v2 = (p.vel[0] * p.vel[0] + p.vel[1] * p.vel[1] + p.vel[2] * p.vel[2]) as f64;
+                ke += 0.5 * v2;
+                pe += (self.gravity * p.offset[1]) as f64;
+                vmax = vmax.max(v2.sqrt());
+            }
+            format!(
+                "{{\"n\":{},\"frames\":{},\"substeps\":{},\"grains\":{},\"ke\":{:.6e},\"pe\":{:.6e},\"tot\":{:.6e},\"vmax\":{:.4}}}",
+                self.n,
+                self.frames,
+                DEBRIS_SUBSTEPS,
+                self.snapshot.len(),
+                ke,
+                pe,
+                ke + pe,
+                vmax,
+            )
+        }
+    }
+
+    /// Probe world footprint in cells. Only needs to comfortably contain the seeded cube (the largest,
+    /// at MAX_PARTICLES, is ~40 cells on a side).
+    const PROBE_W: u32 = 256;
+
+    impl GpuProbe {
+        /// Step params for the probe. Friction, restitution-derived normal damping and cohesion are read
+        /// from REAL basalt in the material DB, mirroring `Engine::gpu_step_params` — a probe that
+        /// invented these would be exercising a shader configuration the engine never actually runs, and
+        /// its timings would not transfer. (docs/24; same representative-material approximation, flagged
+        /// there.)
+        fn probe_params(&self) -> GpuStepParams {
+            let mats = materials::load();
+            let bulk = &mats[materials::index_of(&mats, "basalt")];
+            let normal_damp = crate::granular::damping_for_restitution(
+                bulk.restitution as f64,
+                CONTACT_STIFFNESS as f64,
+            ) as f32;
+            let grain_area = std::f32::consts::PI * CONTACT_RADIUS * CONTACT_RADIUS;
+            const GRANULAR_COHESION_CEIL: f32 = 5.0e4; // Pa — loose-debris adhesion ceiling (docs/24)
+            let c_cohesion =
+                bulk.cohesion.min(GRANULAR_COHESION_CEIL) * grain_area / bulk.density.max(1.0);
+            GpuStepParams {
+                gravity: [0.0, -self.gravity, 0.0],
+                dt: (1.0 / 60.0) / DEBRIS_SUBSTEPS as f32,
+                center: [0.0, 0.0, 0.0], // grains are already in voxel coords ⇒ ground sits at y = 0
+                c_cohesion,
+                drag: matter::DRAG,
+                contact_damp: matter::CONTACT_DAMP,
+                settle_speed: 0.0,
+                part_half: DEBRIS_PART_HALF,
+                cool_rate: 0.4,
+                count: self.n,
+                world_w: PROBE_W,
+                world_d: PROBE_W,
+                cell_size: 2.0 * CONTACT_RADIUS,
+                table_mask: GRID_TABLE_SIZE - 1,
+                bucket_k: GRID_BUCKET_K,
+                c_radius: CONTACT_RADIUS,
+                c_stiffness: CONTACT_STIFFNESS,
+                c_normal_damp: normal_damp,
+                c_friction: bulk.friction_coefficient,
+                c_tangent_damp: CONTACT_TANGENT_DAMP,
+            }
+        }
+    }
+
     /// Build the probe: a **cohesive iron ball** (bonded iron particles) centred at `spawn` — real
     /// matter that falls, rests, and shatters emergently (`docs/23`). Its bond stiffness derives from
     /// iron's real Young's modulus (capped at `PROBE_STIFFNESS_CAP` for explicit-integration stability

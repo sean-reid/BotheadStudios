@@ -5,6 +5,72 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-19 — a browser GPU probe, and the same wrong-GPU bug confirmed in the browser
+
+**What.** `GpuProbe` (`crates/engine/src/lib.rs`, wasm-only) + `web/gpu-probe.html` /
+`web/src/gpu-probe.ts` + `web/rig/gpu_probe.mjs`: a compute-only probe that runs the REAL
+`particle_step.wgsl` through the REAL `GpuParticles` (no canvas, no surface, no reimplementation) and
+reports (1) which adapter actually ran, (2) per-frame cost across N = 1 … 60,000, (3) whether total
+energy stays bounded. Two-phase like `begin_readback`/`take_readback` — `start_run` submits, JS polls
+`poll()` — because a browser cannot block on a buffer map. Also fixes two `scripts/dev-lan.sh` bugs
+(below) and registers the page in `vite.config.ts` (an unregistered page works in `dev` and silently
+vanishes from `build`).
+
+**Why.** The engine ships to browser WebGPU across vendors, but nothing in `web/` ever touched
+`navigator.gpu` beyond an existence check, and `Engine::create` (`lib.rs:321`) requests an adapter
+with `HighPerformance` and never reports what it got. So a browser run was silent about the hardware
+that produced it — the same ambiguity PR #11 fixed natively. Robin has an iPad Pro (M4); this is the
+first step of a growing cross-vendor matrix (AMD / Apple / Arc).
+
+**Verified (desktop Chromium over Vulkan, xvfb).** Probe reproduces the native baseline on the SAME
+card, which is what validates the probe itself before it meets unfamiliar hardware:
+
+| N | native 2070 (gpu-verify) | browser 2070 (probe) |
+|---|---|---|
+| 1 | 1.58 ms | 1.25 ms |
+| 1,000 | 1.91 ms | 1.83 ms |
+| 10,000 | 3.86 ms | 2.23 ms |
+| 60,000 | 14.4 ms | 13.40 ms |
+
+**Energy invariant holds on Vulkan** — fixed N = 10,000, increasing frames, total energy must never
+rise: `1.83e6 → 1.31e6 → 1.99e5 → 1.37e5` over 60/120/240/480 frames, KE decaying to 37.8 and
+`vmax` 0.65 (settled). This is the reference the M4 run will be compared against; a backend race
+would show as rising energy.
+
+**Two findings that change how browser results must be read.**
+
+1. **wgpu's `AdapterInfo` is EMPTY in a browser.** Under `Backends::BROWSER_WEBGPU` wgpu delegates to
+   the browser and cannot see the driver: `get_info()` returns no name, no driver, and
+   `backend: BrowserWebGpu`. It can never tell you whether you are on Metal. The authoritative source
+   is the browser's own `navigator.gpu` → `GPUAdapterInfo.vendor` / `.architecture`. The probe now
+   reports BOTH and the rig prints the browser's.
+2. **The browser picked the WRONG GPU too — and you cannot override it.** With
+   `powerPreference: "high-performance"`, Chromium reported `vendor: nvidia, architecture: turing` —
+   the RTX 2070, not the 5060 Ti. Corroborated independently by timing (13.4 ms at N=60k matches the
+   2070's native 14.4 ms, not the 5060 Ti's 5.67 ms). Chromium's `--gpu-vendor-id` / `--gpu-device-id`
+   flags did NOT move it. **WebGPU exposes no adapter enumeration at all** — `requestAdapter()`
+   returns one adapter and the spec offers no way to choose — so unlike the native harness, which can
+   now refuse to guess, in a browser the only available defence is to RECORD which GPU you got. That
+   is precisely what this probe does, and why its provenance output is not optional decoration.
+
+**Not achievable on this host (stated rather than quietly dropped):** reproducing the 2.5×
+5060-vs-2070 gap *in the browser*. Chromium cannot be pointed at the second card, so the browser leg
+is validated against the 2070 only.
+
+**`scripts/dev-lan.sh` — two bugs fixed.** (1) The readiness probe grepped the served `/` for
+`greenfield`, which appears nowhere under `web/` (it survives only as a wgpu device label in Rust and
+never reaches the HTML), so the script never reused a running server and always exited 1 after a
+perfectly healthy start; it now greps a `SENTINEL` that is actually in `index.html`. (2) `needs_build`
+searched only `crates/` and `data/` for `*.rs|*.toml|*.json`, missing `shaders/**.wgsl` — but every
+shader is `include_str!`'d into the wasm, so editing one changed the binary while the script reported
+"✓ wasm up to date" and served the OLD shader. Silently stale results are the worst possible failure
+for on-device verification, which is exactly what this script exists for.
+
+**Known cosmetic gap:** every page 404s `/favicon.ico` (the repo ships no favicon). Pre-existing,
+affects all pages equally, not introduced here.
+
+---
+
 ## 2026-07-19 — gpu-verify was verifying on the wrong GPU (and is not run-to-run reproducible)
 
 **What.** `tools/gpu-verify` selected its device with `request_adapter(PowerPreference::HighPerformance)`.

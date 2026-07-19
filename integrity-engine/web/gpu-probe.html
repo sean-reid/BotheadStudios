@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Discourage Safari from serving a stale document (hashed JS/wasm are cache-safe on their own). -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Integrity · GPU probe</title>
+    <!-- Critical CSS inlined so styling can't fail. Unlike the scene pages this one SCROLLS: it is a
+         report, and the results table must be readable on a phone/tablet. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #05060a;
+        color: #c7d6ef;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        -webkit-text-size-adjust: 100%;
+      }
+      main {
+        max-width: 46rem;
+        margin: 0 auto;
+        padding: 1.25rem 1rem 4rem;
+      }
+      h1 {
+        font-size: 15px;
+        color: #eaf2ff;
+        margin: 0 0 0.25rem;
+      }
+      .sub {
+        font-size: 12px;
+        color: #7f93b4;
+        margin: 0 0 1.25rem;
+        line-height: 1.6;
+      }
+      section {
+        margin: 0 0 1.25rem;
+        padding: 0.75rem 0.9rem;
+        border-radius: 6px;
+        background: rgba(6, 10, 18, 0.72);
+        border: 1px solid rgba(120, 150, 200, 0.25);
+      }
+      h2 {
+        font-size: 12px;
+        color: #9fb4d6;
+        margin: 0 0 0.5rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      /* Wide tables scroll inside their own box rather than the page. */
+      .scroll {
+        overflow-x: auto;
+      }
+      table {
+        border-collapse: collapse;
+        font-size: 12px;
+        width: 100%;
+        min-width: 30rem;
+      }
+      th,
+      td {
+        text-align: right;
+        padding: 4px 10px 4px 0;
+        white-space: nowrap;
+      }
+      th:first-child,
+      td:first-child {
+        text-align: left;
+      }
+      th {
+        color: #7f93b4;
+        font-weight: normal;
+        border-bottom: 1px solid rgba(120, 150, 200, 0.25);
+      }
+      td b {
+        color: #eaf2ff;
+      }
+      dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 2px 0.9rem;
+        margin: 0;
+        font-size: 12px;
+      }
+      dt {
+        color: #7f93b4;
+      }
+      dd {
+        margin: 0;
+        color: #eaf2ff;
+        word-break: break-all;
+      }
+      .ok {
+        color: #a8e6a1;
+      }
+      .bad {
+        color: #ffb3b3;
+      }
+      #status {
+        padding: 0.75rem 0.9rem;
+        border-radius: 6px;
+        line-height: 1.7;
+        font-size: 13px;
+        color: #dfe8f5;
+        background: rgba(6, 10, 18, 0.72);
+        border: 1px solid rgba(120, 150, 200, 0.25);
+      }
+      #status.err {
+        color: #ffd7d7;
+        background: #1a0d10;
+        border-color: rgba(255, 120, 120, 0.35);
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Integrity · GPU probe</h1>
+      <p class="sub">
+        Runs the real <code>particle_step.wgsl</code> through the real <code>GpuParticles</code> —
+        compute only, nothing is drawn. Reports which adapter actually ran, how cost scales with
+        particle count, and whether total energy stays bounded (a backend race injects energy).
+      </p>
+      <div id="status">Loading engine…</div>
+      <section id="adapter-box" hidden>
+        <h2>Adapter</h2>
+        <dl id="adapter"></dl>
+      </section>
+      <section id="results-box" hidden>
+        <h2>Scaling</h2>
+        <div class="scroll"><table id="results"></table></div>
+        <p class="sub" id="results-note" style="margin: 0.75rem 0 0"></p>
+      </section>
+      <script type="module" src="/src/gpu-probe.ts"></script>
+    </main>
+  </body>
+</html>
