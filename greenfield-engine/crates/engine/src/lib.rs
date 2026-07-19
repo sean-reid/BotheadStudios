@@ -2502,6 +2502,12 @@ mod app {
         sph_active: bool,
         sph_dt: f32, // fixed integration timestep (chosen at build; WebGPU forbids the adaptive read-back)
         sph_soft: f64, // gravitational softening (for the energy diagnostic's PE term)
+        /// docs/42 browser-parity — SCHEDULED shock-dt: WebGPU forbids the per-step adaptive read-back, so the
+        /// dt is stepped by SIM TIME instead — the small shock dt (`sph_dt`) resolves the collision, then after
+        /// `SPH_SHOCK_WINDOW_S` we switch to the larger `sph_dt_aftermath` for the slow disk evolution (restores
+        /// playback). `sph_sim_t` is the physical time integrated since the collision started.
+        sph_sim_t: f64,
+        sph_dt_aftermath: f32,
         /// Latest async read-back of the GPU SPH particles (one frame behind) — for the HUD/disk-stats and
         /// (later) the momentum mirror. Empty until the first read-back completes.
         sph_snapshot: Vec<crate::gpu_sph::SphParticle>,
@@ -2786,6 +2792,8 @@ mod app {
                 sph_active: false,
                 sph_dt: 0.0,
                 sph_soft: 1.0,
+                sph_sim_t: 0.0,
+                sph_dt_aftermath: 0.0,
                 sph_snapshot: Vec::new(),
                 sph_phase: SphPhase::Dynamics,
                 render_blend: 0.0, // pretty by default (docs/42)
@@ -3355,7 +3363,9 @@ mod app {
                         if let Some(relaxed) = relaxed {
                             let (particles, eos, softening, dt) = crate::gpu_sph::assemble_from_relaxed(&relaxed);
                             self.sph_soft = softening as f64;
-                            self.sph_dt = dt;
+                            self.sph_dt = dt; // the SMALL shock dt (resolves the collision)
+                            self.sph_dt_aftermath = dt * 5.0; // switch to this once the shock has passed
+                            self.sph_sim_t = 0.0;
                             self.sph_snapshot.clear();
                             if let Some(sph) = self.gpu_sph.as_mut() {
                                 sph.upload(&self.queue, &particles, &eos, softening);
@@ -3372,7 +3382,8 @@ mod app {
                     // disk rather than dispersing (docs/35). An in-kernel per-substep adaptive dt (to trim the
                     // residual escape) is the next refinement.
                     SphPhase::Dynamics => {
-                        const SPH_SUBSTEPS: u32 = 100; // DIAG: pair with the 5× smaller dt to keep playback rate
+                        const SPH_SUBSTEPS: u32 = 100; // many substeps/frame so the small shock dt still plays
+                        const SPH_SHOCK_WINDOW_S: f64 = 5400.0; // ~1.5 h — cover the collision + excavation, then coarsen
                         if let Some(sph) = self.gpu_sph.as_mut() {
                             let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-step") });
                             sph.encode_kdk(&mut enc, SPH_SUBSTEPS);
@@ -3381,6 +3392,15 @@ mod app {
                                 self.sph_snapshot = snap;
                             }
                             sph.begin_readback(&self.device, &self.queue);
+                        }
+                        // Scheduled dt (docs/42): once the shock window has passed, coarsen the dt for the slow
+                        // disk aftermath (WebGPU can't read back the adaptive Courant dt, so we schedule by time).
+                        self.sph_sim_t += SPH_SUBSTEPS as f64 * self.sph_dt as f64;
+                        if self.sph_dt < self.sph_dt_aftermath && self.sph_sim_t > SPH_SHOCK_WINDOW_S {
+                            self.sph_dt = self.sph_dt_aftermath;
+                            if let Some(sph) = self.gpu_sph.as_mut() {
+                                sph.set_dt(&self.queue, self.sph_dt, 1.0);
+                            }
                         }
                         return;
                     }

@@ -139,6 +139,53 @@ impl HydroBody {
         }
     }
 
+    /// docs/42 browser-parity: a variable-resolution ("LOD") differentiated body — a COARSE core (particle mass
+    /// `m_fine·coarse_factor`, larger `h`) + a FINE mantle (`m_fine`). The fine mantle is what sheds a real
+    /// disk; the coarse core is a cheap deformable bulk. Mirrors `tools/impact-run::build_lod` (docs/41).
+    /// `m_fine` sets the finest spacing (softening); the total count is ≈ (m_mantle + m_core/coarse_factor)/m_fine.
+    pub fn new_lod(
+        core: Tillotson,
+        mantle: Tillotson,
+        core_radius: f64,
+        total_radius: f64,
+        u_specific: f64,
+        m_fine: f64,
+        coarse_factor: f64,
+    ) -> Self {
+        let m_coarse = m_fine * coarse_factor;
+        let m_core = core.rho0 * FOUR_THIRDS_PI * core_radius.powi(3);
+        let m_mantle = mantle.rho0 * FOUR_THIRDS_PI * (total_radius.powi(3) - core_radius.powi(3));
+        let n_core = (m_core / m_coarse).round().max(1.0) as usize;
+        let n_mantle = (m_mantle / m_fine).round().max(1.0) as usize;
+        let (mut pos, mut eos, mut h, mut mass) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n_core {
+            let rr = core_radius * ((i as f64 + 0.5) / n_core as f64).cbrt();
+            pos.push(fib_dir(i, n_core, 0.0) * rr);
+            eos.push(Eos::Tillotson(core));
+            h.push(smoothing_for(m_coarse, core.rho0));
+            mass.push(m_coarse);
+        }
+        let (rc3, rt3) = (core_radius.powi(3), total_radius.powi(3));
+        for i in 0..n_mantle {
+            let rr = (rc3 + (rt3 - rc3) * (i as f64 + 0.5) / n_mantle as f64).cbrt();
+            pos.push(fib_dir(i, n_mantle, 1.7) * rr);
+            eos.push(Eos::Tillotson(mantle));
+            h.push(smoothing_for(m_fine, mantle.rho0));
+            mass.push(m_fine);
+        }
+        let n = pos.len();
+        HydroBody {
+            vel: vec![DVec3::ZERO; n],
+            u: vec![u_specific; n],
+            rho: (0..n).map(|i| eos[i].rho0()).collect(),
+            softening: 0.5 * (m_fine / mantle.rho0).cbrt(), // finest (fine mantle) spacing
+            mass,
+            eos,
+            h,
+            pos,
+        }
+    }
+
     /// SPH density ρ_i = Σ_j m_j W(r_ij, h_ij) + self, with a symmetric per-pair smoothing length
     /// h_ij = ½(h_i+h_j) (so variable-resolution regions couple momentum-conservingly). Cached in `self.rho`.
     pub fn compute_density(&mut self) {

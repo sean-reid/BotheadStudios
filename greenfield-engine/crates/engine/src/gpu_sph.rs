@@ -103,11 +103,23 @@ pub struct SphCam {
 /// converged run; this is the in-browser visualization).
 /// Build the two differentiated proto-bodies UNRELAXED (Earth 5000 km, Theia 2700 km ~1/7 mass — sub-Earth,
 /// tractable, same as `tools/impact-run`). [`build_far_apart`] places them far apart for GPU relaxation.
-pub fn build_impact_bodies(n_earth: usize, n_theia: usize) -> (crate::hydrostatic::HydroBody, crate::hydrostatic::HydroBody) {
+pub fn build_impact_bodies(n_earth: usize, _n_theia: usize) -> (crate::hydrostatic::HydroBody, crate::hydrostatic::HydroBody) {
     use crate::hydrostatic::HydroBody;
+    const FTP: f64 = 4.0 / 3.0 * std::f64::consts::PI;
+    const CF: f64 = 8.0; // coarse-core factor (docs/41)
     let (core, mantle) = (crate::eos::Tillotson::iron(), crate::eos::Tillotson::basalt());
-    let earth = HydroBody::new_differentiated(core, mantle, 0.5 * 5.0e6, 5.0e6, 1.0e6, n_earth);
-    let theia = HydroBody::new_differentiated(core, mantle, 0.5 * 2.7e6, 2.7e6, 1.0e6, n_theia);
+    // docs/42 browser-parity: Earth is variable-resolution (coarse iron core + FINE basalt mantle) — the fine
+    // mantle sheds a real disk (uniform seeding did not). Solve m_fine so the total Earth count ≈ n_earth.
+    let (r_ic, r_surf) = (0.5 * 5.0e6_f64, 5.0e6_f64);
+    let m_mantle = mantle.rho0 * FTP * (r_surf.powi(3) - r_ic.powi(3));
+    let m_core = core.rho0 * FTP * r_ic.powi(3);
+    let m_fine = (m_mantle + m_core / CF) / n_earth as f64;
+    let earth = HydroBody::new_lod(core, mantle, r_ic, r_surf, 1.0e6, m_fine, CF);
+    // Theia: uniform-differentiated at the SAME fine particle mass (equal-mass across the system).
+    let (r_tc, r_t) = (0.5 * 2.7e6_f64, 2.7e6_f64);
+    let m_theia = core.rho0 * FTP * r_tc.powi(3) + mantle.rho0 * FTP * (r_t.powi(3) - r_tc.powi(3));
+    let theia_n = (m_theia / m_fine).round().max(50.0) as usize;
+    let theia = HydroBody::new_differentiated(core, mantle, r_tc, r_t, 1.0e6, theia_n);
     (earth, theia)
 }
 
