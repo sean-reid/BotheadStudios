@@ -41,7 +41,9 @@
       { "code": "KeyW", "action": "forward" },
       { "code": "KeyS", "action": "back" },
       { "code": "KeyA", "action": "left" },
-      { "code": "KeyD", "action": "right" }
+      { "code": "KeyD", "action": "right" },
+      { "code": "KeyR", "action": "up" },
+      { "code": "KeyF", "action": "down" }
     ]
   },
   "time": { "rotation": false, "scale": 1 }

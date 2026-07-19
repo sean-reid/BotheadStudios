@@ -4961,6 +4961,19 @@ mod app {
             self.fly.lon
         }
 
+        /// docs/43 Phase 6 — the surface type directly under the camera (for the HUD): the biome material id on
+        /// land ("grass", "sand", "snow", …) or "ocean" over water.
+        pub fn ground_biome(&self) -> String {
+            let (lat, lon) = (self.fly.lat, self.fly.lon);
+            let is_land = self.landmask.as_ref().map(|r| r.land_at(lat, lon)).unwrap_or(false);
+            if !is_land {
+                return "ocean".to_string();
+            }
+            let biome = self.landcover.as_ref().map_or(1, |r| r.biome_at(lat, lon) as usize);
+            let mi = self.biome_mats.get(biome).copied().unwrap_or(0);
+            self.mats.get(mi).map(|m| m.id.clone()).unwrap_or_default()
+        }
+
         pub fn resize(&mut self, width: u32, height: u32) {
             if width == 0 || height == 0 {
                 return;

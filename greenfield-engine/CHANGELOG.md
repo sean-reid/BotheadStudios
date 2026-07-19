@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Terra data-driven controls + HUD (docs/43 Phase 6)** — key bindings now come from the world file
+  (`controls.keys`: code → action), not code; `web/terra.ts` builds the input handler from it (WASD move + R/F
+  climb/descend for Earth), and the HUD shows `world · altitude · lat/lon · biome · fps` with a controls hint
+  derived from the bindings. New `Terra::ground_biome()` readback. Completes the docs/43 terrain rework
+  (Phases 1–6): a navigable, data-defined Earth flown from orbit to the ground.
 - **Terra ground LOD — the fine ground cap (docs/43 Phase 5)** — new `terra/ground_cap.rs`: a high-res patch
   rebuilt under the camera each frame (camera-relative f64→f32 for ground-scale precision), sampling real
   elevation + biome and curving to a true horizon, alpha cross-faded over the coarse globe as you descend (fully

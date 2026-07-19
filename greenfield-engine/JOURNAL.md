@@ -5,6 +5,28 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-19 — Terra Phase 6: data-driven controls + HUD polish (the worlds-as-data controls contract)
+
+**What.** The Terra scene's key bindings now come from the WORLD FILE, not code: `world.controls.keys` maps a
+`code` → an `action` (`forward`/`back`/`left`/`right`/`up`/`down`), and `web/terra.ts` builds the input handler
+from that map — the docs/43 worlds-as-data controls contract, closing the loop (the JSON populates the scene AND
+its controls). Earth's world declares WASD move + R/F climb/descend; changing the bindings needs no code change.
+The controls hint in the HUD is derived from the actual bindings, so it can't drift. HUD polished to show
+`world · altitude · lat/lon · biome · fps` — new `Terra::ground_biome()` reads the surface type under the camera
+(the land-cover biome material id, or "ocean"). fps is smoothed in the host.
+
+**Verified (rig `terra_controls`, xvfb).** From the world bindings: **KeyR climbs, KeyF descends, KeyD moves east**
+(lon increases); biome readback is "ocean" over the mid-Pacific and "sand" over the Sahara; the HUD line renders
+`Earth · alt 1.5 km · lat 28.00° lon 84.00° · sand · 28 fps` + `WASD fly · R/F alt · wheel zoom · drag look`.
+TypeScript typechecks clean; full fast suite **173/173 green**.
+
+**Deferred (noted).** Optional planet rotation from `time{}` — parked: it conflicts with the lat/lon fly-camera
+model (rotating the planet vs. the camera's surface coordinates) and Earth's world declares `rotation: false`;
+revisit alongside the multi-epoch / pre-baked-until-collision work (task: worlds-as-data). This completes the
+docs/43 terrain rework Phases 1–6: a navigable, data-defined Earth you fly from orbit to the ground.
+
+---
+
 ## 2026-07-19 — Terra Phase 5: the fine ground cap (real-ratio terrain, true horizon, camera-relative)
 
 **What.** New pure module `terra/ground_cap.rs` — a high-resolution local patch of the surface rebuilt under the

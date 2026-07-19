@@ -112,18 +112,37 @@ async function main(): Promise<void> {
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;
 
-    // --- Continuous fly camera (Phase 4): WASD moves, wheel = zoom(=altitude), drag = orbit/look (the engine's
-    // fly camera blends orbit⇄ground by altitude). Controls-from-JSON generalization lands in Phase 6; for now
-    // the WASD→intent mapping is fixed here.
+    // --- Continuous fly camera + data-driven controls (Phase 6). The engine's fly camera blends orbit⇄ground by
+    // altitude; the KEY BINDINGS come from the world file (`controls.keys`: code → action), not hardcoded here —
+    // this is the worlds-as-data controls contract (docs/43). Actions: forward/back/left/right (move), up/down
+    // (climb/descend). Wheel = zoom(=altitude); drag = orbit high / free-look low.
+    type Action = "forward" | "back" | "left" | "right" | "up" | "down";
+    const codeAction = new Map<string, Action>();
+    for (const k of (world.controls?.keys ?? []) as Array<{ code?: string; action?: string }>) {
+      if (k?.code && k?.action) codeAction.set(k.code, k.action as Action);
+    }
     const held = new Set<string>();
+    const active = (a: Action): boolean => {
+      for (const [code, act] of codeAction) if (act === a && held.has(code)) return true;
+      return false;
+    };
     window.addEventListener("keydown", (e) => {
-      if (["KeyW", "KeyA", "KeyS", "KeyD"].includes(e.code)) {
+      if (codeAction.has(e.code)) {
         held.add(e.code);
         e.preventDefault();
       }
     });
     window.addEventListener("keyup", (e) => held.delete(e.code));
     window.addEventListener("blur", () => held.clear());
+    // A controls hint derived from the actual bindings (so it stays true to the world file).
+    const keyFor = (a: Action): string => {
+      for (const [code, act] of codeAction) if (act === a) return code.replace(/^Key/, "");
+      return "";
+    };
+    const moveHint = ["forward", "left", "back", "right"].map((a) => keyFor(a as Action)).join("");
+    const altHint = [keyFor("up"), keyFor("down")].filter(Boolean).join("/");
+    const controlsHint =
+      `${moveHint ? `${moveHint} fly · ` : ""}${altHint ? `${altHint} alt · ` : ""}wheel zoom · drag look`;
 
     let dragging = false;
     let lastX = 0;
@@ -160,21 +179,30 @@ async function main(): Promise<void> {
 
     const fmtAlt = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(m >= 100000 ? 0 : 1)} km` : `${m.toFixed(0)} m`);
     let firstFrame = true;
+    let fps = 0;
+    let lastT = performance.now();
     const frame = () => {
-      // Apply held WASD as a north/east move intent (the engine scales the step by altitude).
-      const fwd = (held.has("KeyW") ? 1 : 0) - (held.has("KeyS") ? 1 : 0);
-      const right = (held.has("KeyD") ? 1 : 0) - (held.has("KeyA") ? 1 : 0);
+      // Held keys → move/altitude intents (the engine scales the step by altitude). Fully data-driven.
+      const fwd = (active("forward") ? 1 : 0) - (active("back") ? 1 : 0);
+      const right = (active("right") ? 1 : 0) - (active("left") ? 1 : 0);
+      const climb = (active("up") ? 1 : 0) - (active("down") ? 1 : 0);
       if (fwd !== 0 || right !== 0) terra.move_tangent(fwd, right);
+      if (climb !== 0) terra.zoom_alt(climb * 0.35); // ~4%/frame altitude change while held
       try {
         terra.render();
       } catch (err) {
         setStatus(`render error: ${String(err)}`, true);
         return;
       }
+      const now = performance.now();
+      const dt = now - lastT;
+      lastT = now;
+      if (dt > 0) fps = fps === 0 ? 1000 / dt : fps * 0.9 + (1000 / dt) * 0.1;
       if (stats) {
         stats.innerHTML =
           `<b>${terra.world_name()}</b> · alt ${fmtAlt(terra.altitude_m())} · ` +
-          `lat ${terra.latitude().toFixed(1)}° lon ${terra.longitude().toFixed(1)}° · WASD fly · wheel zoom · drag look`;
+          `lat ${terra.latitude().toFixed(2)}° lon ${terra.longitude().toFixed(2)}° · ` +
+          `${terra.ground_biome()} · ${fps.toFixed(0)} fps<br>${controlsHint}`;
       }
       if (firstFrame) {
         report("info", "first terra frame rendered OK");
