@@ -9,6 +9,13 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Terra fly camera — continuous orbit ⇄ ground (docs/43 Phase 4)** — new `terra/fly_camera.rs`: one
+  altitude-blended camera (drag orbits high up, free-looks near the ground; smoothstep transition) with a new
+  `Terra` API (`set_fly` · `move_tangent` WASD · `zoom_alt` wheel · `drag_look` · `altitude_m/latitude/longitude`
+  readbacks), seeded from the world file's `camera{}`. The view·projection is built in f64 for ground-scale
+  precision. The camera is **physics-floored on the terrain** (height above the local terrain envelope, forced
+  upward as terrain rises) so it never passes through solid ground. `web/terra.ts` drives it with a lat/lon/alt
+  HUD. (Fine ground-level detail is Phase 5.)
 - **Terra scene = a data-defined Earth globe (worlds-as-data, docs/43)** — a new `Terra` wasm scene renders Earth
   from a `world.json` + baked rasters (Natural Earth land mask · ETOPO elevation+bathymetry · derived land-cover
   biomes). Phase 3 adds `terra/globe_mesh.rs` (`build_globe`) + `shaders/globe.wgsl` + `Terra::build_surface_mesh`:

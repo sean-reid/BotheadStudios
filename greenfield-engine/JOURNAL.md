@@ -5,6 +5,39 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-19 — Terra Phase 4: the continuous fly camera (orbit ⇄ ground), physics-floored on terrain
+
+**What.** New pure module `terra/fly_camera.rs` — ONE camera that blends orbit⇄ground by altitude (no mode
+switch): high up it looks down at the planet and a drag orbits; near the ground it looks along the horizon and a
+drag turns the view; a smoothstep on altitude (`GROUND_ALT`=3 km … `ORBIT_ALT`=400 km) cross-fades the forward and
+up vectors between the two. State is `{lat, lon, alt_m, yaw, pitch}` in f64; the whole view·projection is built in
+f64 (`DMat4`, cast to f32 only at the end) so ground framing survives the radius-1 globe. Near/far planes scale
+with altitude (near ∝ altitude-above-ground; far just past the horizon). New `Terra` wasm API replacing the orbit
+stub: `set_fly` · `move_tangent` (WASD, step ∝ altitude) · `zoom_alt` (wheel) · `drag_look` · readbacks
+`altitude_m/latitude/longitude`; seeded from the world file's `camera{}`. `web/terra.ts` rewritten to drive it
+(held-key WASD, wheel zoom, pointer-drag look) with a live lat/lon/alt HUD.
+
+**Physics floor (Robin's constraint: the camera must never pass through solid).** `alt_m` is height above the
+LOCAL terrain — `eye = up·(r_disp + ground_disp(lat,lon) + alt_m·ds)` — and `ground_disp` is the MAX terrain
+height over a ±0.5° (~55 km) neighbourhood. So the eye always clears the terrain *envelope*, never buries inside a
+neighbouring peak, and is **forced upward as it approaches rising terrain** (terrain-following with ~55 km
+look-ahead). Recorded the standing rule + the follow-ups to memory: tighten to a per-triangle collision in Phase 5,
+and — for caves/arches — move collision from a heightfield floor to a VOLUMETRIC "is this point in solid matter?"
+test against the material field (docs/39/42), since a heightfield can't represent voids or overhangs.
+
+**Verified (rig `terra_fly`, xvfb).** Functional readbacks: **W moves north** (Δlat > 0), **orbital drag orbits**
+(Δlon ≈ 50°), **ground drag does NOT move position** (Δ ≈ 0 — free-look, the altitude blend working). Visual
+orbit→ground sequence: clean globe at 8000 km → curved horizon with snow peaks + green foothills + tan plains at
+80 km → a mountainous ground-approach horizon at ~1.5 km that is **no longer buried/black** (the terrain-envelope
+floor fixed a first cut where the ×30-exaggerated coarse mesh swallowed the eye). Full fast suite **171/171 green**
+(+5 fly_camera tests: tangent-frame orthonormality, blend monotonicity, orbital-vs-horizon look, zoom/move clamps).
+
+**Honest limit.** True sub-km ground horizon detail is coarse here (39 km mesh triangles, ×30 relief) — the
+real-ratio fine ground cap is Phase 5, exactly as the plan sequences it. Phase 4's deliverable is the camera
+system, and it flies orbit→ground continuously.
+
+---
+
 ## 2026-07-19 — Terra Phase 3: the displaced cube-sphere globe (a real blue-marble from world.json + rasters)
 
 **What.** The `Terra` scene (docs/43, worlds-as-data) now renders a smooth **displaced cube-sphere globe** instead

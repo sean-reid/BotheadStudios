@@ -4650,6 +4650,11 @@ mod app {
     // Phase 1 renders the Earth as the reused grain shell, recolored by the loaded world + its declared
     // atmosphere; later phases add the raster surface sampler, the displaced globe mesh, and the fly camera.
     // ---------------------------------------------------------------------------------------------
+    /// Relief exaggeration for the globe: real elevation × this, so terrain reads on a radius-1 globe (Everest is
+    /// only ~0.05% of Earth's radius). Shared by the mesh build, the ground-height query, and the grain fallback
+    /// so they never drift. The true 1:1 ratio returns with the ground LOD (Phase 5).
+    const TERRA_RELIEF_EXAG: f64 = 30.0;
+
     #[wasm_bindgen]
     pub struct Terra {
         surface: wgpu::Surface<'static>,
@@ -4668,7 +4673,7 @@ mod app {
         globe_mesh: Option<GpuMesh>,
         globe_uni: UniformSlot,
         mats: Vec<materials::Material>,
-        camera: Camera,
+        fly: crate::terra::fly_camera::FlyCamera,
         planet_radius: f64,
         atm_tau: [f64; 3],
         world_name: String,
@@ -4748,7 +4753,10 @@ mod app {
                 (0..shell_count).map(|_| make_space_uniform(&device, &bind_layout)).collect();
             let atm_tau = crate::atmosphere::rayleigh_tau(crate::planet::earth().surface_pressure() / 101_325.0);
             let mats = materials::load();
-            let camera = Camera { yaw: 0.6, pitch: 0.35, zoom: 1.0, base_distance: 3.0 };
+            // Default fly camera: orbital over the equator (a world file overrides this in `load_world`).
+            let fly = crate::terra::fly_camera::FlyCamera::new(
+                20.0, 0.0, 12_000_000.0, 0.0, -1.2, 2.0, 40_000_000.0,
+            );
             Ok(Terra {
                 surface,
                 device,
@@ -4763,7 +4771,7 @@ mod app {
                 globe_mesh: None,
                 globe_uni,
                 mats,
-                camera,
+                fly,
                 planet_radius: EARTH_RADIUS_M,
                 atm_tau,
                 world_name: String::new(),
@@ -4802,6 +4810,20 @@ mod app {
                 .unwrap_or_else(|| crate::planet::earth().surface_pressure() / 101_325.0);
             self.atm_tau = crate::atmosphere::rayleigh_tau(p_ratio);
             self.world_name = w.name.clone();
+
+            // docs/43 Phase 4 — seed the fly camera from the world's declared camera (default: orbital over 20°N).
+            if let Some(c) = w.camera.as_ref() {
+                let look = c.look.clone().unwrap_or_default();
+                self.fly = crate::terra::fly_camera::FlyCamera::new(
+                    c.lat,
+                    c.lon,
+                    if c.alt_m > 0.0 { c.alt_m } else { 12_000_000.0 },
+                    look.yaw,
+                    look.pitch,
+                    c.min_alt_m.unwrap_or(2.0),
+                    c.max_alt_m.unwrap_or(40_000_000.0),
+                );
+            }
 
             use crate::terra::raster::Raster;
             let mk = |bytes: &[u8], rw: u32, rh: u32| -> Option<Raster> {
@@ -4853,10 +4875,44 @@ mod app {
             self.world_name.clone()
         }
 
-        pub fn set_orbit(&mut self, yaw: f32, pitch: f32, zoom: f32) {
-            self.camera.yaw = yaw;
-            self.camera.pitch = pitch.clamp(-1.5, 1.5);
-            self.camera.zoom = zoom.clamp(0.1, 8.0);
+        // docs/43 Phase 4 — the continuous fly-camera API (WASD + zoom(=altitude) + mouse-look). The JS host
+        // maps input to these; the camera itself blends orbit⇄ground by altitude (see `terra::fly_camera`).
+
+        /// Set the camera outright (lat/lon degrees, altitude metres, look yaw/pitch radians).
+        pub fn set_fly(&mut self, lat: f64, lon: f64, alt_m: f64, yaw: f64, pitch: f64) {
+            self.fly.lat = lat;
+            self.fly.lon = lon;
+            self.fly.alt_m = alt_m.clamp(self.fly.min_alt, self.fly.max_alt);
+            self.fly.yaw = yaw;
+            self.fly.pitch = pitch;
+        }
+
+        /// WASD: move across the surface. `forward`/`right` are −1/0/+1 intents; the step scales with altitude
+        /// (fast from orbit, metres-per-frame on the ground) so a keypress feels the same at every scale.
+        pub fn move_tangent(&mut self, forward: f64, right: f64) {
+            // Step ≈ a small fraction of the current altitude per frame, floored so ground movement still works.
+            let step = (self.fly.alt_m * 0.02).max(2.0);
+            self.fly.move_tangent(forward * step, right * step, self.planet_radius);
+        }
+
+        /// Zoom = altitude change. `notches` is the wheel delta (or +/−1); positive climbs, negative descends.
+        pub fn zoom_alt(&mut self, notches: f64) {
+            self.fly.zoom_alt((notches * 0.12).exp());
+        }
+
+        /// A pointer drag (pixel deltas): orbit high up, free-look near the ground (altitude-blended).
+        pub fn drag_look(&mut self, dx: f64, dy: f64) {
+            self.fly.drag(dx, dy);
+        }
+
+        pub fn altitude_m(&self) -> f64 {
+            self.fly.alt_m
+        }
+        pub fn latitude(&self) -> f64 {
+            self.fly.lat
+        }
+        pub fn longitude(&self) -> f64 {
+            self.fly.lon
         }
 
         pub fn resize(&mut self, width: u32, height: u32) {
@@ -4870,18 +4926,15 @@ mod app {
         }
 
         pub fn render(&mut self) -> Result<(), JsValue> {
-            let view_proj = self.view_proj();
+            let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
+            // docs/43 Phase 4 — the fly camera builds the view·projection (in f64) and gives back the f64 eye.
+            // The terrain height under the camera keeps "altitude" above the local ground (not sea level).
+            let aspect = self.config.width as f64 / self.config.height.max(1) as f64;
+            let ground_disp = self.ground_disp_at(self.fly.lat, self.fly.lon);
+            let (view_proj, eye) = self.fly.view_proj(r_disp, DISPLAY_SCALE, aspect, ground_disp);
             // Fixed direction TO the sun → a pleasant ¾ lighting; the day/night terminator is emergent.
             let sun_dir = glam::DVec3::new(1.0, 0.45, 0.6).normalize();
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
-            // Camera eye in display units (the shell is Earth-centred at the origin, radius = r_disp).
-            let cp = (self.camera.pitch as f64).cos();
-            let eye = glam::DVec3::new(
-                cp * (self.camera.yaw as f64).sin(),
-                (self.camera.pitch as f64).sin(),
-                cp * (self.camera.yaw as f64).cos(),
-            ) * (self.camera.base_distance * self.camera.zoom) as f64;
-            let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
             if self.globe_mesh.is_some() {
                 // docs/43 Phase 3 — the displaced globe: one draw. Identity model (the mesh is already in
                 // display units, Earth-centred at the origin); white tint (the mesh carries the per-vertex biome
@@ -4901,7 +4954,7 @@ mod app {
                 let shell_spacing =
                     self.planet_radius * (4.0 * std::f64::consts::PI / self.shell_count as f64).sqrt();
                 let grain_r = ((0.62 * shell_spacing) * DISPLAY_SCALE) as f32;
-                const EXAG: f64 = 30.0; // relief exaggeration so it reads on a radius-1 globe (Everest ≈ 3.5%)
+                const EXAG: f64 = TERRA_RELIEF_EXAG;
                 let water_idx = materials::index_of(&self.mats, "water");
                 for (i, uni) in self.shell_unis.iter().enumerate() {
                     let dir = crate::impact::fib_dir(i, self.shell_count);
@@ -4994,9 +5047,41 @@ mod app {
         /// integrated into the same mesh (ocean cells sit at exactly sea level with the water material), so there
         /// is no separate ocean shell and no coast z-fighting. `EXAG` exaggerates relief so it reads on a radius-1
         /// globe (Everest is only ~0.05% of Earth's radius); the true ratio returns with the ground LOD (Phase 5).
+        /// Terrain height (display units, above the sea-level sphere) as a clearance floor for the fly camera at a
+        /// lat/lon. The fly camera adds this to `r_disp` so "altitude" means height above the local ground, not
+        /// sea level — otherwise the ×30 exaggerated mountains would swallow the eye at low altitude.
+        ///
+        /// It returns the MAX over a small neighbourhood (roughly the coarse mesh cell), not a point sample, so
+        /// the eye clears the terrain *envelope* around it and can never end up inside a neighbouring exaggerated
+        /// peak (the camera must never pass through solid ground). Ocean → 0 (the flat sea surface). The proper
+        /// per-triangle collision against the real-ratio ground surface arrives with the ground LOD (Phase 5).
+        ///
+        /// NOTE (architecture): this is a HEIGHTFIELD floor — single-valued along the radial. It cannot represent
+        /// caves (void below the surface) or arches (solid above void). Those need a VOLUMETRIC "is this point in
+        /// solid matter?" test against the material field (voxel/SDF/particle), which is where camera collision
+        /// must move once terrain is a real matter field (docs/39/42). Kept as a heightfield only as a stand-in.
+        fn ground_disp_at(&self, lat: f64, lon: f64) -> f64 {
+            let Some(elev) = self.elevation.as_ref() else { return 0.0 };
+            let land = self.landmask.as_ref();
+            // ±~0.5° covers one coarse cube-sphere cell (256²/face ≈ 0.35°). 3×3 max = local terrain envelope.
+            let mut peak = 0.0f64;
+            for dlat in [-0.5, 0.0, 0.5] {
+                for dlon in [-0.5, 0.0, 0.5] {
+                    let (la, lo) = (lat + dlat, lon + dlon);
+                    let is_land = land.map(|r| r.land_at(la, lo)).unwrap_or(false);
+                    if !is_land {
+                        continue;
+                    }
+                    let e = elev.elevation_m_at(la, lo, self.elev_range[0], self.elev_range[1]).max(0.0);
+                    peak = peak.max(e);
+                }
+            }
+            peak * DISPLAY_SCALE * TERRA_RELIEF_EXAG
+        }
+
         fn build_surface_mesh(&self) -> Mesh {
             let r_disp = self.planet_radius * DISPLAY_SCALE; // = 1.0 for Earth
-            const EXAG: f64 = 30.0;
+            const EXAG: f64 = TERRA_RELIEF_EXAG;
             let ds = DISPLAY_SCALE;
             let water_idx = materials::index_of(&self.mats, "water");
             let water_alb = self.mats[water_idx].albedo;
@@ -5024,14 +5109,6 @@ mod app {
             })
         }
 
-        fn view_proj(&self) -> Mat4 {
-            let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-            let proj = Mat4::perspective_rh(0.9, aspect, 0.001, 100_000.0);
-            let cp = self.camera.pitch.cos();
-            let dir = Vec3::new(cp * self.camera.yaw.sin(), self.camera.pitch.sin(), cp * self.camera.yaw.cos());
-            let eye = dir * (self.camera.base_distance * self.camera.zoom);
-            proj * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y)
-        }
     }
 }
 

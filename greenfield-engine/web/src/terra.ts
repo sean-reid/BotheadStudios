@@ -112,9 +112,19 @@ async function main(): Promise<void> {
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;
 
-    // --- Orbit camera (Phase 1; fly camera comes in Phase 4) ---
-    const cam = { yaw: 0.6, pitch: 0.35, zoom: 1.0 };
-    let userInteracted = false;
+    // --- Continuous fly camera (Phase 4): WASD moves, wheel = zoom(=altitude), drag = orbit/look (the engine's
+    // fly camera blends orbit⇄ground by altitude). Controls-from-JSON generalization lands in Phase 6; for now
+    // the WASD→intent mapping is fixed here.
+    const held = new Set<string>();
+    window.addEventListener("keydown", (e) => {
+      if (["KeyW", "KeyA", "KeyS", "KeyD"].includes(e.code)) {
+        held.add(e.code);
+        e.preventDefault();
+      }
+    });
+    window.addEventListener("keyup", (e) => held.delete(e.code));
+    window.addEventListener("blur", () => held.clear());
+
     let dragging = false;
     let lastX = 0;
     let lastY = 0;
@@ -130,20 +140,15 @@ async function main(): Promise<void> {
     });
     canvas.addEventListener("pointermove", (e) => {
       if (!dragging) return;
-      cam.yaw -= (e.clientX - lastX) * 0.008;
-      cam.pitch += (e.clientY - lastY) * 0.008;
-      cam.pitch = Math.max(-1.4, Math.min(1.4, cam.pitch));
+      terra.drag_look(e.clientX - lastX, e.clientY - lastY);
       lastX = e.clientX;
       lastY = e.clientY;
-      userInteracted = true;
     });
     canvas.addEventListener(
       "wheel",
       (e) => {
         e.preventDefault();
-        cam.zoom *= Math.exp(e.deltaY * 0.001);
-        cam.zoom = Math.max(0.15, Math.min(8, cam.zoom));
-        userInteracted = true;
+        terra.zoom_alt(e.deltaY * 0.01); // scroll down → climb (zoom out); scroll up → descend (zoom in)
       },
       { passive: false },
     );
@@ -153,17 +158,24 @@ async function main(): Promise<void> {
       terra.resize(canvas.width, canvas.height);
     });
 
+    const fmtAlt = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(m >= 100000 ? 0 : 1)} km` : `${m.toFixed(0)} m`);
     let firstFrame = true;
     const frame = () => {
-      if (!userInteracted) cam.yaw += 0.0012; // gentle idle spin
-      terra.set_orbit(cam.yaw, cam.pitch, cam.zoom);
+      // Apply held WASD as a north/east move intent (the engine scales the step by altitude).
+      const fwd = (held.has("KeyW") ? 1 : 0) - (held.has("KeyS") ? 1 : 0);
+      const right = (held.has("KeyD") ? 1 : 0) - (held.has("KeyA") ? 1 : 0);
+      if (fwd !== 0 || right !== 0) terra.move_tangent(fwd, right);
       try {
         terra.render();
       } catch (err) {
         setStatus(`render error: ${String(err)}`, true);
         return;
       }
-      if (stats) stats.innerHTML = `<b>${terra.world_name()}</b> · drag orbit · wheel zoom`;
+      if (stats) {
+        stats.innerHTML =
+          `<b>${terra.world_name()}</b> · alt ${fmtAlt(terra.altitude_m())} · ` +
+          `lat ${terra.latitude().toFixed(1)}° lon ${terra.longitude().toFixed(1)}° · WASD fly · wheel zoom · drag look`;
+      }
       if (firstFrame) {
         report("info", "first terra frame rendered OK");
         firstFrame = false;
