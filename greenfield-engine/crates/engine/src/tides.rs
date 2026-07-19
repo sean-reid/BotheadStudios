@@ -180,6 +180,11 @@ pub struct Moonlet {
 /// moonlets whose orbits close within 3.5 mutual Hill radii MERGE (the standard planetesimal
 /// stability criterion, Gladman 1993) — conserving mass and orbital angular momentum exactly
 /// (a_new from L₁+L₂ = (m₁+m₂)·√(G·M·a_new)). Returns the number of mergers.
+///
+/// A moonlet whose orbit decays INSIDE the Roche limit is tidally SHREDDED (a rubble pile cannot hold
+/// itself together against the tidal field there) — it is removed and its mass + orbital angular momentum
+/// rain onto the planet. This is why a sub-synchronous moonlet does not "roll on the surface": it disrupts.
+/// Returns `(mergers, mass shed onto the planet)`.
 pub fn secular_step(
     moonlets: &mut Vec<Moonlet>,
     spin_l: &mut DVec3,
@@ -187,21 +192,39 @@ pub fn secular_step(
     r_planet: f64,
     k2_over_q: f64,
     dt: f64,
-) -> usize {
+) -> (usize, f64) {
     let spin_omega = spin_l.length() / moment_of_inertia(m_planet, r_planet);
     let s_hat = spin_l.normalize_or_zero();
+    // Fluid Roche limit d = 2.44·R·(ρ_planet/ρ_moon)^⅓ — inside it a self-gravitating rubble moon is torn
+    // apart (the real Moon formed just OUTSIDE it and migrated out). ρ_moon = basalt rubble (docs/27).
+    let rho_planet = m_planet / (4.0 / 3.0 * std::f64::consts::PI * r_planet.powi(3));
+    let d_roche = 2.44 * r_planet * (rho_planet / 2_900.0).cbrt();
     for m in moonlets.iter_mut() {
         // Per-step da capped at 5% of a: the secular law is a rate, not a leap (early migration at
         // 3 R⊕ is ferocious; an uncapped step overshoots the nonlinear (R/a)⁵ falloff).
         let da = (tidal_da_dt(k2_over_q, m.mass, m_planet, r_planet, m.a, spin_omega) * dt)
             .clamp(-0.05 * m.a, 0.05 * m.a);
-        let a_new = (m.a + da).max(r_planet * 1.2);
+        // No floor: a sub-synchronous orbit decays freely toward Roche, where it disrupts (below).
+        let a_new = (m.a + da).max(1.0);
         // The spin pays the EXACT orbital-L change (L = m·√(G·M·a) is an identity, not a Taylor
         // expansion — first-order payment leaked 1.7% over an early-fast migration, measured).
         let dl = m.mass * (G * m_planet).sqrt() * (a_new.sqrt() - m.a.sqrt());
         m.a = a_new;
         *spin_l -= s_hat * dl;
     }
+    // ROCHE DISRUPTION: shred moonlets that have decayed inside the Roche limit; their mass and orbital
+    // angular momentum go to the planet (it swallows the infalling rubble and spins up). Total mass and
+    // angular momentum are conserved (mass returned to the caller; L added to the spin here).
+    let mut shed = 0.0;
+    moonlets.retain(|m| {
+        if m.a < d_roche {
+            shed += m.mass;
+            *spin_l += s_hat * (m.mass * (G * m_planet * m.a).sqrt());
+            false
+        } else {
+            true
+        }
+    });
     // Hill-criterion mergers, innermost outward.
     moonlets.sort_by(|x, y| x.a.partial_cmp(&y.a).unwrap());
     let mut merged = 0;
@@ -220,7 +243,7 @@ pub fn secular_step(
             i += 1;
         }
     }
-    merged
+    (merged, shed)
 }
 
 #[cfg(test)]
@@ -332,6 +355,35 @@ mod tests {
             (l_total1 - l_total0).abs() / l_total0 < 1.0e-6,
             "angular momentum conserved through mergers and migration"
         );
+    }
+
+    #[test]
+    fn a_sub_synchronous_moonlet_disrupts_at_roche_not_on_the_surface() {
+        // The reported "giant ball rolling on Earth's surface" bug: a moonlet whose orbit decays inside the
+        // Roche limit was CLAMPED at 1.2 R⊕ and drawn as an intact ball overlapping Earth. Honest physics:
+        // it is tidally SHREDDED at the Roche limit, its mass + angular momentum raining onto the planet.
+        // Start a moonlet just outside Roche with a SLOW (24 h) day so it is sub-synchronous → migrates
+        // inward → must disrupt, with mass and total angular momentum conserved.
+        let mut moonlets = vec![Moonlet { a: 3.2 * R_E, mass: 0.3 * M_MOON }];
+        let mut spin = DVec3::new(0.0, 0.0, 1.0)
+            * (moment_of_inertia(M_E, R_E) * 2.0 * std::f64::consts::PI / (24.0 * 3600.0));
+        let l0 = spin.length() + moonlets[0].mass * (G * M_E * moonlets[0].a).sqrt();
+        let m0 = moonlets[0].mass;
+        let year = 3.156e7;
+        let mut shed_total = 0.0;
+        for _ in 0..200_000 {
+            let (_m, shed) = secular_step(&mut moonlets, &mut spin, M_E, R_E, EARTH_K2_OVER_Q, 500.0 * year);
+            shed_total += shed;
+            if moonlets.is_empty() {
+                break;
+            }
+        }
+        let d_roche = 2.44 * R_E * (M_E / (4.0 / 3.0 * std::f64::consts::PI * R_E.powi(3)) / 2_900.0).cbrt();
+        println!("Roche limit {:.2} R⊕; sub-synchronous moonlet disrupted, shed {:.3} M☾", d_roche / R_E, shed_total / M_MOON);
+        assert!(moonlets.is_empty(), "the sub-synchronous moonlet must DISRUPT, not survive on the surface");
+        assert!((shed_total - m0).abs() / m0 < 1.0e-9, "its full mass rains onto the planet (mass conserved)");
+        let l1 = spin.length();
+        assert!((l1 - l0).abs() / l0 < 1.0e-5, "total angular momentum conserved through disruption ({l0:.3e} → {l1:.3e})");
     }
 
     #[test]

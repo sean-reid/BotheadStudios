@@ -137,6 +137,20 @@ pub struct Aggregate {
     /// Boil threshold (K) for the phase flip — the bulk material's boiling point (1-atm value;
     /// the local-vapor-pressure criterion is the refinement, flagged).
     pub boil_k: f64,
+    /// SPH VAPOR PRESSURE (docs/26/27, replacing the docs/28-item-5 overlap hack): the specific gas
+    /// constant R_s and kernel smoothing length h for a REAL continuum pressure field among vaporized
+    /// parcels — P = ρ·R_s·T with each parcel's OWN temperature. When both > 0, vapor↔vapor pairs interact
+    /// by a momentum-conserving SPH pressure that does PdV expansion work (launching the plume) and, in
+    /// `step`, cools as it expands (energy-conserving). 0 ⇒ fall back to the old `contact_gas` overlap law.
+    pub vapor_rs: f64,
+    pub vapor_h: f64,
+    /// LATENT-HEAT offset L_v/c (K): the energy absorbed by the phase change itself, which is stored in
+    /// the parcel's tracked `temps` (it must reach boil + L_v/c to flag vapor) but is NOT thermal motion —
+    /// so the pressure-driving temperature is `temps − vapor_latent_k` (docs/28: latent heat has a
+    /// reservoir, not fake sensible T). Without this the vapor pressure over-reads by ~L_v/c ≈ 7,000 K.
+    pub vapor_latent_k: f64,
+    /// Cached SPH density at each vaporized parcel (from `accelerations`), reused by `step`'s PdV cooling.
+    pub vapor_rho: Vec<f64>,
     /// Per-particle PROVENANCE (docs/28): which body this matter came from — [`SOURCE_IMPACTOR`] (Theia)
     /// or [`SOURCE_TARGET`] (Earth). A physical attribute, not an index convention: it rides `swap_remove`
     /// and lets the disk's composition be measured and tinted by origin (the real Moon is Earth-like, so
@@ -179,6 +193,10 @@ impl Aggregate {
             vapor: vec![false; n],
             contact_gas: None,
             boil_k: f64::INFINITY,
+            vapor_rs: 0.0,
+            vapor_h: 0.0,
+            vapor_latent_k: 0.0,
+            vapor_rho: Vec::new(),
             source: vec![SOURCE_IMPACTOR; n],
         }
     }
@@ -197,6 +215,31 @@ impl Aggregate {
         self.contact_gas = Some(gas);
         self.boil_k = boil_k;
         self
+    }
+
+    /// Enable the REAL SPH vapor pressure field (docs/26/27): `rs` = the vapor's specific gas constant
+    /// (`atmosphere::specific_gas_constant`), `h` = the kernel smoothing length (≈ a few vapor-parcel
+    /// spacings). Vapor↔vapor pairs then use a continuum P = ρ·R_s·T pressure instead of the overlap hack.
+    pub fn with_vapor_sph(mut self, rs: f64, h: f64, latent_k: f64) -> Self {
+        self.vapor_rs = rs;
+        self.vapor_h = h;
+        self.vapor_latent_k = latent_k.max(0.0);
+        self
+    }
+
+    /// Cell size for the short-range neighbour grid (docs/30): the LONGEST reach of any short-range force —
+    /// the SPH kernel `h` and the widest contact interaction (touch + cohesion range) across all grains —
+    /// so the grid misses no interacting pair (a missed pair would silently drop a force and break
+    /// conservation). Long-range self-gravity is not short-range and uses its own scheme (Barnes–Hut).
+    fn short_range_cell(&self) -> f64 {
+        let mut reach = self.vapor_h;
+        if let Some(c) = self.contact {
+            reach = reach.max(2.0 * c.radius + c.coh_range);
+        }
+        for pc in &self.per_grain_contact {
+            reach = reach.max(2.0 * pc.radius + pc.coh_range);
+        }
+        reach.max(1.0e-9)
     }
 
     /// Set the material's specific heat (J/(kg·K)) — converts contact dissipation into temperature.
@@ -324,6 +367,10 @@ impl Aggregate {
             vapor: vec![false; n],
             contact_gas: None,
             boil_k: f64::INFINITY,
+            vapor_rs: 0.0,
+            vapor_h: 0.0,
+            vapor_latent_k: 0.0,
+            vapor_rho: Vec::new(),
             source: vec![SOURCE_IMPACTOR; n],
         }
     }
@@ -449,7 +496,15 @@ impl Aggregate {
 
     /// Softened mutual-gravity acceleration on every particle (N-body).
     pub fn accelerations(&mut self) -> Vec<DVec3> {
-        let s2 = self.softening * self.softening;
+        self.accelerations_masked(None)
+    }
+
+    /// [`accelerations`] with an optional gravity-active mask (docs/30 stage 3): when `grav_active` is set,
+    /// the O(N log N) self-gravity is evaluated ONLY for the marked (active) particles — the block-timestep
+    /// fast path. Everything else (short-range contact/SPH, boundary, external gravity) is computed as usual
+    /// for all, so the active particles get their FULL correct force; unmarked particles' self-gravity is
+    /// left zero (their entry is stale and `step_block` only reads the active ones).
+    fn accelerations_masked(&mut self, grav_active: Option<&[bool]>) -> Vec<DVec3> {
         let p = &self.particles;
         let mut acc = vec![self.gravity; p.len()]; // uniform external gravity (0 for a rubble pile)
         // External extended-body gravity source (e.g. the planet the debris falls back to). OUTSIDE the
@@ -477,16 +532,23 @@ impl Aggregate {
         }
                                                    // O(n²) N-body self-gravity — only for a self-gravitating pile. A cohesive solid skips it (its
                                                    // own gravity is ~0 and this `powf(-1.5)` loop would dominate the frame; see `self_gravity`).
+        // Positions + masses, materialised ONCE and shared by BOTH accelerated schemes: Barnes–Hut for the
+        // long-range self-gravity here, and the neighbour grid for the short-range contact/SPH below
+        // (docs/30). Positions are fixed within one accelerations pass.
+        let sr_pos: Vec<DVec3> = p.iter().map(|b| b.pos).collect();
+        let masses: Vec<f64> = p.iter().map(|b| b.mass).collect();
+        // N-body SELF-GRAVITY via Barnes–Hut → O(N log N) (docs/30 stage 1c): a distant clump pulls like a
+        // single mass at its centre of mass. θ=0.5 (RMS error <1%, unbiased — below the FP/chaos noise the
+        // disk tolerates), softened exactly like the direct sum; brute-force below ~1k bodies. Only for a
+        // self-gravitating pile — a cohesive solid's own gravity is ~0 and skips it.
         if self.self_gravity {
-            for i in 0..p.len() {
-                for j in 0..p.len() {
-                    if i == j {
-                        continue;
-                    }
-                    let d = p[j].pos - p[i].pos;
-                    let r2 = d.length_squared() + s2;
-                    acc[i] += d * (G * p[j].mass * (1.0 / (r2 * r2.sqrt())));
-                }
+            let bh = crate::bhtree::BarnesHut::build(&sr_pos, &masses, 0.5, self.softening);
+            let g = match grav_active {
+                Some(active) => bh.accelerations_active(&sr_pos, &masses, active),
+                None => bh.accelerations(&sr_pos, &masses),
+            };
+            for (a, gi) in acc.iter_mut().zip(g) {
+                *a += gi;
             }
         }
         // Every declared massive body, one law each (see `gravity_bodies`) — the Sun keeps the
@@ -507,34 +569,40 @@ impl Aggregate {
         // governs the terrain/debris grains, now applied to any aggregate of matter. This is what stops
         // particles passing through each other; sticking, ploughing and cratering all emerge from it.
         // O(n²) — fine for the coarse clouds here; a neighbour grid is the scaling refinement.
+        // SHORT-RANGE neighbour grid (docs/30 stage 1b): O(N) pair-finding for contact + SPH, replacing the
+        // O(N²) double loops. Built ONCE at the widest reach (reusing `sr_pos` from above) and reused by the
+        // SPH block below. It yields exactly the pairs a brute sweep would (plus a few just-outside
+        // candidates the force laws zero out), so the forces — and conservation — are identical
+        // (verified: contact_grid_matches_brute_force).
+        let sr_grid = crate::neighbors::NeighborGrid::build(&sr_pos, self.short_range_cell());
         if let Some(c) = self.contact {
             let m_ref = self.contact_ref_mass;
-            for i in 0..p.len() {
-                for j in (i + 1)..p.len() {
-                    // Phase-appropriate law per PAIR: a vaporized member makes the encounter gaseous
-                    // (EOS pressure, no cohesion) — the vapor disk's pressure support (docs/27). Otherwise,
-                    // when per-grain materials are set, a SOLID pair collides via each grain's own material
-                    // mixed (iron-as-iron, docs/23); else the single bulk law. (Gas mixing is follow-up.)
-                    let mixed_law;
-                    let law = if self.contact_gas.is_some()
-                        && (self.vapor.get(i) == Some(&true) || self.vapor.get(j) == Some(&true))
-                    {
-                        self.contact_gas.as_ref().unwrap()
-                    } else if !self.per_grain_contact.is_empty() {
-                        mixed_law = self.per_grain_contact[i].mix(&self.per_grain_contact[j]);
-                        &mixed_law
-                    } else {
-                        &c
-                    };
-                    // The law's per-mass output × the reference mass = the pair FORCE; each particle
-                    // divides by its own mass — equal & opposite FORCES ⇒ momentum conserved for ANY
-                    // mass ratio (a dense solid through light air parcels included).
-                    let f = crate::granular::contact_accel(p[i].pos, p[i].vel, p[j].pos, p[j].vel, law)
-                        * m_ref;
-                    acc[i] += f / p[i].mass.max(1.0e-30);
-                    acc[j] -= f / p[j].mass.max(1.0e-30);
+            let sph_vapor = self.vapor_rs > 0.0 && self.vapor_h > 0.0;
+            sr_grid.for_each_pair(&sr_pos, |i, j| {
+                // Phase-appropriate law per PAIR. With the real SPH vapor field on, a vapor↔vapor pair is
+                // handled by the continuum pressure below — SKIP it here (no double force). A vapor↔solid
+                // pair still contacts (the plume pushes the condensed debris at the interface). Without SPH,
+                // fall back to the legacy overlap gas law. Otherwise a solid pair collides via each grain's
+                // own material mixed (iron-as-iron, docs/23).
+                let (vi, vj) = (self.vapor.get(i) == Some(&true), self.vapor.get(j) == Some(&true));
+                if sph_vapor && vi && vj {
+                    return;
                 }
-            }
+                let mixed_law;
+                let law = if !sph_vapor && self.contact_gas.is_some() && (vi || vj) {
+                    self.contact_gas.as_ref().unwrap()
+                } else if !self.per_grain_contact.is_empty() {
+                    mixed_law = self.per_grain_contact[i].mix(&self.per_grain_contact[j]);
+                    &mixed_law
+                } else {
+                    &c
+                };
+                // The law's per-mass output × the reference mass = the pair FORCE; each particle divides by
+                // its own mass — equal & opposite FORCES ⇒ momentum conserved for ANY mass ratio.
+                let f = crate::granular::contact_accel(p[i].pos, p[i].vel, p[j].pos, p[j].vel, law) * m_ref;
+                acc[i] += f / p[i].mass.max(1.0e-30);
+                acc[j] -= f / p[j].mass.max(1.0e-30);
+            });
         }
         // Conservative boundary sphere (the un-materialised bulk planet): an outward penalty spring for any
         // particle that has pushed inside it. A FORCE (−∇U of ½k·penetration²), not a velocity reset — so
@@ -622,6 +690,53 @@ impl Aggregate {
             acc[bond.a] += f / pa.mass;
             acc[bond.b] -= f / pb.mass;
         }
+        // SPH VAPOR PRESSURE (docs/26/27): a real continuum pressure among vaporized parcels — P = ρ·R_s·T
+        // with each parcel's OWN temperature — replacing the docs/28-item-5 overlap hack. Symmetric ⇒
+        // momentum-conserving; this is the force that does the PdV expansion work launching the plume (and
+        // cools it, in `step`). Density is a kernel estimate; the cached ρ feeds `step`'s energy update.
+        if self.vapor_rs > 0.0 && self.vapor_h > 0.0 {
+            let h = self.vapor_h;
+            let n = self.particles.len();
+            let mut rho = vec![0.0f64; n];
+            // Density: self-contribution, then symmetric neighbour sums over the grid (vapor↔vapor within h).
+            for i in 0..n {
+                if self.vapor.get(i) == Some(&true) {
+                    rho[i] = (self.particles[i].mass * crate::atmosphere::sph_w(0.0, h)).max(1.0e-30);
+                }
+            }
+            sr_grid.for_each_pair(&sr_pos, |i, j| {
+                if self.vapor.get(i) != Some(&true) || self.vapor.get(j) != Some(&true) {
+                    return;
+                }
+                let r = (self.particles[i].pos - self.particles[j].pos).length();
+                if r < h {
+                    let w = crate::atmosphere::sph_w(r, h);
+                    rho[i] += self.particles[j].mass * w;
+                    rho[j] += self.particles[i].mass * w;
+                }
+            });
+            // Symmetric pressure force over the same grid pairs.
+            sr_grid.for_each_pair(&sr_pos, |i, j| {
+                if self.vapor.get(i) != Some(&true) || self.vapor.get(j) != Some(&true) {
+                    return;
+                }
+                let dv = self.particles[i].pos - self.particles[j].pos;
+                let r = dv.length();
+                if r >= h || r < 1.0e-9 {
+                    return;
+                }
+                // Pressure-driving temperature EXCLUDES the latent heat (docs/28): P = ρ·R_s·(T − L_v/c).
+                let ti = (self.temps[i] as f64 - self.vapor_latent_k).max(1.0);
+                let tj = (self.temps[j] as f64 - self.vapor_latent_k).max(1.0);
+                let pi = rho[i] * self.vapor_rs * ti;
+                let pj = rho[j] * self.vapor_rs * tj;
+                let term = pi / (rho[i] * rho[i]) + pj / (rho[j] * rho[j]);
+                let grad = (dv / r) * crate::atmosphere::sph_dw(r, h); // dW<0 ⇒ repulsive
+                acc[i] += grad * (-term * self.particles[j].mass);
+                acc[j] += grad * (term * self.particles[i].mass);
+            });
+            self.vapor_rho = rho;
+        }
         acc
     }
 
@@ -645,6 +760,101 @@ impl Aggregate {
         // velocity DAMPING term stable too, not just the spring — an overdamped stiff bond blows up
         // under explicit integration otherwise (the probe-detonation bug, docs/23).
         ((2.0 * dt * omega).ceil() as usize).max(1)
+    }
+
+    /// PER-PARTICLE timestep (docs/30 stage 3, the foundation of block/individual timesteps): each
+    /// particle's own stable step from its DYNAMICAL time at the current acceleration `acc[i]` — the
+    /// free-fall time √(ε/|a|) (ε = the gravity softening, the shortest resolved length), tightened by the
+    /// turnaround time |v|/|a| where a particle is being violently accelerated (a fresh contact). `eta` is
+    /// the accuracy factor (~0.03–0.05). The violent shocked core comes out with a TINY dt (must be updated
+    /// often); the quiescent disk with a LARGE dt (can coast) — the split a block scheduler buckets by, so
+    /// per-step cost drops from O(N) to O(N_active). The scheduler that consumes these (a hierarchical,
+    /// conservation-checked leapfrog with prediction) is the next, larger piece — this criterion is its
+    /// small, testable foundation, and it changes NOTHING until that scheduler is wired in.
+    pub fn particle_timesteps(&self, acc: &[DVec3], eta: f64) -> Vec<f64> {
+        let eps = self.softening.max(1.0e-9);
+        self.particles
+            .iter()
+            .zip(acc)
+            .map(|(p, a)| {
+                let amag = a.length();
+                if amag <= 1.0e-30 {
+                    return f64::INFINITY; // unaccelerated ⇒ no constraint (a lone drifting body)
+                }
+                let t_ff = (eps / amag).sqrt(); // free-fall / dynamical time
+                let t_coll = p.vel.length() / amag; // turnaround time (velocity / accel)
+                eta * if t_coll > 0.0 { t_ff.min(t_coll) } else { t_ff }
+            })
+            .collect()
+    }
+
+    /// Hierarchical BLOCK-TIMESTEP advance by `dt` (docs/30 stage 3, the "delta" half): particles are
+    /// bucketed into power-of-2 rate levels from [`particle_timesteps`] and each is integrated at its OWN
+    /// dt via KDK leapfrog — the fast shocked/contact set is sub-stepped at dt/2^L, the quiescent set coasts
+    /// at the base dt. Reduces to a single global KDK step when everything is slow. Only the MECHANICAL
+    /// evolution (positions/velocities under the full force field); the heat/vapor/dissipation coupling is
+    /// left to the synchronized [`step`] path for now.
+    ///
+    /// STATUS: verified (conserves energy, reproduces the global-dt result) AND fast — the O(N log N)
+    /// self-gravity is now evaluated only on the ACTIVE subset each sub-step (a coasting particle's gravity
+    /// is not recomputed until its own kick). Short-range contact/SPH are still computed for all each
+    /// sub-step (cheap, and keeps contact reactions symmetric), and the heat/vapor/dissipation coupling
+    /// stays on the synchronized [`step`] path — so this is the mechanical block integrator, not yet a
+    /// drop-in for the full thermodynamic impact step (that coupling is the flagged next increment).
+    pub fn step_block(&mut self, dt: f64, eta: f64) {
+        if dt <= 0.0 || self.particles.is_empty() {
+            return;
+        }
+        let mut acc = self.accelerations();
+        let ts = self.particle_timesteps(&acc, eta);
+        const LMAX: u32 = 6; // fastest bucket = dt/64; caps runaway sub-stepping
+        let level: Vec<u32> = ts
+            .iter()
+            .map(|&t| {
+                if !t.is_finite() || t >= dt {
+                    0
+                } else {
+                    (dt / t).log2().ceil().clamp(0.0, LMAX as f64) as u32
+                }
+            })
+            .collect();
+        let lmax = level.iter().copied().max().unwrap_or(0);
+        let n = 1u32 << lmax;
+        let dt_min = dt / n as f64;
+        let stride = |l: u32| 1u32 << (lmax - l); // sub-steps between a level-L particle's kicks
+        for sub in 0..n {
+            // First half-kick for every particle STARTING one of its own steps at this sub-tick.
+            for i in 0..self.particles.len() {
+                if sub % stride(level[i]) == 0 {
+                    let dt_i = dt_min * stride(level[i]) as f64;
+                    self.particles[i].vel += acc[i] * (0.5 * dt_i);
+                }
+            }
+            // Drift everyone by the smallest sub-step (leapfrog drift is exact and cheap).
+            for b in self.particles.iter_mut() {
+                b.pos += b.vel * dt_min;
+            }
+            // ACTIVE = particles ENDING one of their own steps at this tick — only these need a fresh force
+            // (for their closing half-kick). The expensive self-gravity is evaluated for the active set
+            // ONLY; short-range forces are still computed for all (cheap, and keeps contact reactions
+            // symmetric), but only the active particles' entries are read.
+            let active: Vec<bool> =
+                (0..self.particles.len()).map(|i| (sub + 1) % stride(level[i]) == 0).collect();
+            let new_acc = self.accelerations_masked(Some(&active));
+            // Second half-kick for the active particles, and refresh ONLY their stored accel — a coasting
+            // particle keeps the force from its last kick, so it genuinely coasts (the O(N)→O(N_active) win).
+            for i in 0..self.particles.len() {
+                if active[i] {
+                    let dt_i = dt_min * stride(level[i]) as f64;
+                    self.particles[i].vel += new_acc[i] * (0.5 * dt_i);
+                    acc[i] = new_acc[i];
+                }
+            }
+            // Thermodynamics at the fine sub-step (docs/26/27): the vapor/contact set is fast — active every
+            // sub-step — so its PdV cooling, dissipation heating, radiation and phase flips run at dt_min,
+            // exactly where they belong. Uses the SPH density the accelerations() call above just cached.
+            self.apply_thermo(dt_min);
+        }
     }
 
     /// A coordination-corrected, **sub-critical** bond damping (N·s/m) that settles the solid without
@@ -716,6 +926,56 @@ impl Aggregate {
             b.vel += *a * (0.5 * dt);
         }
         *acc = new_acc;
+        self.apply_thermo(dt);
+    }
+
+    /// The per-step THERMODYNAMICS (docs/26/27), split out of [`step`] so the block-timestep integrator
+    /// [`step_block`] can apply it each sub-step: PdV vapor cooling (thermal → kinetic as the plume
+    /// expands), Stefan–Boltzmann radiation, the solid↔vapor phase flip, and contact-dissipation heating.
+    /// Uses the SPH density cached by the preceding `accelerations` call and the current velocities, so it
+    /// must run right after a force evaluation. Cheap where there is no vapor/contact (isolated grains).
+    fn apply_thermo(&mut self, dt: f64) {
+        // One short-range neighbour grid for the vapor PdV + contact-dissipation passes (docs/30):
+        // O(N) not O(N²), built at the post-step positions and shared by both.
+        let step_pos: Vec<DVec3> = self.particles.iter().map(|b| b.pos).collect();
+        let step_grid = crate::neighbors::NeighborGrid::build(&step_pos, self.short_range_cell());
+        // PdV EXPANSION WORK (docs/26/27): as the vapor plume expands, its pressure does work on the flow —
+        // internal heat converts to bulk kinetic energy (the launch) and the gas COOLS. The SPH energy
+        // equation du_i/dt = (P_i/ρ_i²)·Σ_j m_j (v_i−v_j)·∇_i W is the exact conservative partner of the
+        // pressure force in `accelerations`: the KE it injects is paid for out of temperature, so total
+        // energy is conserved and the 80,000 K trapped heat becomes expansion instead of just sitting.
+        if self.vapor_rs > 0.0 && self.vapor_h > 0.0 && !self.vapor_rho.is_empty() {
+            let h = self.vapor_h;
+            let mut du = vec![0.0f64; self.particles.len()];
+            step_grid.for_each_pair(&step_pos, |i, j| {
+                if self.vapor.get(i) != Some(&true) || self.vapor.get(j) != Some(&true) {
+                    return;
+                }
+                let dv = self.particles[i].pos - self.particles[j].pos;
+                let r = dv.length();
+                if r >= h || r < 1.0e-9 {
+                    return;
+                }
+                let (ri, rj) = (self.vapor_rho[i], self.vapor_rho[j]);
+                if ri <= 0.0 || rj <= 0.0 {
+                    return;
+                }
+                let ti = (self.temps[i] as f64 - self.vapor_latent_k).max(1.0); // latent-excluded (docs/28)
+                let tj = (self.temps[j] as f64 - self.vapor_latent_k).max(1.0);
+                let pi = ri * self.vapor_rs * ti;
+                let pj = rj * self.vapor_rs * tj;
+                let grad = (dv / r) * crate::atmosphere::sph_dw(r, h);
+                let dwv = (self.particles[i].vel - self.particles[j].vel).dot(grad); // (v_i−v_j)·∇_iW
+                du[i] += (pi / (ri * ri)) * self.particles[j].mass * dwv;
+                du[j] += (pj / (rj * rj)) * self.particles[i].mass * dwv;
+            });
+            let c = self.specific_heat.max(1.0);
+            for i in 0..self.particles.len() {
+                if self.vapor.get(i) == Some(&true) {
+                    self.temps[i] = ((self.temps[i] as f64) + du[i] * dt / c).max(2.7) as f32;
+                }
+            }
+        }
         // RADIATIVE COOLING (Stefan–Boltzmann): hot matter in vacuum sheds σ·ε·A·T⁴ — a white-hot
         // fragment visibly fades over hours-days (Robin: "the white-hot fragments never seem to cool" —
         // they had no radiative channel at all). Grain surface area from the contact radius (the
@@ -740,7 +1000,7 @@ impl Aggregate {
         }
         // PHASE (docs/26): hotter than the boil point ⇒ vapor; cooled below ⇒ condensed. The flip is
         // a state change, not a force — the pair law above reads it.
-        if self.contact_gas.is_some() {
+        if self.contact_gas.is_some() || self.vapor_rs > 0.0 {
             for (i, t) in self.temps.iter().enumerate() {
                 self.vapor[i] = (*t as f64) > self.boil_k;
             }
@@ -751,31 +1011,38 @@ impl Aggregate {
         if let Some(c) = self.contact {
             let heat_per_k = self.specific_heat; // J/(kg·K)
             let m_ref = self.contact_ref_mass;
-            let p = &self.particles;
-            let mut d_temp = vec![0.0f64; p.len()];
-            for i in 0..p.len() {
-                for j in (i + 1)..p.len() {
-                    // Specific power × ref mass = the pair's actual dissipated watts; split half-half,
-                    // each side's temperature rise divides by ITS OWN heat capacity (m·c). Mirror the force
-                    // law: a per-grain (mixed-material) pair dissipates via the SAME mixed law, so the heat
-                    // accounting matches the force that produced it (energy conserved, not double-counted).
-                    let mixed_law;
-                    let law: &crate::granular::Contact = if !self.per_grain_contact.is_empty() {
-                        mixed_law = self.per_grain_contact[i].mix(&self.per_grain_contact[j]);
-                        &mixed_law
-                    } else {
-                        &c
-                    };
-                    let pw = crate::granular::contact_dissipation(
-                        p[i].pos, p[i].vel, p[j].pos, p[j].vel, law,
-                    ) * m_ref;
-                    if pw > 0.0 {
-                        let e_half = 0.5 * pw * dt;
-                        d_temp[i] += e_half / (p[i].mass.max(1.0e-30) * heat_per_k);
-                        d_temp[j] += e_half / (p[j].mass.max(1.0e-30) * heat_per_k);
-                    }
+            let mut d_temp = vec![0.0f64; self.particles.len()];
+            let sph_vapor = self.vapor_rs > 0.0 && self.vapor_h > 0.0;
+            step_grid.for_each_pair(&step_pos, |i, j| {
+                // A vapor↔vapor pair interacts by CONSERVATIVE SPH pressure (no contact force above), so it
+                // dissipates NOTHING — skip it, exactly as the force loop does, or we would create heat from
+                // a force that no longer acts (spurious energy, over-heating the plume).
+                if sph_vapor && self.vapor.get(i) == Some(&true) && self.vapor.get(j) == Some(&true) {
+                    return;
                 }
-            }
+                // Specific power × ref mass = the pair's actual dissipated watts; split half-half, each
+                // side's temperature rise divides by ITS OWN heat capacity (m·c). Same mixed law as the
+                // force, so the heat accounting matches the force that produced it (energy conserved).
+                let mixed_law;
+                let law: &crate::granular::Contact = if !self.per_grain_contact.is_empty() {
+                    mixed_law = self.per_grain_contact[i].mix(&self.per_grain_contact[j]);
+                    &mixed_law
+                } else {
+                    &c
+                };
+                let pw = crate::granular::contact_dissipation(
+                    self.particles[i].pos,
+                    self.particles[i].vel,
+                    self.particles[j].pos,
+                    self.particles[j].vel,
+                    law,
+                ) * m_ref;
+                if pw > 0.0 {
+                    let e_half = 0.5 * pw * dt;
+                    d_temp[i] += e_half / (self.particles[i].mass.max(1.0e-30) * heat_per_k);
+                    d_temp[j] += e_half / (self.particles[j].mass.max(1.0e-30) * heat_per_k);
+                }
+            });
             for (t, d) in self.temps.iter_mut().zip(d_temp.iter()) {
                 *t += *d as f32;
             }
@@ -853,6 +1120,222 @@ impl Aggregate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn particle_timesteps_shrink_with_acceleration() {
+        // docs/30 stage 3 criterion: a violently-accelerated particle gets a SMALLER dt than a quiescent
+        // one (the whole point — it must be updated more often), positive/finite for real accel, and an
+        // unaccelerated body is unconstrained (∞). Free-fall scaling dt ∝ √(ε/|a|) with velocity 0.
+        let ps = vec![
+            Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: 1.0 },
+            Body { pos: DVec3::X, vel: DVec3::ZERO, mass: 1.0 },
+            Body { pos: DVec3::X * 2.0, vel: DVec3::ZERO, mass: 1.0 },
+        ];
+        let mut agg = Aggregate::new(ps, 1.0); // softening ε = 1
+        agg.self_gravity = false;
+        let acc = vec![DVec3::X * 100.0, DVec3::X * 1.0, DVec3::ZERO]; // violent, gentle, none
+        let dt = agg.particle_timesteps(&acc, 0.05);
+        assert!(dt[0] < dt[1], "violent particle needs a smaller dt: {} !< {}", dt[0], dt[1]);
+        assert!(dt[0] > 0.0 && dt[0].is_finite(), "positive finite dt for real accel");
+        assert!(dt[2].is_infinite(), "unaccelerated body is unconstrained");
+        assert!((dt[1] / dt[0] - 10.0).abs() < 1e-6, "dt ∝ 1/√|a|: 100× accel ⇒ dt/10");
+    }
+
+    #[test]
+    #[ignore = "block-timestep speedup benchmark — run with --ignored"]
+    fn step_block_speedup_bench() {
+        use std::time::Instant;
+        // The giant-impact aftermath shape: a few violent particles (a dense fast core) among many
+        // quiescent orbiters (a sparse slow halo) — a wide range of dynamical times. Gravity only, so step()
+        // is a pure mechanical KDK and the comparison is apples-to-apples.
+        let mut s = 0x9911_2233u64;
+        let mut rng = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 40) as f64 / (1u64 << 24) as f64 - 0.5
+        };
+        let mut ps = Vec::new();
+        for _ in 0..2000 {
+            let dir = DVec3::new(rng(), rng(), rng()).normalize_or_zero();
+            ps.push(Body { pos: dir * (5.0e6 + rng().abs() * 5.0e6), vel: DVec3::ZERO, mass: 1.0e18 });
+        }
+        for _ in 0..200 {
+            ps.push(Body { pos: DVec3::new(rng(), rng(), rng()) * 1.0e5, vel: DVec3::ZERO, mass: 1.0e20 });
+        }
+        let (soft, dt, eta) = (3.0e4, 40.0, 0.05);
+        let mut probe = Aggregate::new(ps.clone(), soft);
+        let acc0 = probe.accelerations();
+        let tmin = probe.particle_timesteps(&acc0, eta).iter().cloned().fold(f64::INFINITY, f64::min);
+        let n_global = (dt / tmin).ceil().max(1.0) as usize;
+        let mut g = Aggregate::new(ps.clone(), soft);
+        let mut gacc = g.accelerations();
+        let t0 = Instant::now();
+        for _ in 0..n_global {
+            g.step(&mut gacc, dt / n_global as f64);
+        }
+        let t_global = t0.elapsed().as_secs_f64();
+        let mut b = Aggregate::new(ps, soft);
+        let t1 = Instant::now();
+        b.step_block(dt, eta);
+        let t_block = t1.elapsed().as_secs_f64();
+        println!("\nN=2200 (2000 slow halo + 200 fast core), dt={dt}, fastest needs {n_global} sub-steps");
+        println!("global sub-stepping: {:.1} ms", t_global * 1e3);
+        println!(
+            "block-timestep:      {:.1} ms   → {:.1}× faster",
+            t_block * 1e3,
+            t_global / t_block.max(1e-9)
+        );
+    }
+
+    #[test]
+    fn step_block_conserves_energy_and_matches_global_dt() {
+        // docs/30 stage 3: the block integrator must (a) reduce EXACTLY to the global KDK step() when every
+        // particle shares a level, and (b) conserve energy on a mixed-level self-gravitating system over
+        // many steps (the guarantee that block-stepping doesn't corrupt the disk).
+        let ps = cloud(4, 1.0e5, 1.0e20); // 64-body gravity cloud (contact None ⇒ step() is pure KDK)
+        let soft = 3.0e4;
+        // (a) uniform level ⇒ identical to a single global step().
+        let mut a1 = Aggregate::new(ps.clone(), soft);
+        let mut a2 = Aggregate::new(ps.clone(), soft);
+        let mut acc = a1.accelerations();
+        a1.step(&mut acc, 1.0); // tiny dt ⇒ every particle is level 0
+        a2.step_block(1.0, 0.05);
+        let maxdiff = a1
+            .particles
+            .iter()
+            .zip(&a2.particles)
+            .map(|(x, y)| (x.pos - y.pos).length() + (x.vel - y.vel).length())
+            .fold(0.0, f64::max);
+        assert!(maxdiff < 1.0e-6, "block == global step at uniform level (diff {maxdiff:.3e})");
+        // (b) mixed levels, many steps ⇒ energy conserved.
+        let energy = |a: &Aggregate| -> f64 {
+            let ke: f64 = a.particles.iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
+            let s2 = a.softening * a.softening;
+            let mut pe = 0.0;
+            for i in 0..a.particles.len() {
+                for j in (i + 1)..a.particles.len() {
+                    let d2 = (a.particles[i].pos - a.particles[j].pos).length_squared() + s2;
+                    pe -= crate::orbit::G * a.particles[i].mass * a.particles[j].mass / d2.sqrt();
+                }
+            }
+            ke + pe
+        };
+        let mut a3 = Aggregate::new(ps, soft);
+        let e0 = energy(&a3);
+        for _ in 0..400 {
+            a3.step_block(120.0, 0.05); // dt > several particles' criterion ⇒ genuinely mixed levels
+        }
+        let e1 = energy(&a3);
+        assert!(
+            (e1 - e0).abs() < 0.03 * e0.abs().max(1.0),
+            "block leapfrog conserves energy: {e0:.4e} → {e1:.4e} ({:.2}%)",
+            100.0 * (e1 - e0) / e0.abs()
+        );
+    }
+
+    #[test]
+    fn contact_grid_matches_brute_force() {
+        // docs/30 stage 1b invariant: the grid-accelerated contact force must EQUAL the O(N²) brute force.
+        // Summation order differs, so it is identical to floating point (a tight tolerance), not bit-exact —
+        // which is all conservation needs. Random overlapping cloud, contact only (no gravity/boundary/vapor).
+        let mats = crate::materials::load();
+        let basalt = crate::materials::index_of(&mats, "basalt");
+        let (m, r) = (1.0e6, 0.5);
+        let contact = crate::granular::contact_from_material(&mats[basalt], r, m);
+        let mut s = 0x51ED_2701_ABCD_1234u64;
+        let mut rng = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 40) as f64 / (1u64 << 24) as f64 - 0.5 // in [-0.5, 0.5)
+        };
+        let spacing = 0.7 * 2.0 * r; // < touch ⇒ many overlapping pairs
+        let side = 9; // 729 grains > BRUTE_BELOW ⇒ exercises the grid's CELL path, not the brute fallback
+        let mut ps = Vec::new();
+        for x in 0..side {
+            for y in 0..side {
+                for z in 0..side {
+                    let base = DVec3::new(x as f64, y as f64, z as f64) * spacing;
+                    let jitter = DVec3::new(rng(), rng(), rng()) * (0.3 * r);
+                    ps.push(Body {
+                        pos: base + jitter,
+                        vel: DVec3::new(rng(), rng(), rng()) * 10.0,
+                        mass: m,
+                    });
+                }
+            }
+        }
+        let n = ps.len();
+        let mut agg = Aggregate::new(ps.clone(), 0.0).with_contact(contact, m);
+        agg.self_gravity = false; // isolate the contact force
+        let grid_acc = agg.accelerations();
+        // Brute-force reference: the same law, O(N²).
+        let mut brute = vec![DVec3::ZERO; n];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let f = crate::granular::contact_accel(ps[i].pos, ps[i].vel, ps[j].pos, ps[j].vel, &contact)
+                    * m;
+                brute[i] += f / ps[i].mass;
+                brute[j] -= f / ps[j].mass;
+            }
+        }
+        let mut max_rel = 0.0f64;
+        for i in 0..n {
+            let d = (grid_acc[i] - brute[i]).length();
+            max_rel = max_rel.max(d / brute[i].length().max(1.0e-30).max(1.0));
+        }
+        assert!(max_rel < 1.0e-9, "grid contact accel must match brute force (max rel err {max_rel:.2e})");
+        // Sanity: the cloud actually has overlaps (else the test proves nothing).
+        assert!(brute.iter().any(|a| a.length() > 1.0), "test cloud must have real contact forces");
+    }
+
+    #[test]
+    fn vapor_sph_expands_and_cools_conserving_energy() {
+        // docs/26/27 real vapor pressure: a hot, packed blob with NO gravity/contact must EXPAND under its
+        // own SPH pressure while the PdV energy equation COOLS it — internal heat → bulk kinetic, TOTAL
+        // energy conserved, and (started at rest) momentum stays ~0. This is the mechanism that launches
+        // the proto-lunar plume instead of trapping the impact's heat as a dead 80,000 K.
+        let spacing = 1.0;
+        let ps = cloud(3, spacing, 1.0); // 27 equal-mass parcels
+        let (c, rs, h, t0) = (840.0f64, 100.0f64, 2.5 * spacing, 6000.0f32);
+        let mut agg = Aggregate::new(ps, 0.0).with_vapor_sph(rs, h, 0.0).with_specific_heat(c);
+        agg.self_gravity = false; // isolate the vapor pressure from gravity
+        agg.boil_k = 0.0; // keep parcels flagged vapor as they cool (temp stays > 0)
+        agg.temps = vec![t0; agg.particles.len()];
+        agg.vapor = vec![true; agg.particles.len()];
+        let com = |a: &Aggregate| {
+            a.particles.iter().map(|p| p.pos).sum::<DVec3>() / a.particles.len() as f64
+        };
+        let rms = |a: &Aggregate, cm: DVec3| {
+            (a.particles.iter().map(|p| (p.pos - cm).length_squared()).sum::<f64>()
+                / a.particles.len() as f64)
+                .sqrt()
+        };
+        let energy = |a: &Aggregate| {
+            let ke: f64 = a.particles.iter().map(|p| 0.5 * p.mass * p.vel.length_squared()).sum();
+            let u: f64 =
+                a.particles.iter().zip(a.temps.iter()).map(|(p, &t)| p.mass * c * t as f64).sum();
+            ke + u
+        };
+        let cm0 = com(&agg);
+        let (r0, e0) = (rms(&agg, cm0), energy(&agg));
+        let mut acc = agg.accelerations();
+        for _ in 0..80 {
+            agg.step(&mut acc, 1.0e-4);
+        }
+        let cm1 = com(&agg);
+        let (r1, e1) = (rms(&agg, cm1), energy(&agg));
+        let tmean = agg.temps.iter().map(|&t| t as f64).sum::<f64>() / agg.temps.len() as f64;
+        assert!(r1 > 1.05 * r0, "vapor must expand: rms {r0:.3} → {r1:.3}");
+        assert!(tmean < t0 as f64, "vapor must cool as it expands: {t0} → {tmean:.0} K");
+        assert!(
+            (e1 - e0).abs() < 0.03 * e0,
+            "total energy (KE + internal) conserved: {e0:.4e} → {e1:.4e}"
+        );
+        let p1: DVec3 = agg.particles.iter().map(|p| p.vel * p.mass).sum();
+        assert!(p1.length() < 1.0e-6 * agg.particles.len() as f64, "momentum stays ~0 (started at rest)");
+    }
 
     /// A small cubic cloud of equal-mass particles, at rest.
     fn cloud(side: i32, spacing: f64, mass: f64) -> Vec<Body> {

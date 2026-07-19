@@ -20,13 +20,19 @@
 // exercise them. (A future `matter-core` crate split, per docs, removes the need for this.)
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
+mod accretion;
 mod aggregate;
 mod atmosphere;
+mod bhtree;
 mod body;
 mod damage;
 mod emission;
+mod eos;
 mod granular;
+#[cfg(target_arch = "wasm32")] // WebGPU host for sph_step.wgsl; only the browser scene uses it (mod app is
+mod gpu_sph; //                    wasm-only). The native SPH reference lives in tools/sph-verify + impact-run.
 mod gravity;
+mod hydrostatic;
 mod impact;
 mod planet;
 mod tides;
@@ -35,6 +41,7 @@ mod isotropy;
 mod materials;
 mod matter;
 mod mesher;
+mod neighbors;
 mod orbit;
 mod texture;
 mod world;
@@ -91,6 +98,14 @@ mod app {
     /// cap is smooth, so the mild depth imprecision far out is acceptable; the near patch is fine.
     const CAMERA_FAR: f32 = 30_000.0;
     const CAMERA_NEAR: f32 = 0.5;
+    // SPACE-BAND scene resolution — DECOUPLED from impact.rs's test-facing DEBRIS_N/CAP_N so the on-screen
+    // disk can run at the high N the fluid disk actually needs (the grid + Barnes–Hut of docs/30 made this
+    // affordable) WITHOUT dragging the native test suite up to high N. The scene's time-LOD keeps it
+    // interactive if a step gets heavy (observable time dilates rather than the frame stalling). Trade
+    // on-screen disk richness ↔ browser step-rate by bumping these; keep CAP:DEBRIS ≈ 2:1 (docs/28 item 4).
+    const SCENE_DEBRIS_N: usize = 512;
+    const SCENE_CAP_N: usize = 1024;
+    const SCENE_IMPACT_N: usize = SCENE_DEBRIS_N + SCENE_CAP_N;
 
     /// Cohesive-bond geometry + stability for the steel probe (`docs/23`). The bond stiffness is the
     /// material's REAL elastic modulus (k = E·L for a lattice of spacing L) — rigidity is cohesive
@@ -2332,6 +2347,11 @@ mod app {
     const EARTH_HELIO_SPEED: f64 = 29_780.0; // m/s (Earth's mean heliocentric speed = sqrt(G·M_sun/AU))
                                              // Metres -> display units: Earth's radius becomes 1.0, so the Moon sits ~60 units out.
     const DISPLAY_SCALE: f64 = 1.0 / EARTH_RADIUS_M;
+    /// Visual scale for the GPU SPH impact particles (docs/33 stage 5): the sub-Earth proto-bodies (~5000 km)
+    /// are much smaller than the Earth–Moon frame, so the particle field is drawn at an enlarged scale (Earth's
+    /// ~5000 km radius → a few display units) and the camera zooms in — a scene-framing choice, the physics is
+    /// unchanged (positions stay Earth-relative metres; only this render multiplier differs from DISPLAY_SCALE).
+    const SPH_VIS_SCALE: f64 = 7.0e-7;
     // Fast-forward so a full ~27.3-day orbit plays in ~20 s. Symplectic Verlet stays stable with many
     // substeps per frame (dt ~= 125 s at this scale => thousands of steps per orbit).
     const ORBIT_TIME_SCALE: f64 = 118_000.0; // sim-seconds per real-second
@@ -2365,6 +2385,15 @@ mod app {
         //                           order as positions (a live read desynced after drain's swap_remove)
         srcs: Vec<u8>,            // per-fragment provenance (Earth vs Theia) — same lagged order (docs/28 step 1)
         shattered: bool,
+    }
+
+    /// Setup phase of the GPU SPH impact (docs/35): relax the two bodies on the GPU (placed far apart so each
+    /// settles under its own gravity), read them back, assemble the collision, then step the dynamics.
+    #[derive(Clone, Copy)]
+    enum SphPhase {
+        Relaxing(u32), // GPU `cs_relax` steps completed so far
+        Assembling,    // relax done; awaiting the async read-back to compute the collision geometry
+        Dynamics,      // colliding — KDK substeps + read-back
     }
 
     /// The orbital ("space band") demo handle exposed to JavaScript.
@@ -2464,10 +2493,24 @@ mod app {
         debris_acc: Vec<glam::DVec3>,
         /// A pool of sphere-render slots for the fragments (one draw each, like `moon_unis`).
         debris_unis: Vec<UniformSlot>,
+        // --- GPU SPH deformable-Earth impact in the browser (docs/33 stage 4c.4) ---
+        /// The GPU SPH particle system (built + relaxed on the CPU at `start_gpu_impact`, then stepped on the
+        /// GPU each frame via the verified `sph_step.wgsl` kernels). `None` until triggered.
+        gpu_sph: Option<crate::gpu_sph::GpuSph>,
+        sph_pipeline: wgpu::RenderPipeline, // instanced billboard particles (sph_render.wgsl)
+        sph_cam: UniformSlot,               // view-proj + Earth display origin + scale for the particle shader
+        sph_active: bool,
+        sph_dt: f32, // fixed integration timestep (chosen at build; WebGPU forbids the adaptive read-back)
+        sph_soft: f64, // gravitational softening (for the energy diagnostic's PE term)
+        /// Latest async read-back of the GPU SPH particles (one frame behind) — for the HUD/disk-stats and
+        /// (later) the momentum mirror. Empty until the first read-back completes.
+        sph_snapshot: Vec<crate::gpu_sph::SphParticle>,
+        /// The GPU impact's setup/step phase (relax on GPU → assemble collision → dynamics). See `advance`.
+        sph_phase: SphPhase,
     }
 
     // Moon-shot Stage A constants.
-    use crate::impact::{DEBRIS_N, IMPACT_N}; // the mutual-impact builder (physics of record, impact.rs)
+    // scene impact resolution uses SCENE_DEBRIS_N/SCENE_CAP_N (module consts), not the test-facing const.
     /// Earth rendered as a shell of particles (the honest low-res look, docs/15): a smooth sphere is a
     /// representation LIE once matter can be excavated — it hides the damage. The shell is the
     /// VISUALIZATION of the un-materialized bulk summary (whose physics is the boundary + gravity
@@ -2563,7 +2606,7 @@ mod app {
                 )],
             });
             let num_moons = num_moons.clamp(1, 2) as usize;
-            let debris_unis: Vec<UniformSlot> = (0..IMPACT_N)
+            let debris_unis: Vec<UniformSlot> = (0..SCENE_IMPACT_N)
                 .map(|_| make_space_uniform(&device, &bind_layout))
                 .collect();
             let shell_unis: Vec<UniformSlot> = (0..SHELL_N)
@@ -2583,6 +2626,23 @@ mod app {
                 .map(|_| make_space_uniform(&device, &bind_layout))
                 .collect();
             let pipeline = build_space_pipeline(&device, &bind_layout, config.format);
+            // GPU SPH deformable-Earth impact (stage 4c.4): its instanced-particle pipeline + a camera
+            // uniform (reuses the uniform-only `bind_layout`; the buffer is sized for `SphCam`).
+            let sph_pipeline = build_sph_pipeline(&device, &bind_layout, config.format);
+            let sph_cam = {
+                let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("sph-cam"),
+                    size: std::mem::size_of::<crate::gpu_sph::SphCam>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sph-cam-bind"),
+                    layout: &bind_layout,
+                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+                });
+                UniformSlot { buf, bind }
+            };
 
             // The real three-body system in SI units: [Sun, Earth, Moon] (orbit.rs). The Earth carries
             // its true heliocentric velocity and the Moon co-moves with it plus its own orbital speed,
@@ -2711,6 +2771,14 @@ mod app {
                 real_accum: 0.0,
                 debris_acc: Vec::new(),
                 debris_unis,
+                gpu_sph: None,
+                sph_pipeline,
+                sph_cam,
+                sph_active: false,
+                sph_dt: 0.0,
+                sph_soft: 1.0,
+                sph_snapshot: Vec::new(),
+                sph_phase: SphPhase::Dynamics,
             })
         }
 
@@ -3027,6 +3095,22 @@ mod app {
         /// first-order), demote everything else into Earth (it has landed or will), retire the
         /// particle cloud, and hand evolution to the validated secular law.
         pub fn enter_geologic_time(&mut self) {
+            // GPU-path hand-off (docs/35 stage 5, 2c): if the GPU SPH impact is running, promote its orbiting
+            // disk's bound clumps to moonlets around the real Earth, retire the GPU sim, and go geologic — the
+            // GPU replacement for the Aggregate hand-off below.
+            if self.sph_active {
+                let moonlets = crate::gpu_sph::disk_moonlets(&self.sph_snapshot, EARTH_RADIUS_M);
+                if moonlets.is_empty() {
+                    return; // no orbiting disk yet — keep the impact running rather than blanking the scene
+                }
+                self.geo_moonlets = moonlets;
+                self.sph_active = false;
+                self.gpu_sph = None;
+                self.sph_phase = SphPhase::Dynamics;
+                self.camera.zoom = 1.0; // back out from the impact framing to the Earth–Moon geologic view
+                self.geologic = true;
+                return;
+            }
             let Some(agg) = self.moon_debris.as_ref() else { return };
             let earth = self.bodies[1];
             let mu = crate::orbit::G * earth.mass;
@@ -3165,6 +3249,54 @@ mod app {
             (self.bodies[2].pos - self.bodies[1].pos).length() / 1000.0
         }
 
+        /// Start the GPU deformable-Earth giant impact (docs/33 stage 4c.4): build + relax two differentiated
+        /// EOS bodies on the CPU, place them on the oblique giant-impact geometry, and hand the per-frame
+        /// dynamics to the GPU SPH stepper (the verified `sph_step.wgsl` kernels — same physics as the offline
+        /// `tools/impact-run`). The scene then renders the live particle field instead of the rigid-Earth
+        /// debris model. Call from JS on the `OrbitDemo` handle, like `drop_moon()`.
+        pub fn start_gpu_impact(&mut self) {
+            // Build the two bodies UNRELAXED and FAR APART, and RELAX them on the GPU (`cs_relax`, fast — the
+            // measured cure for the dispersal was proper relaxation, docs/35). `advance` runs the relax steps,
+            // reads back, assembles the collision, then steps the dynamics. N is higher than the old CPU-relax
+            // path could afford (GPU relax + stepping is cheap).
+            let eos = [crate::gpu_sph::SphEos::basalt(), crate::gpu_sph::SphEos::iron()];
+            let (particles, softening, relax_dt) = crate::gpu_sph::build_far_apart(2400, 400);
+            self.sph_soft = softening as f64;
+            let cap = particles.len() as u32;
+            let mut sph = crate::gpu_sph::GpuSph::new(&self.device, cap);
+            sph.upload(&self.queue, &particles, &eos, softening);
+            sph.set_dt(&self.queue, relax_dt, 0.94); // damped relaxation toward hydrostatic equilibrium
+            sph.set_av(&self.queue, 0.0, 0.0); // no artificial viscosity during relax (matches the CPU relax)
+            self.gpu_sph = Some(sph);
+            self.sph_dt = relax_dt;
+            self.sph_active = true;
+            self.sph_snapshot.clear();
+            self.sph_phase = SphPhase::Relaxing(0);
+            self.focus = 1; // centre on Earth (the particle system sits at the display origin)
+            self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
+        }
+
+        /// Disk-provenance stats of the live GPU SPH impact (docs/33 stage 5), computed from the latest
+        /// read-back: orbiting-disk mass (M☾), its Earth %, remnant radius, escaped mass, and the largest
+        /// self-bound clump (Moon candidate). `"null"` before the first read-back. JS reads this for the HUD.
+        pub fn gpu_disk_stats_json(&self) -> String {
+            if !self.sph_active {
+                return String::from("null");
+            }
+            crate::gpu_sph::disk_stats_json(&self.sph_snapshot)
+        }
+
+        /// Energy diagnostic of the live GPU impact (docs/35): kinetic / internal / gravitational-PE / total
+        /// (J), from the latest read-back. A steadily rising total = the integrator is injecting energy (the
+        /// remnant then puffs apart instead of orbiting). `"null"` before the first read-back.
+        pub fn gpu_energy_json(&self) -> String {
+            if !self.sph_active || self.sph_snapshot.is_empty() {
+                return String::from("null");
+            }
+            let (ke, ie, pe) = crate::gpu_sph::total_energy(&self.sph_snapshot, self.sph_soft);
+            format!("{{\"ke\":{:.4e},\"ie\":{:.4e},\"pe\":{:.4e},\"tot\":{:.4e}}}", ke, ie, pe, ke + ie + pe)
+        }
+
         /// Advance the PHYSICS by `real_dt` wall-clock seconds. Fixed sim-timestep substeps whose
         /// COUNT (not size) varies with the wall clock — so the physics rate is independent of the
         /// display frame rate (a 30 fps client and a 120 fps client simulate the same world), and the
@@ -3173,6 +3305,68 @@ mod app {
         /// the physics with an oversized step — time slows before truth breaks.
         pub fn advance(&mut self, real_dt: f64) {
             let real_dt = real_dt.clamp(0.0, 0.25); // tab-sleep / hiccup guard
+            // GPU SPH deformable-Earth impact owns the frame while active (docs/33 stage 4c.4): encode a batch
+            // of KDK substeps on the GPU and skip the CPU orbital physics. Fixed dt (WebGPU forbids the
+            // adaptive read-back); ~8 substeps/frame plays the ~10 h aftermath out over a few seconds.
+            if self.sph_active {
+                match self.sph_phase {
+                    // RELAX (on the GPU): the two bodies sit far apart and settle under their own gravity via
+                    // `cs_relax`. Fast enough to run many steps/frame; on completion, kick off the read-back.
+                    SphPhase::Relaxing(steps) => {
+                        const CHUNK: u32 = 300;
+                        const TARGET: u32 = 2400; // AV-free relax is stable at the normal Courant dt ⇒ few steps
+                        if let Some(sph) = self.gpu_sph.as_mut() {
+                            let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-relax") });
+                            sph.encode_relax(&mut enc, CHUNK);
+                            self.queue.submit(std::iter::once(enc.finish()));
+                            let done = steps + CHUNK >= TARGET;
+                            if done {
+                                sph.begin_readback(&self.device, &self.queue);
+                                self.sph_phase = SphPhase::Assembling;
+                            } else {
+                                self.sph_phase = SphPhase::Relaxing(steps + CHUNK);
+                            }
+                        }
+                        return;
+                    }
+                    // ASSEMBLE: once the relaxed bodies are read back, compute the collision geometry from the
+                    // ACTUAL relaxed radii, place them on the impact, and switch to the shock-safe dynamics dt.
+                    SphPhase::Assembling => {
+                        let relaxed = self.gpu_sph.as_mut().and_then(|s| s.take_readback());
+                        if let Some(relaxed) = relaxed {
+                            let (particles, eos, softening, dt) = crate::gpu_sph::assemble_from_relaxed(&relaxed);
+                            self.sph_soft = softening as f64;
+                            self.sph_dt = dt;
+                            self.sph_snapshot.clear();
+                            if let Some(sph) = self.gpu_sph.as_mut() {
+                                sph.upload(&self.queue, &particles, &eos, softening);
+                                sph.set_dt(&self.queue, dt, 1.0);
+                                sph.set_av(&self.queue, 1.0, 2.0); // restore shock-capture AV for the impact
+                            }
+                            self.sph_phase = SphPhase::Dynamics;
+                        }
+                        return;
+                    }
+                    // DYNAMICS: KDK substeps on the GPU + async read-back for the HUD/disk-stats/energy. The dt
+                    // is the shock-safe FIXED value from `assemble_from_relaxed` — MEASURED to conserve total
+                    // energy to ~0.01 % (KE→IE shock heating), so the well-relaxed bodies form a bound remnant +
+                    // disk rather than dispersing (docs/35). An in-kernel per-substep adaptive dt (to trim the
+                    // residual escape) is the next refinement.
+                    SphPhase::Dynamics => {
+                        const SPH_SUBSTEPS: u32 = 20;
+                        if let Some(sph) = self.gpu_sph.as_mut() {
+                            let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-step") });
+                            sph.encode_kdk(&mut enc, SPH_SUBSTEPS);
+                            self.queue.submit(std::iter::once(enc.finish()));
+                            if let Some(snap) = sph.take_readback() {
+                                self.sph_snapshot = snap;
+                            }
+                            sph.begin_readback(&self.device, &self.queue);
+                        }
+                        return;
+                    }
+                }
+            }
             self.phys_clock += real_dt;
             if self.geologic {
                 // Millennia per second: the validated secular law in 50-year strides (exactly
@@ -3183,7 +3377,7 @@ mod app {
                 let mut left = years;
                 while left > 0.0 {
                     let step = left.min(50.0);
-                    crate::tides::secular_step(
+                    let (_merged, shed) = crate::tides::secular_step(
                         &mut self.geo_moonlets,
                         &mut self.spin_l,
                         self.bodies[1].mass,
@@ -3191,6 +3385,9 @@ mod app {
                         crate::tides::EARTH_K2_OVER_Q,
                         step * year_s,
                     );
+                    // A moonlet that decayed inside the Roche limit was shredded: its mass rains onto Earth
+                    // (angular momentum already added to the spin in secular_step). Mass is conserved.
+                    self.bodies[1].mass += shed;
                     left -= step;
                 }
                 self.sim_since_impact += years * year_s;
@@ -3336,17 +3533,35 @@ mod app {
                     } else {
                         crate::planet::moon()
                     };
-                    let (agg, acc0) = crate::impact::build_impact_debris_between(
+                    // Proto-Earth's pre-impact spin (docs/31): its excavated mantle is born co-rotating,
+                    // so a fast primordial spin flings Earth material into the disk (the isotopic-crisis
+                    // lever). `self.spin_l` is the ANGULAR MOMENTUM; convert to angular velocity ω = L/I
+                    // with the solid-sphere I = 2/5 M R² before the cap materialises (the impact then
+                    // adds its own spin to Earth on top).
+                    let earth_i = 0.4 * self.bodies[1].mass * EARTH_RADIUS_M * EARTH_RADIUS_M;
+                    let earth_omega =
+                        if earth_i > 0.0 { self.spin_l / earth_i } else { glam::DVec3::ZERO };
+                    let (agg, acc0) = crate::impact::build_impact_debris_scaled(
                         &self.mats, site, earth_pos, earth_vel, moon_mass, v_contact,
                         &impactor_profile, &crate::planet::earth(), EARTH_MASS, EARTH_RADIUS_M,
+                        SCENE_DEBRIS_N, SCENE_CAP_N, earth_omega,
                     );
                     self.debris_acc = acc0;
-                    self.moon_debris = Some(agg);
                     self.impact_site_rel = Some(site - earth_pos); // crater mask, in Earth's frame
-                    // The materialized cap LEFT Earth's bulk: its mass moves from the summary body to
-                    // the particles (it was double-counted — Earth pulled ~22% too hard at Theia scale).
-                    let cap_mass = moon_mass * (crate::impact::CAP_N as f64 / DEBRIS_N as f64);
+                    // The materialized cap LEFT Earth's bulk: move its mass from the summary body to the
+                    // particles (else double-counted). Use the ACTUAL materialized target mass — summing the
+                    // SOURCE_TARGET grains — now that the cap is physical ρ·V (docs/28 item 4); the old
+                    // moon_mass·CAP_N/DEBRIS_N formula assumed the fudged 2×-impactor cap and over-subtracts
+                    // ~6.5×, under-massing Earth on screen.
+                    let cap_mass: f64 = agg
+                        .particles
+                        .iter()
+                        .zip(agg.source.iter())
+                        .filter(|(_, &s)| s == crate::aggregate::SOURCE_TARGET)
+                        .map(|(p, _)| p.mass)
+                        .sum();
                     self.bodies[1].mass -= cap_mass;
+                    self.moon_debris = Some(agg);
                     // The impactor IS the debris now — its matter exists exactly once. Reduce the parked
                     // point mass to nothing (a 1 kg marker keeps the body-array shape) so its mass isn't
                     // counted twice in the N-body (Theia is 11% of Earth — a real double-count).
@@ -3394,7 +3609,12 @@ mod app {
                         d * (crate::orbit::G * sun_mass * p.mass * (1.0 / (r2 * r2.sqrt()))) * dt
                     })
                     .sum();
-                agg.step(&mut self.debris_acc, dt);
+                // BLOCK-TIMESTEP advance (docs/30 stage 3): the quiescent orbiting disk coasts at the base
+                // dt while the violent shocked/vapor core sub-steps internally — so the high-N debris swarm
+                // evolves faster (the win grows with the base dt the time-LOD hands us under load). Verified
+                // to reproduce the global-dt disk (impact::birth_impact_with_step_block_reproduces_the_disk)
+                // and conserve energy; the per-substep force/heat physics is identical, just scheduled.
+                agg.step_block(dt, 0.1);
                 let p_after: glam::DVec3 =
                     agg.particles.iter().map(|p| p.vel * p.mass).sum();
                 let m_e = self.bodies[1].mass;
@@ -3478,7 +3698,7 @@ mod app {
 
         /// Record the observable state at the current physics clock (the renderer's source of truth).
         fn push_snapshot(&mut self) {
-            let frag0 = (self.impactor_mass / DEBRIS_N as f64).max(1.0);
+            let frag0 = (self.impactor_mass / SCENE_DEBRIS_N as f64).max(1.0);
             let (debris, temps, sizes, mats, srcs) = match self.moon_debris.as_ref() {
                 Some(agg) => (
                     agg.particles.iter().map(|p| p.pos).collect(),
@@ -3517,7 +3737,7 @@ mod app {
             &self,
         ) -> (Vec<glam::DVec3>, Vec<glam::DVec3>, Vec<f32>, Vec<f32>, Vec<usize>, Vec<u8>, bool) {
             if self.snaps.is_empty() {
-                let frag0 = (self.impactor_mass / DEBRIS_N as f64).max(1.0);
+                let frag0 = (self.impactor_mass / SCENE_DEBRIS_N as f64).max(1.0);
                 let (d, t, sz, mt, sc) = match self.moon_debris.as_ref() {
                     Some(a) => (
                         a.particles.iter().map(|p| p.pos).collect(),
@@ -3602,6 +3822,19 @@ mod app {
             let sun = r_bodies[0];
             let moon_r = (self.impactor_radius * DISPLAY_SCALE) as f32;
 
+            // GPU SPH impact (docs/33 stage 4c.4): push the particle-shader camera uniform. The particle
+            // system lives in an Earth-relative f32 frame, so its display origin is Earth's position in the
+            // focused frame; the shader maps each Earth-relative position through DISPLAY_SCALE and view_proj.
+            if self.sph_active {
+                let origin = ((r_bodies[1] - focus) * SPH_VIS_SCALE).as_vec3();
+                let cam = crate::gpu_sph::SphCam {
+                    view_proj: view_proj.to_cols_array_2d(),
+                    origin: [origin.x, origin.y, origin.z, 0.0],
+                    params: [SPH_VIS_SCALE as f32, 0.013, 0.0, 0.0], // (m→display scale, billboard half-size)
+                };
+                self.queue.write_buffer(&self.sph_cam.buf, 0, bytemuck::bytes_of(&cam));
+            }
+
             // Light direction = TO the real Sun from each body (per-body; the Sun is the illuminant,
             // not a hardcoded direction). So the lit hemisphere and the phases come from the geometry.
             let earth_light = (sun - r_bodies[1]).as_vec3().normalize();
@@ -3613,12 +3846,6 @@ mod app {
             let earth_center = r_bodies[1];
             let shell_spacing = EARTH_RADIUS_M * (4.0 * std::f64::consts::PI / SHELL_N as f64).sqrt();
             let shell_grain_r = ((0.62 * shell_spacing) * DISPLAY_SCALE) as f32;
-            // The crater opens only once the RENDERED clock reaches the shatter (not the physics clock).
-            let crater_site = if r_shattered {
-                self.impact_site_rel.map(|rel| earth_center + rel)
-            } else {
-                None
-            };
             let crater_r = 1.1 * self.hole_radius(); // the crater as it stands — healing shrinks it
             // Camera eye in display coordinates (relative to the focus body) — the same construction
             // as view_proj, needed for the per-grain Rayleigh view path.
@@ -3634,6 +3861,17 @@ mod app {
                 spin_axis,
                 self.spin_angle % (2.0 * std::f64::consts::PI),
             );
+            // The crater opens once the RENDERED clock reaches the shatter. It is punched into the CRUST, so
+            // it must CO-ROTATE with the surface — apply `spin_rot`, exactly like the shell grains below.
+            // Leaving it as the inertial `earth_center + rel` let the hole slide through the rotating
+            // material once the impact spun Earth up — a render-truth frame mismatch (the crater and the
+            // matter it's cut from must share one frame). `impact_site_rel` was captured at spin_angle≈0, so
+            // `spin_rot·rel` carries it forward with the crust.
+            let crater_site = if r_shattered {
+                self.impact_site_rel.map(|rel| earth_center + spin_rot * rel)
+            } else {
+                None
+            };
             // OBLATE figure: the spin flattens the planet (Radau–Darwin) — equator bulges (+f/3),
             // poles sink (−2f/3), volume-preserving to first order. At today's day it's 1/298
             // (imperceptible); at the post-impact 3.8-h day it's ~13% — a visibly squashed world.
@@ -3643,7 +3881,8 @@ mod app {
                 spin_omega_r, self.bodies[1].mass, EARTH_RADIUS_M,
             );
             for (i, uni) in self.shell_unis.iter().enumerate() {
-                let dir = spin_rot * crate::impact::fib_dir(i, SHELL_N);
+                let body_dir = crate::impact::fib_dir(i, SHELL_N); // this grain's fixed BODY direction
+                let dir = spin_rot * body_dir; // its current WORLD direction (rotated by the spin)
                 let u = dir.dot(spin_axis);
                 let r_oblate = (EARTH_RADIUS_M - 0.62 * shell_spacing)
                     * (1.0 + flat * (1.0 / 3.0 - u * u)); // +f/3 equator, −2f/3 poles
@@ -3651,10 +3890,11 @@ mod app {
                 let hidden = crater_site.map_or(false, |s| (pos_w - s).length() < crater_r);
                 let scale = if hidden { 0.0 } else { shell_grain_r }; // zero-scale ⇒ not drawn
                 let spos = ((pos_w - focus) * DISPLAY_SCALE).as_vec3();
-                // Continents & oceans (docs/25): each grain samples the landmask for its direction and
-                // wears the REAL surface material's reflectance — granite land, water ocean. "Average
+                // Continents & oceans (docs/25): each grain samples the landmask at its fixed BODY direction
+                // — so a continent is a property of the CRUST and CO-ROTATES with the planet (and with the
+                // crater), rather than being painted world-fixed while the grains slide underneath. "Average
                 // area particles": the grain is the mean of its ~10°×10° patch, nothing painted.
-                let surf = crate::planet::earth_surface_material(dir);
+                let surf = crate::planet::earth_surface_material(body_dir);
                 let m = &self.mats[materials::index_of(&self.mats, surf)];
                 // RAYLEIGH (docs/26): the declared air scatters sunlight over this patch — a blue
                 // veil (into the emissive channel: it IS added light) whose ground shows through
@@ -3798,7 +4038,7 @@ mod app {
             // planetary scale, emergent from the aggregate physics, not a scripted animation.
             let mut debris_count = 0usize;
             if !r_debris.is_empty() {
-                let frag_r = moon_r / (DEBRIS_N as f32).cbrt(); // N fragments ≈ the Moon's volume
+                let frag_r = moon_r / (SCENE_DEBRIS_N as f32).cbrt(); // N fragments ≈ the Moon's volume
                 // Composition rides the SAME lagged snapshot as positions/temps (r_mats): a live read of
                 // moon_debris.mat_ids desynced after drain's swap_remove reordered the live array.
                 for (i, pos) in r_debris.iter().enumerate() {
@@ -3914,21 +4154,36 @@ mod app {
                 });
                 pass.set_pipeline(&self.pipeline);
                 draw(&mut pass, &self.sun_uni, &self.sphere_gpu); // the Sun, where it really is
-                draw(&mut pass, &self.interior_uni, &self.sphere_gpu); // the glowing deep interior
-                for uni in self.wall_unis.iter() {
-                    draw(&mut pass, uni, &self.sphere_gpu); // crater bowl wall (zero-scale when intact)
-                }
-                for uni in self.shell_unis.iter() {
-                    draw(&mut pass, uni, &self.sphere_gpu); // Earth: a shell of coarse grains
-                }
-                for (idx, uni) in self.moon_unis.iter().enumerate() {
-                    if idx / MOON_SHELL_N == 0 && r_shattered {
-                        continue; // shattered — drawn as debris
+                // The rigid-Earth + sphere-debris model draws only when the GPU SPH impact is NOT running
+                // (docs/33 stage 4c.4): with the deformable impact active, the particle field IS the planet.
+                if !self.sph_active {
+                    draw(&mut pass, &self.interior_uni, &self.sphere_gpu); // the glowing deep interior
+                    for uni in self.wall_unis.iter() {
+                        draw(&mut pass, uni, &self.sphere_gpu); // crater bowl wall (zero-scale when intact)
                     }
-                    draw(&mut pass, uni, &self.sphere_gpu);
+                    for uni in self.shell_unis.iter() {
+                        draw(&mut pass, uni, &self.sphere_gpu); // Earth: a shell of coarse grains
+                    }
+                    for (idx, uni) in self.moon_unis.iter().enumerate() {
+                        if idx / MOON_SHELL_N == 0 && r_shattered {
+                            continue; // shattered — drawn as debris
+                        }
+                        draw(&mut pass, uni, &self.sphere_gpu);
+                    }
+                    for uni in self.debris_unis.iter().take(debris_count) {
+                        draw(&mut pass, uni, &self.sphere_gpu);
+                    }
                 }
-                for uni in self.debris_unis.iter().take(debris_count) {
-                    draw(&mut pass, uni, &self.sphere_gpu);
+                // GPU SPH particles: instanced billboards straight from the physics buffer (zero-copy).
+                if self.sph_active {
+                    if let Some(sph) = self.gpu_sph.as_ref() {
+                        if sph.count() > 0 {
+                            pass.set_pipeline(&self.sph_pipeline);
+                            pass.set_bind_group(0, &self.sph_cam.bind, &[]);
+                            pass.set_vertex_buffer(0, sph.particle_buffer().slice(..));
+                            pass.draw(0..6, 0..sph.count());
+                        }
+                    }
                 }
             }
             self.queue.submit(std::iter::once(encoder.finish()));
@@ -4070,6 +4325,75 @@ mod app {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        })
+    }
+
+    /// The instanced particle pipeline for the GPU SPH impact (docs/33 stage 4c.4). One camera-facing
+    /// billboard quad per particle, generated in the vertex shader; the instance buffer is the `sph_step.wgsl`
+    /// particle buffer itself (48-byte stride, pos at offset 0, provenance u32 at offset 44). No mesh, no
+    /// per-vertex buffer — the quad corners come from the vertex index.
+    fn build_sph_pipeline(
+        device: &wgpu::Device,
+        bind_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sph-render-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/sph_render.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sph-render-pipeline-layout"),
+            bind_group_layouts: &[bind_layout],
+            push_constant_ranges: &[],
+        });
+        // Instance-step layout over the SPH particle buffer: pos (vec3 @ 0) + provenance (u32 @ 44).
+        const ATTRS: [wgpu::VertexAttribute; 2] = [
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 44, shader_location: 1 },
+        ];
+        let instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<crate::gpu_sph::SphParticle>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &ATTRS,
+        };
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sph-render-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[instance_layout],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // billboards always face the camera
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),

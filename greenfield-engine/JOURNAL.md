@@ -5,6 +5,837 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-17 — Direct-sum gravity ceiling measured → GPU Barnes–Hut spec'd for a fresh session (docs/36)
+
+**What.** Measured how far the browser GPU impact's DIRECT O(N²) gravity scales before spec'ing the
+Barnes–Hut. On the RTX 2070: N=2800 → ~11 fps (the button default), **N=8200 → 4 fps** (a gorgeous remnant +
+spiral-disk, energy still conserved ΔE≈0.08 %, but choppy). The O(N²) dynamics (20 substeps × 2 evals × N²)
+is the wall; the offline converged disk (N≈35 000) is unreachable in-browser with direct sum. So a **GPU
+Barnes–Hut (O(N log N))** is the agreed next lever — restores fps at 8 k, unlocks N ≳ 20 k for a sharp disk.
+
+**Handover.** Wrote **`docs/36-gpu-barnes-hut-spec.md`** — a self-contained build spec for the next session:
+the staged LBVH plan (adaptive bbox reduction → Morton → GPU radix sort → Karras tree → atomic-free bottom-up
+COM → θ-traversal), verified GPU-BH-vs-GPU-direct in a new standalone `tools/gpu-bh-verify` (matching the CPU
+`bhtree.rs` opening criterion) before wiring into `sph_step.wgsl`/`GpuSph`, then bump N in the browser. Includes
+the WGSL gotchas (no float atomics → the atomic-free COM; the mandatory tight bbox) and the hard-won impact
+settings the swap must NOT regress (AV-zeroed relax, far-apart relax, the energy-conserving fixed dt). Button
+left at the playable N=2800. Nothing deployed.
+
+---
+
+## 2026-07-17 — SOLVED: the in-browser GPU impact forms an orbiting disk (GPU relax + energy-conserving dt) (docs/35)
+
+**Result.** The GPU SPH deformable-Earth impact now runs in the browser at **N≈2800**, conserving energy to
+**~0.08 %** and forming a **coherent remnant + an orbiting debris disk** (peaks ~0.6 M☾, up to ~32 % Earth,
+Moon-candidate clumps ~0.2 M☾). Rig-verified (`web/rig/sph_energy.mjs`, RTX 2070) — the "lost orbits" are back.
+
+**Two fixes on top of the diagnosis (under-relaxation, energy-conserving fixed dt):**
+1. **GPU relaxation** (`GpuSph::encode_relax` / `cs_relax`), so the ~2400 relax steps run on the GPU instead of
+   the CPU main thread — the practical blocker, and what lets N rise from ~700 to ~2800. New builders
+   `gpu_sph::build_far_apart` (the two bodies placed 40× the contact radius apart, so each self-gravitates in
+   the shared buffer with negligible mutual gravity) and `assemble_from_relaxed` (read back → compute the
+   collision geometry from the ACTUAL relaxed radii → launch). New `OrbitDemo` phase machine
+   (`SphPhase::Relaxing → Assembling → Dynamics`).
+2. **No artificial viscosity during relax** (`GpuSph::set_av(0,0)`). Debugging: the first GPU relax DIVERGED —
+   the body puffed to ~10³× (remnant "radius" 4×10⁹ m). Cause: the GPU force kernel includes Monaghan AV,
+   which the CPU relax does not; AV stiffens the settling transient so the CPU's stable Courant dt rings and
+   blows up. Zeroing AV during relax (matching the CPU) makes it stable at the normal dt — and ~4× fewer steps
+   than the smaller-dt workaround. AV is restored (1, 2) for the shock-capturing dynamics.
+
+**Honest state.** Energy conservation and the disk are solid; residual escape is still higher than the offline
+run and the disk classification wobbles as the hot remnant expands — a coarse-N demo, but a *real* one. The
+relax is still ~8–10 s (O(N²) direct gravity × ~2400 steps) — the next speed lever is a **GPU Barnes–Hut**
+tree (O(N log N)) to make it snappy and push N higher; an in-kernel per-substep adaptive dt would trim the
+escape. The GPU impact stays the "🌋 GPU Impact" button (not auto-deployed to the birth scene). Removed the
+now-dead CPU-relax helpers.
+
+---
+
+## 2026-07-17 — Diagnosing the GPU-impact "lost orbits": it's NOT dt injection, it's under-relaxation (docs/35)
+
+**Goal (Robin):** confidently determine whether the in-browser GPU impact is fixable before abandoning it.
+
+**Measure, don't guess.** Added an energy diagnostic — `gpu_sph::total_energy` (KE+IE+PE) + `gpu_energy_json`
+— and measured the live impact. **My earlier diagnosis was WRONG:** the total energy is CONSERVED to ~0.01 %
+with the current fixed dt (KE falls, IE rises by the same amount — shock heating, correct). So it was never
+dt energy-injection. The real cause: **under-relaxation** — I'd cut the browser relax to 640 steps for dev
+speed, vs the offline `impact-run`'s ~2200. Unrelaxed bodies carry excess energy and fling debris out (the
+3a lesson).
+
+**Result with the relax raised to 2200 (rig-measured, RTX 2070):** energy conserved 0.00–0.02 %; a coherent
+bound remnant forms (~9000 km — the SAME size as the offline run) with a debris disk (peaks ~0.35 M☾) and
+Moon-candidate clumps (up to 0.34 M☾, 12–44 % Earth). The scene shows a real giant impact (remnant + disk),
+not the earlier blown-apart dispersal. **So it is NOT insoluble — do not abandon it.**
+
+**Honest remaining gap vs the offline run:** escape is still ~15× higher (0.8–1.2 vs 0.06 M☾) and the distinct
+orbiting disk doesn't cleanly persist — the hot remnant keeps expanding (physical: hot rock → high Tillotson
+pressure, no radiative cooling yet) and the disk thins (partly a measurement artefact as the 85 %-mass remnant
+radius grows past the disk perigees). At N~700 it's a coarse, marginal disk. **Path to offline quality:** (1)
+GPU relax (`cs_relax`) so 2200 steps are milliseconds not ~15 s of CPU — the practical blocker + the key to
+(2) higher N; (3) an in-kernel per-substep adaptive dt to trim the excess escape (the fixed dt conserves TOTAL
+energy but may mis-distribute at the shock). Kept the c_peak fixed dt (energy-conserving) and the energy
+diagnostic; the GPU impact stays the button (WIP), birth scene still Aggregate. Rigs: `web/rig/sph_energy.mjs`.
+
+---
+
+## 2026-07-17 — REVERT: the birth scene goes back to the Aggregate — the GPU impact "loses its orbits" (docs/35)
+
+**What Robin caught.** On the deployed GPU birth scene the debris disperses instead of forming an orbiting
+disk/Moon — "we lost orbits." Diagnosed (rig-watch): the **remnant radius grows without bound** — 5994 → 8277
+km over 20 s (fixed dt), and worse (→21687 km) with a frame-lagged adaptive dt. Cause: **spurious energy
+injection**. The browser GPU impact must use a FIXED dt (WebGPU forbids the blocking read-back the offline
+adaptive dt needs); a fixed dt can't hold through the shock (c spikes ~4×) so it pumps energy in and the
+material puffs apart. A frame-lagged Courant dt (computed on the CPU from the one-frame-old snapshot) is
+WORSE — applied across 20 substeps it overshoots the live shock and explodes. So at browser resolution
+(N~700, no per-substep adaptive dt) the impact is not energy-conserving enough to orbit — unlike the offline
+`tools/impact-run` (N~35k, per-step adaptive dt, energy conserved 0.3–0.5 %).
+
+**What I did wrong.** I deployed the GPU impact as the default birth scene having verified it *ran*, not that
+it produced a good orbiting result — violating my own docs/35 guardrail ("keep the CPU path until the GPU
+replacement is verified good"). Corrected: **reverted `birth.html` to the CPU `Aggregate` scene** (which lofts
+an orbiting disk → moonlets → a Moon; rig-confirmed restored: 1536 fragments, disk 2.84 M☾ in 2 moonlets) and
+**redeployed**. The GPU SPH impact stays the "🌋 GPU Impact" **button** — a WIP physics demo — until its
+energy conservation is fixed. The `Space` tab's Sun–Earth–Moon orbits were never affected (rig-verified:
+Moon orbiting at ~1.02 km/s). Removed the failed frame-lagged `courant_dt`; the button keeps the shock-safe
+fixed dt (puffs slowly but doesn't explode). **Next (to make the GPU impact orbit):** a true per-substep
+adaptive dt (a GPU Courant reduction feeding the next substep in-kernel, no CPU round-trip), full GPU relax
+(`cs_relax`), and higher N — then re-promote to the birth scene.
+
+---
+
+## 2026-07-17 — Stage 5 migration, increment 2c: geologic hand-off from the GPU disk (docs/35)
+
+**What.** The Geologic button now works in the GPU birth scene (was an Aggregate-only path). New
+`gpu_sph::disk_moonlets`: from the read-back disk it finds the self-bound clumps (the `accretion` operator)
+and promotes each to a `tides::Moonlet` orbiting the REAL Earth just outside Roche (~3.8 R⊕), carrying the
+clump's mass; if no tight clump has formed yet it promotes the whole bound-disk mass as one moonlet (in
+geologic time the disk accretes a Moon regardless). `OrbitDemo::enter_geologic_time` branches on `sph_active`:
+promote → retire the GPU sim → hand to the validated secular tidal law. Guarded so clicking Geologic before a
+disk exists is a no-op (keeps impacting) rather than blanking the scene. With the birth scene fully on GpuSph,
+`moon_debris` (`Aggregate`) is now dormant in `OrbitDemo` — functionally retired (the struct deletion waits on
+step 5, once the terrain probe also migrates).
+
+**Verified (rig-watch, release build — `web/rig/birth_geologic.mjs`).** Birth impact → disk forms (disk
+0.12–0.23 M☾, up to 68% Earth) → `enter_geologic_time()` → `disk_stats_json` returns the GEOLOGIC JSON
+(geologic mode active, populated from the GPU disk) and the scene transitions to the geologic Earth view
+(grain-shell Earth, camera backed out, HUD "T+1641y after impact"). Native + wasm build clean. Honest notes:
+(1) the promoted moonlet then decays under the secular law because this scene gives Earth no spin (a
+sub-synchronous moonlet migrates in and shreds at Roche — the existing `tides` physics, not a hand-off bug;
+giving the birth Earth a spin, or seeding the moonlet further out, is geologic-scene polish). (2) In the
+UNOPTIMIZED dev build the chunked CPU relax pegs the birth scene to ~1 fps for ~30 s (700 particles × 640
+relax steps); release is ~10× faster and fine — GPU relax (`cs_relax`) is the proper future fix for dev too.
+
+---
+
+## 2026-07-17 — Stage 5 migration, increment 2b: the Birth-of-the-Moon scene runs on GpuSph (docs/35)
+
+**What.** The "Birth of the Moon" scene now runs the **GPU SPH deformable-Earth impact** instead of the CPU
+rigid-Earth `Aggregate` — two differentiated EOS bodies colliding, stepped by `sph_step.wgsl` in-browser.
+Fixed the load-freeze blocker (2a) by making the build **non-blocking**: `build_impact_bodies` returns the two
+bodies UNRELAXED; `advance` relaxes them in small CPU chunks (20 steps/frame, ~32 frames) via a new
+`sph_relax` phase, re-uploading the settling bodies each frame, then `assemble_impact(…, infall=true)`
+launches the collision (Theia inbound) and hands off to the GPU KDK dynamics + read-back. Refactored
+`gpu_sph.rs` into `build_impact_bodies` / `relax_chunk` / `assemble_impact` (the last is pure — offsets in the
+emitted particles, no body mutation, so it can be called every relax frame). `birth.html`/`orbit.ts`
+auto-start it; Replay restarts it.
+
+**Verified.** Native + wasm build clean. Rig-watch `birth.html` in the **dev** build (previously the freeze):
+loads, the two bodies settle (~1 s, disk "null" during relax), then collide into a mixed remnant + spreading
+debris — **no hang, 27 fps**, the birth HUD shows the live GPU disk line. Release build also confirmed. Honest
+status: this **changes the deployed birth scene's character** (the Theia-approach narrative + the Aggregate
+disk/geologic controls are bypassed — `moon_debris` is now dormant, and the Geologic button no-ops in GPU
+mode); it's committed on the branch, not deployed. Remaining for increment 2: retire `moon_debris`
+`Aggregate` and rewire the geologic hand-off from the GPU disk (via `accretion.rs`). Then 5c (Sphere), 5d.
+
+---
+
+## 2026-07-17 — Stage 5 migration, increment 2a: GPU impact scene framing (+ a blocker found) (docs/35)
+
+**What.** Toward "the birth scene runs on GpuSph" (docs/35 step 2). The GPU impact rendered as a speck at the
+Earth–Moon default zoom; added a dedicated visual scale (`SPH_VIS_SCALE`, Earth's ~5000 km → a few display
+units) and a camera zoom-in on trigger, so the impact is legible — a clear central remnant plus a spread
+two-provenance debris disk of individual shaded particles. Rig-watch verified on the space scene (HUD: "disk
+0.35 M☾, 15% Earth, moon 0.15 M☾").
+
+**Blocker found (honest).** Auto-starting the GPU impact on `birth.html` load **froze the page** — the
+one-time CPU relax (`build_deformable_impact`, ~900 particles × ~900 damped steps) runs synchronously on the
+wasm main thread and, in the unoptimized dev build, blocks long enough that the scene never paints (rig
+screenshot timed out). So `birth.html` stays on the existing `start_birth` (Aggregate) for now; the GPU impact
+is the deliberate "🌋 GPU Impact" button. Making the birth scene *default* to GpuSph needs a non-blocking
+build first — a GPU relax (`cs_relax` already exists) driven over a few frames, or a lighter/deferred CPU
+relax — which is the real next step (docs/35 step 2, revised). Reverted the auto-start; nothing left broken.
+
+---
+
+## 2026-07-17 — Stage 5 migration, increment 1: GPU→CPU read-back + live disk stats (docs/35)
+
+**What.** Robin chose to unify the scenes onto the **GPU SPH path** (retire the CPU `Aggregate` from the live
+scenes) — the high-payoff, high-risk direction. Wrote the increment plan in **`docs/35-gpu-path-migration.md`**
+(sequence, guardrails, and the one open design decision flagged for later: pure-SPH-EOS vs SPH-EOS+granular on
+the GPU). Increment 1 is the universal prerequisite — nothing can migrate until the scene can read GPU
+particle state back. Added two-phase async read-back to `GpuSph` (`begin_readback`/`take_readback`, mirroring
+`GpuParticles`; WebGPU forbids blocking maps, so it copies one frame and collects the next). `OrbitDemo`
+reads back each frame into `sph_snapshot`; `gpu_sph::disk_stats_json` measures the orbiting disk on it
+(remnant = 85%-mass body, perigee-above-remnant classification, provenance split) and the largest self-bound
+clump via the verified `accretion` operator; `OrbitDemo::gpu_disk_stats_json()` exposes it to JS, shown in the
+birth HUD. `mod gpu_sph` is now `#[cfg(target_arch="wasm32")]` (it's only used by the wasm-only `mod app`; the
+native SPH reference stays in `tools/`).
+
+**Verified.** Native + wasm builds clean. Rig-watch (`web/rig/sph_impact.mjs`, RTX 2070): triggered the GPU
+impact, and the HUD shows the **live read-back disk provenance updating each frame** — e.g. `disk 0.35 M☾
+(8% Earth) · moon 0.07 M☾` at t+8.5 s, evolving as the remnant + debris disk form. The read-back → CPU
+measurement → JSON → HUD path works end-to-end. (The low/jumpy Earth% is the chaotic N~1050 browser run — a
+live visualization, not the converged number; `tools/impact-run` remains the faithful measurement.) Next
+increment (docs/35 step 2): put the "Birth of the Moon" scene fully on `GpuSph` and retire `moon_debris`.
+
+---
+
+## 2026-07-17 — Stage 5 (begin): the EOS seam — one pressure abstraction across air and rock (docs/33 §4.5)
+
+**What.** Stage 5 is "retire the forks — unify the particle containers." The blocker the fork map surfaced:
+the symmetric SPH pressure-force loop `a = −Σ m (P_i/ρ_i² + P_j/ρ_j²) ∇W` is written THREE times (`AirField`,
+`HydroBody`, `aggregate` vapor) differing only in the `P(ρ,u)` call — because there is **no EOS abstraction**
+(Tillotson and the inline ideal-gas `ρ·R_s·T` are unrelated). Added one: `eos::Eos` — an enum
+`{ Tillotson(Tillotson), IdealGas { rs_t } }` with `pressure`/`sound_speed_sq`/`rho0`, plus `From<Tillotson>`.
+Migrated `HydroBody` to carry `Vec<Eos>` instead of `Vec<Tillotson>`, so the one verified SPH container is now
+**EOS-agnostic** — it can hold ideal-gas parcels (air) or Tillotson parcels (rock/iron) on the same code
+path. This is the seam that lets `AirField` fold into `HydroBody` (next increment) rather than duplicate the
+density/force/relax loops.
+
+**Why.** `HydroBody` is the convergence target (it's the CPU reference the stage-4 GPU kernel is verified
+against, and it's wired into `gpu_sph.rs`); `AirField`/`Sphere` are legacies to fold toward it. The EOS trait
+is the documented precursor (eos.rs's own module doc already claimed "only the `P(ρ,u)` call changes" — this
+makes that literally true).
+
+**Verified.** New fast test `eos_enum_dispatches_ideal_gas_and_delegates_tillotson`: ideal gas gives
+`P = ρ·rs_t` independent of u and `c² = rs_t`; Tillotson wrapped in the enum is **byte-identical** to calling
+the material directly (asserted with `==`). The migration is pure type-wrapping (Eos::Tillotson delegates
+exactly), so the Tillotson SPH physics is unchanged — confirmed by re-running the full differentiated-planet
+settle: **central P 5.723e11 Pa, core 15591 / mantle 5534 kg/m³** (identical to before). Fast suite 156/156.
+Next: fold `AirField`'s SPH into `HydroBody` (needs an optional planar-ghost boundary + external-gravity
+option — the one thing AirField does that HydroBody can't yet); then the CPU grain-path decision (5b),
+`Sphere` collapse (5c), WGSL-from-Rust (5d).
+
+---
+
+## 2026-07-17 — Stage 4c.4: the GPU SPH deformable-Earth impact runs IN THE BROWSER (docs/33/34)
+
+**What.** Wired the verified GPU SPH stepper into the birth scene so the deformable-Earth giant impact runs
+live in-browser (WebGPU), completing stage 4c. New engine module `crates/engine/src/gpu_sph.rs` (`GpuSph`) —
+the WebGPU host for `shaders/sph_step.wgsl`: owns the 8-binding pipelines + buffers on `OrbitDemo`'s shared
+device, uploads a particle set, and encodes batches of KDK (or relax) substeps. New shader
+`shaders/sph_render.wgsl` draws the particles as instanced camera-facing billboards straight from the physics
+buffer (zero-copy; pos at byte 0, provenance u32 at byte 44 → Earth = warm rock, Theia = cool steel). New
+`OrbitDemo::start_gpu_impact()` (JS button "🌋 GPU Impact") builds + relaxes two differentiated bodies on the
+CPU (`gpu_sph::build_deformable_impact`, reusing the verified `HydroBody`), places them on the oblique
+giant-impact geometry, and hands the per-frame dynamics to the GPU; `advance()` encodes 8 KDK substeps/frame,
+`render()` draws the field. Two WebGPU-shaped choices (documented in the module): **fixed dt** (adaptive
+Courant needs a blocking read-back WebGPU forbids) and an **Earth-relative f32 frame** (planetary coords
+cancel in f32; the shader re-adds Earth's display position).
+
+**Why.** docs/34 4c.4 — the impact should be visible/interactive in the browser, not only in the offline
+native tool. The physics laws stay the shared `sph_step.wgsl` (docs/32 §4: don't fork the particle path — this
+is the FIRST in-engine host of that shader, not a fork); only a render pipeline is new to `OrbitDemo`.
+
+**Verified.** `cargo build -p engine --target wasm32-unknown-unknown` clean → the WGSL validates under
+WebGPU and the wiring compiles. Rig-watch (`web/rig/sph_impact.mjs`, headed Chromium + xvfb + Vulkan WebGPU on
+the RTX 2070): clicked the trigger, watched the whole event — two intact differentiated bodies (t≈0) →
+collision + spreading (t+2 s) → a **central remnant plus an extended two-provenance debris disk** (t+8.5 s),
+Earth (tan) and Theia (blue) material visibly mixing. No NaN blow-up (the fixed dt held through the shock),
+24–25 fps. Screenshots in the job scratch. Native fast suite green. Honest caveats: modest N (~1050) and
+fewer relax steps than the offline run (a snappy trigger, slightly hotter start), small on-screen at the
+default zoom, no read-back so no live momentum-mirror/HUD numbers yet — all polish, not correctness. This
+closes stage 4c (4c.1 integrator, 4c.2 high-N impact, 4c.3 accretion, 4c.4 browser). Remaining realignment:
+stage 5 (fold `hydrostatic`/`AirField` into one `Aggregate`) and 6 (energy-tiered JIT particalization).
+
+---
+
+## 2026-07-17 — Stage 4c.3: the accretion / growth operator, conservation-verified (docs/33/34)
+
+**What.** New engine module `crates/engine/src/accretion.rs` — the growth law that lets a round Moon emerge
+from the disk. A giant-impact disk of equal-mass SPH particles has no fusion operator (masses never grow), so
+it can never coalesce a Moon (diagnosis, JOURNAL entry below). The operator: friends-of-friends clustering
+(union-find over particles within a linking length, the same primitive `disk_stats_json` uses) → classify
+each clump for two **honesty gates** — (1) genuinely self-bound (`Σ½mᵢ|vᵢ−v_com|² + PE_self < 0`) and (2)
+outside the remnant's fluid Roche limit `2.44·R·(ρ_planet/ρ_clump)^⅓` — → PROMOTE each qualifying clump to
+ONE body at its COM (mass `Σm`, velocity `Σmv/Σm`, radius from ρ·V). A clump inside Roche is left as particles
+(it should tidally shred, not accrete — consistent with `tides::secular_step`).
+
+**Why.** Stage 4c.2 made the disk collisional at high N; this adds the law that turns a bound clump into a
+body. Designed as a pure, decoupled function over `(pos, vel, mass, rho)` arrays so it is unit-testable and
+reusable — not welded to a scene struct.
+
+**Verified (TDD, `bash scripts/test.sh accretion`, 3/3).** (1) `accretion_conserves_mass_momentum_and_com` —
+promote two cold blobs among scattered singletons; expanding bodies+residuals back out conserves total mass,
+linear momentum, and centre of mass to **< 1e-12** (exact to f64 round-off), and the 5 singletons are left
+alone. (2) `roche_gate_blocks_accretion_inside_the_limit` — the *same* clump accretes outside Roche but NOT
+inside it. (3) `unbound_hot_group_does_not_accrete` — a spatially-tight but hot (KE ≫ binding) group is
+classified unbound and rejected. Honest about what promotion cannot conserve: internal random KE is absorbed
+as heat (physical for inelastic accretion) and internal spin L is folded in — both reported, never dropped.
+Full fast suite 155/155.
+
+**Demonstration on a real disk.** Wired a `moon_candidate` scan into `tools/impact-run` (the same FoF +
+self-bound + Roche logic, reimplemented standalone like sph-verify) and ran it on the N=35 000 aftermath: the
+disk (0.14 M☾, 29 % Earth) contains **21 clumps, 16 of them self-bound**, and the largest bound clump outside
+Roche is **0.023 M☾ (31 particles), 10 % Earth** — a proto-moonlet SEED, not a full Moon. Honest: at this N
+and only ~9 h of aftermath the disk has begun to clump but is far from accreting a lunar-mass body (real Moon
+accretion takes years–decades and/or ≫10⁵ particles). The operator correctly finds the bound clumps; growing
+them to a Moon is a longer-time / higher-N run, not a code gap. Next: 4c.4 (browser scene wiring).
+
+---
+
+## 2026-07-17 — CORRECTION to stage 4c.2: the disk composition has large run-to-run SCATTER, not clean convergence
+
+**What I got wrong.** The 4c.2 entry below reported the disk Earth-fraction "converging monotonically
+28→33→50 %" toward the CPU's 58 %, from ONE run per N. Re-running the **identical** N=35 000 config (same
+binary, same seeds — the build is deterministic) gave **29 %**, not 50 %. Two samples at the same config,
+21 points apart. The cause is honest and physical: the GPU grid-insert uses `atomicAdd` for bucket slots, so
+neighbour-iteration order is non-deterministic across runs; f32 sums are non-associative; and 11 000 chaotic
+integration steps amplify that seed into a macroscopically different disk. **So there is no clean monotonic
+convergence — the composition has ~20-point run-to-run scatter, and 28/33/50/29 % are samples of a
+distribution around ~30–40 %, consistent with the CPU's 58 % only within that large scatter.** The
+no-fudge rule (CLAUDE.md #5) required recording this rather than keeping the favourable sample.
+
+**What still stands (robust across all runs).** The MECHANISM — Earth material reaches orbit in quantity —
+and the disk **mass** (~0.13–0.19 M☾), **remnant radius** (~9000 km), **escape speed**, and **energy
+conservation** (0.3–0.5 % over ~10 h) are all stable run-to-run. Only the Earth *fraction* of the disk is
+scatter-dominated at these N. A converged fraction needs an **ensemble** (average many realisations) and/or
+a **deterministic reduction** (order-independent summation), plus higher N — all future work. The
+deformable-Earth qualitative result (Earth-derived material orbits, tens of % of the disk) is reproduced;
+the precise fraction remains an IOU, now with a measured scatter attached.
+
+---
+
+## 2026-07-17 — Stage 4c.2: high-N giant impact on the GPU (deformable-Earth disk at N up to 35 000) (docs/33/34)
+
+**What.** Built `tools/impact-run` — a standalone offline harness that runs the deformable-Earth giant impact
+end-to-end on the RTX 2070 using the verified `sph_step.wgsl` kernels: build two differentiated EOS bodies →
+**relax each on the GPU** (new `cs_relax` damped kernel) → collide obliquely at 1.15·v_esc, b≈R_e → KDK-step
+the aftermath with **adaptive Courant dt** (new `cs_signal` kernel; CPU reads back the per-particle min each
+step) → classify remnant/disk/escaped by the perigee-above-remnant criterion, split by provenance. Added a
+`prov` field to the particle (repurposed `_pad`) and a `damp` field to `Params`. This runs the *same*
+experiment the CPU test measures at N≈2100 (`a_deformable_earth_impact_measures_the_disk_provenance`), but at
+N up to 35 000 in minutes — the resolution the isotopic-crisis number needs.
+
+**Why.** The CPU O(N²) impact caps at ~2100 particles (~8 min/run) and the docs/33 stage-3c result (58% of
+the orbiting disk is Earth-derived) was explicitly a coarse-N / sub-scale IOU — mechanism asserted, fraction
+not converged. Stage 4 exists to lift the resolution on the GPU.
+
+**Verified (RTX 2070).** Energy conserved to **0.3–0.5%** across ~10 h of simulated aftermath at every N
+(the relaxed-body + shock-capturing-AV discipline holds; IE rises ~3× from shock heating). Samples measured:
+
+| run                    |   N    | disk Earth-frac | disk mass | R_remnant | relaxed R_earth |
+|------------------------|-------:|----------------:|----------:|----------:|----------------:|
+| GPU (direct grav, f32) |  2 100 |           28 %  | 0.19 M☾   | 9208 km   | 4245 km         |
+| GPU                    | 14 000 |           33 %  | 0.13 M☾   | 9127 km   | 4482 km         |
+| GPU                    | 35 000 |           50 %  | 0.13 M☾   | 8834 km   | 4679 km         |
+| GPU (re-run, same cfg) | 35 000 |           29 %  | 0.14 M☾   | 9047 km   | 4679 km         |
+| CPU (Barnes–Hut, f64)  |  2 100 |           58 %  | 0.21 M☾   | 9086 km   | —               |
+
+**Read this table with the CORRECTION above:** the two 35 000-particle rows are the SAME config (50 % vs
+29 %), so the Earth-fraction column is scatter-dominated (~20 points, GPU-non-determinism × chaos) — do NOT
+read 28→33→50 as convergence. What IS robust across every row: the disk **mass** (~0.13–0.19 M☾), **remnant
+radius** (~9000 km), **escape speed**, and energy conservation. The deformable-Earth mechanism (Earth-derived
+material reaches orbit, tens of % of the disk) reproduces on GPU; the precise fraction is an IOU pending an
+ensemble average + a deterministic (order-independent) reduction + higher N. Honest caveats: sub-Earth scale,
+direct O(N²) gravity (a GPU Barnes–Hut is the next optimization if N≫10⁵). Run: `cd tools/impact-run &&
+cargo run --release -- [earth_n] [steps]`. Next: 4c.3 (accretion operator) and 4c.4 (browser scene wiring).
+
+---
+
+## 2026-07-17 — Stage 4c.1: GPU KDK integration loop, verified over 50 steps (docs/33/34)
+
+**What.** Turned the verified 4a/4b force kernel into a **time integrator**. Added two kernels to
+`shaders/sph_step.wgsl` — `cs_kick_drift` (first half-kick of v & u, clamp `u=max(u,0)`, then drift x) and
+`cs_kick` (final half-kick) — and a `dt` field to `Params` (repurposed the trailing `_pad`). One dynamical
+step = TWO force evals with a half-kick+drift between and a half-kick after, matching the CPU
+`HydroBody::step` KDK leapfrog operator-for-operator (energy-conserving, no damping). Per docs/34 the verify
+uses a FIXED dt on both sides; GPU adaptive Courant dt (CPU read-back of a min) is deferred until it's needed
+by a real run.
+
+**Why.** The force kernel was one evaluation; a giant impact needs the loop. Verify-before-wire discipline
+(docs/30): prove the integrator matches the CPU leapfrog before running it at high N or wiring it to a scene.
+
+**Verified (RTX 2070, `tools/sph-verify`).** Extended the harness with an f64 CPU KDK reference (genuine f64
+state, no f32 round-trip between steps — a true higher-precision reference) and a GPU multi-step runner (all
+passes in one command buffer; consecutive compute passes are ordered & memory-synchronized so step k's drift
+is visible to step k+1's density). 50 steps at dt=0.5s from the same IC: GPU f32 vs CPU f64 final state
+**pos RMS 3.1e-4, vel 5.7e-4, u 5.1e-4** (displacement-scaled pos) — inside the ~1e-3 honest f32-vs-f64
+bound and *tracking*, not diverging. The single-eval force check still PASSes (acc 1.85e-6, du/dt 4.36e-6).
+`cargo run --release` exits 0 on both. Next: 4c.2 (high-N impact for the converged disk-provenance number).
+
+---
+
+## 2026-07-17 — Stage 4c prepped for a fresh session + landing hero shipped (docs/34)
+
+**What.** Two things closing out a long session. (1) Built + deployed the **landing-page hero N-body
+field** (front-end handoff): a real 2-D velocity-Verlet `F = G·m/r²` sim in `web/src/landing.ts` with honest
+live telemetry (bodies / steps / Σ½mv²) and drag-to-toss — the page no longer over-promises. Verified (tsc,
+vite, rig-screenshot), live on integrity.bothead.net. (2) Wrote **`docs/34-stage-4c-pickup.md`** — a
+self-contained spec so a new session executes stage 4c without re-deriving: the verified 4a/4b foundation
+(`sph_step.wgsl` force kernel + grid, `tools/sph-verify`), the four 4c sub-tasks (GPU KDK integration loop +
+adaptive dt → high-N impact for the converged number → accretion operator → browser scene wiring), and the
+session's hard-won gotchas (engine wgpu is webgpu-only → verify in a standalone Vulkan crate; the grid
+cell-membership guard; relax-before-collide; f32 Earth-relative frame; verify-before-wire).
+
+**State.** Realignment stages 1–3 + 4a + 4b DONE and verified; 4c prepped. Working tree clean, all pushed.
+
+---
+
+## 2026-07-17 — Realignment stage 4b: the SPH neighbour grid on GPU, verified (docs/33)
+
+**What.** Added a spatial-hash **neighbour grid** to `shaders/sph_step.wgsl` so the short-range SPH
+(density + pressure + AV) scans only the 27 neighbouring cells — O(N) instead of O(N²). Two new kernels
+(`cs_grid_clear`, `cs_grid_insert`, atomic bucketing, adapted from `particle_step.wgsl`) build the grid; the
+density and force passes look up neighbours via it. Long-range self-gravity stays direct O(N²) (GPU-tiled
+direct summation is tractable at these N; a GPU Barnes–Hut tree is a later optimization). Verified on the
+RTX 2070 (`tools/sph-verify`): gridded output matches the CPU physics to f32 precision (acceleration RMS
+1.9e-6, density 5.6e-7) — the grid is EXACT, like `neighbors.rs`.
+
+**BUG found + fixed (the interesting part).** The first gridded version was 20% off — it found MORE
+neighbours than truth (109 vs 88 for the worst particle): **hash collisions among the 27 scanned cells made
+some real neighbours read TWICE** (two cells hashing to the same bucket → the bucket processed twice). The
+fix is a **cell-membership guard**: when scanning cell C, a bucketed particle j is used only if
+`cell_of(j) == C` — so each neighbour is counted exactly once (and collided far particles are skipped),
+regardless of table collisions or bucket size. This is the exactness guarantee `neighbors.rs` gets for free
+on the CPU. Isolated it by (a) confirming all-N density was exact, then (b) a neighbour-count diagnostic
+showing over-counting — not a coverage/precision miss.
+
+**Verified (real GPU).** `sph-verify` PASS at production bucket_k=64: density (grid) max rel error 5.6e-7,
+acceleration RMS 1.9e-6, du/dt 4.4e-6. Ahead: 4c — the KDK integration loop + adaptive Courant dt on-GPU +
+scene wiring (with the accretion operator).
+
+---
+
+## 2026-07-17 — Realignment stage 4a: the GPU SPH kernel, verified on the RTX 2070 (docs/33)
+
+**What.** Ported the space-band self-gravitating condensed-matter force step to a WGSL compute shader
+(`shaders/sph_step.wgsl`) — the same physics as the CPU `hydrostatic.rs::forces_and_dudt`, in f32: SPH
+density (cubic spline, per-pair h_ij), Tillotson EOS pressure, Monaghan artificial viscosity, direct O(N²)
+self-gravity, and the du/dt energy equation. The goal is to run the giant impact at N~10⁵ (the resolution
+the isotopic number — and accretion — need). VERIFIED against an independent f64 CPU computation of the same
+equations, headless, on the box's RTX 2070 via native Vulkan wgpu (`tools/sph-verify` — a standalone crate,
+since the engine's own wgpu is webgpu-only and can't run native Vulkan).
+
+**Verified (real GPU).** `sph-verify` (N=300, mixed iron/basalt, velocities to exercise the AV): GPU vs CPU
+**acceleration RMS relative error 1.9e-6**, max per-particle 2.2e-5, **du/dt RMS 3.6e-6** — i.e. the WGSL
+matches the CPU physics to f32 round-trip precision. The kernel is faithful.
+
+**Scope.** This is ONE force evaluation, O(N²), verified. Still ahead: 4b — port the neighbour grid +
+Barnes–Hut (the CPU already has both, `neighbors.rs`/`bhtree.rs`) for O(N log N); 4c/5 — the KDK integration
+loop on-GPU + the adaptive Courant dt + wiring into the scene (with the new **accretion operator** the
+Moon-formation diagnosis showed is also required). But the hard, error-prone part — getting the SPH+EOS+AV
++gravity physics correct in WGSL f32 — is done and proven on the real device.
+
+**Why.** docs/33 stage 4: correctness-first — verify the GPU kernel against the CPU reference on the real
+GPU before wiring it into anything (docs/30 discipline: speed must never change the answer).
+
+---
+
+## 2026-07-17 — Can the disk accrete a Moon? Diagnosis + the Roche-disruption fix (docs/28/33)
+
+**What.** Robin, watching the deployed birth scene: "I never see particles join — no accretion into a
+Moon; and geologic time makes a giant ball ROLL ON EARTH'S SURFACE, not orbit." Investigated both.
+
+**Diagnosis (can a near-spherical Moon emerge in the current system? NO):**
+- **Primary — the collisionless-N ceiling + NO accretion operator.** The scene disk is ~1536 chunks each
+  **471 km radius, 0.017 M☾** — collisionless at this N (docs/28's flagged LOD ceiling; real SPH disks use
+  10⁴–10⁶). The contact law is fine (restitution 0.40 → ~84% collision-energy loss; self-gravity ~3500×
+  cohesion at 471-km grains, correctly the glue). The real gap: **there is no fusion/growth operator** —
+  debris `bonds` is empty and never populated, particle masses never grow, the devs deleted the merge
+  closure and bet on emergence. So a bound clump renders as a loose cluster of 471-km balls, never a
+  growing sphere. **A round Moon needs BOTH higher N (stage 4) AND a coarse-grained accretion law** (a
+  bound rubble clump → one body with a grown radius). That accretion operator is a new realignment element.
+- **The "ball on the surface" was a real BUG (fixed).** A sub-synchronous geologic moonlet correctly
+  migrates inward (Phobos' fate), but `tides::secular_step` CLAMPED its orbit at 1.2 R⊕ and the renderer
+  drew a full-mass ball overlapping Earth — no Roche limit enforced.
+
+**Fix.** `tides::secular_step` now enforces the **fluid Roche limit** `d = 2.44·R·(ρ_p/ρ_m)^⅓` (≈ 3.0 R⊕
+for Earth + rock): a moonlet that decays inside it is **tidally SHREDDED** — removed, its mass + orbital
+angular momentum raining onto the planet (mass returned to the caller and added to Earth in `lib.rs`; L
+added to the spin). Removed the 1.2 R⊕ floor clamp. So a sub-synchronous moonlet disrupts instead of
+rolling on the surface, and a Moon that forms just outside Roche migrates out honestly.
+
+**Verified (native).** New `a_sub_synchronous_moonlet_disrupts_at_roche_not_on_the_surface`: moonlet at
+3.2 R⊕ + 24 h day → disrupts at the 3.02 R⊕ Roche limit, sheds its full 0.30 M☾, total mass + angular
+momentum conserved. The existing one-Moon test still forms a Moon just outside Roche that migrates to 29 R⊕
+(L drift 5e-15). Full fast suite 152/152; wasm builds. Deployed.
+
+---
+
+## 2026-07-17 — Render-truth: the crater and continents CO-ROTATE with the crust (birth scene)
+
+**What.** Fixed a render-frame mismatch Robin caught while watching the deployed birth scene (he read
+Theia's approach as "curving to hit a fixed point"). Investigation verdict: **the approach trajectory is
+HONEST** — pure N-body gravity (`orbit::verlet_step`, no steering), the impact site is an OUTPUT discovered
+by swept CCD at contact (`impact_site_rel` is `None` through the whole approach), and the inward curve is
+genuine gravitational focusing of a hyperbolic impactor in an Earth-centred frame. The "fixed impact point"
+he reacted to is the **declared-zero proto-Earth spin** (`lib.rs:2915`, flagged unknown IC): with `spin_l=0`
+the surface simply isn't rotating.
+
+BUT the trace surfaced a genuine no-fudge bug: post-impact, once the collision spins Earth up, the crater
+(`impact_site_rel`) was rendered as an INERTIAL vector (`earth_center + rel`) while the shell grains rotate
+by `spin_rot` — so the hole slid through the rotating crust. And the landmask was sampled at the WORLD
+direction (`earth_surface_material(spin_rot·fib_dir)`), painting continents world-fixed while grains rotate
+underneath. Both fixed: the crater now co-rotates (`earth_center + spin_rot·rel`) and continents are sampled
+at the fixed BODY direction (`earth_surface_material(fib_dir)`) — so grains, continents, and crater share
+ONE crust frame that rotates honestly. (Invisible during the birth approach — `spin_l=0` ⇒ `spin_rot` is
+identity — so the honest approach is unchanged; the fix bites post-impact when Earth spins up.)
+
+**Verified.** Native + wasm build; full fast suite 151/151. Deployed.
+
+**Flagged for Robin's call (physics IC, not a bug).** The birth scene's proto-Earth spin is deliberately
+zero so the post-impact day EMERGES. If we'd rather the surface visibly rotate under the incoming impactor
+(more physical — planets rotate), we give proto-Earth a primordial spin IC; the tradeoff is the day becomes
+primordial + impact rather than purely emergent. Left as-is pending his decision.
+
+---
+
+## 2026-07-17 — Realignment stage 3c: a DEFORMABLE Earth resolves the isotopic-crisis DIRECTION (docs/33)
+
+**What.** The scientific payoff of the whole realignment: collided a differentiated Theia into a
+**deformable, self-gravitating, differentiated proto-Earth** (both real EOS particle bodies, relaxed first)
+obliquely at ~mutual escape speed, integrated the aftermath with the shock-capturing SPH integrator (3a),
+and MEASURED the bound orbiting disk by provenance (Earth particles vs Theia). Disk = bound material whose
+orbital **perigee is above the remnant surface** (genuinely orbiting, separated from the planet body —
+`orbit::perigee` about the 85%-mass remnant). No dial; the composition EMERGES.
+
+**MEASURED (native, #[ignore], ~446 s).** `a_deformable_earth_impact_measures_the_disk_provenance`
+(M_e=1.75e24 kg ≈ 0.29 M⊕, M_t=2.76e23, v≈7.3 km/s, N≈2100):
+- **Orbiting disk 0.207 M☾ — 58% EARTH-derived** (Earth 8.75e21 | Theia 6.43e21 kg).
+- Remnant: Earth 1.72e24 | Theia 2.22e23 kg; escaped: 2.1e22 | 4.7e22 kg.
+
+**THE FINDING.** The rigid-boundary Earth capped the disk at **7–12% Earth** (docs/31 — only the excavated
+cap could reach orbit). With Earth as REAL MATTER that can shed its own mantle, the disk jumps to **58%
+Earth-derived** — Earth material not only reaches orbit, it DOMINATES the disk. This is the direction the
+isotopic crisis demands (the real Moon is isotopically Earth-like), and it is exactly docs/28 root-cause #1
+(the rigid boundary) being dissolved. Earth is now a participant in its own catastrophe.
+
+**Honest caveats (no-fudge).** Sub-Earth scale (0.29 M⊕), coarse N (~2100 — a resolution/scale IOU,
+docs/28), and the post-impact remnant is hot/expanded (R_remnant 9086 km), so the disk is defined beyond
+that. **58% is the DIRECTION** (rigid ~10% → deformable ~58%), NOT a converged number — the converged
+value waits for the GPU N (stage 4). A first attempt with a too-head-on geometry merged with no disk and
+mis-measured (counted the whole extended Earth as "disk" — 89%); that artifact was rejected and the
+measurement fixed to the perigee-above-remnant criterion.
+
+**Verified.** Full fast suite 151/151; wasm builds. Stages 1→3c all green.
+
+---
+
+## 2026-07-17 — Realignment stage 3a: dynamical SPH — energy equation + artificial viscosity (docs/33)
+
+**What.** Turned the isothermal planet into a full thermodynamic SPH body for the impact: added to
+`hydrostatic.rs` (1) the **SPH internal-energy equation** `du_i/dt = ½ Σ_j m_j (P_i/ρ_i²+P_j/ρ_j²+Π_ij)
+(v_i−v_j)·∇W` — the thermodynamically consistent partner of the momentum equation, so compression does PdV
+work → heat; (2) **Monaghan artificial viscosity** Π_ij (α=1, β=2) for shock capture (without it SPH
+particles interpenetrate at a shock and the impact heating is wrong); (3) an **energy-conserving KDK
+leapfrog** `step(dt)` evolving position, velocity, AND internal energy (vs the damped `relax_step`); and (4)
+an **adaptive Courant timestep** `courant_dt` from the live compressed sound speed.
+
+**Verified (native, #[ignore], ~67 s).** `a_head_on_collision_conserves_energy_and_shock_heats`: two 400 km
+basalt bodies, **relaxed to equilibrium first**, collide head-on at ±1.5 km/s —
+- **Total energy (KE+IE+PE) conserved to ~3%** (a one-time injection at the shock front, then flat — the
+  known SPH internal-energy-formulation shock error; 5% asserted bound).
+- **Shock heating:** internal energy rose **4.9×** (bulk KE → heat), KE fell — the physics that vaporizes
+  material and drives the disk.
+
+**KEY LESSON (measured).** Colliding UNRELAXED spheres at 3 km/s TRIPLED the total energy (ΔE/E≈2) — the
+startup non-equilibrium dumped into the shock; adaptive dt barely helped (so it wasn't CFL). Relaxing each
+body first (Genda: "vibrations until v<100 m/s") + a moderate speed → 3% conservation. Real giant-impact
+SPH always relaxes the bodies first; now we do too. Full fast suite 151/151; wasm builds.
+
+**Why.** docs/33 stage 3: the two-body impact needs real shock thermodynamics (heating → vaporization → the
+disk), not just contact. This is the integrator the deformable-Earth impact (3b/3c) runs on.
+
+---
+
+## 2026-07-17 — Realignment stage 2b: a differentiated iron-core Earth holds itself up (docs/33)
+
+**What.** Built the layered/differentiated planet — an **Earth-mass iron-core + basalt-mantle** particle body
+that holds itself in hydrostatic equilibrium as real matter. Rewrote `hydrostatic.rs` with the **Genda et al.
+2012 method** (the fix for the earlier puff-up): **equal-mass particles** at the number density that recovers
+each material's ρ₀, with a **per-particle adaptive smoothing length** `h_i ∝ (m/ρ₀)^⅓` (dense core sampled
+finely, light mantle coarsely) and a symmetric per-pair `h_ij=½(h_i+h_j)`; per-particle EOS. `HydroBody`
+gained `new_differentiated(core, mantle, core_r, total_r, u, N)`. Iron EOS updated to the verified/open
+**Wissing & Hobbs 2020** compressed-branch refit (ρ₀=7850, A=128, B=181.5 GPa, a=0.5, b=1.28, E₀=14.25
+MJ/kg); its vapor branch stays flagged provisional (stage-3 concern). Also fixed the EOS continuity test's
+tolerance (it collapsed at iron's tension zero-crossing near E_iv — the function is continuous; smaller δ +
+a bulk-modulus scale floor).
+
+**Verified (native, #[ignore], ~326 s).** `a_differentiated_iron_core_earth_settles_compresses_and_
+stratifies` (N=3000, M=5.96e24 kg):
+- **COMPRESSES, does not puff up** — settled mass-weighted RMS **3973 km** from 5709 km initial (the old
+  equal-volume prototype blew up to 15,700 km; the equal-mass fix is decisive).
+- **Stratified:** iron core (mean r 2326 km) stays inside the mantle (4591 km); core settled ρ **15,591**
+  kg/m³ (compressed above iron's ρ₀=7850 — real inner core ~13,000), mantle **5534** (real lower mantle
+  ~4400–5500). Core denser than mantle ✓.
+- **Hydrostatic balance rel 6%** at r=1986 km.
+- **Central pressure 572 GPa** vs Earth's real **364 GPa** (Wissing & Hobbs 2020) — same ORDER (~1.6×).
+  Honest caveats: coarse N=3000, Tillotson iron over-compresses at high P (a known Tillotson limitation), and
+  basalt ≠ the denser perovskite lower mantle — so order-correct, not exact.
+Stage 2a (single-material) re-verified green after the refactor — adaptive-h tightened its balance to rel
+0.00–0.01. EOS 6/6; full fast suite 151/151; wasm builds.
+
+**Why.** docs/33 stage 2: a planet that is real matter can shed its own mantle into the disk — the
+prerequisite for dissolving the rigid boundary (docs/28 #1, docs/31). The differentiated Earth is the object
+the impact (stage 3) will hit. Still isothermal (u fixed); the adiabatic energy equation is stage 3.
+
+---
+
+## 2026-07-17 — Research note: sourced EOS data + the differentiated-body method fix (docs/33)
+
+Verification dig for the layered-planet params/method (some primary tables are book-only — Melosh 1989
+p.234 — and Robin's linked review is paywalled). What I could source from OPEN literature:
+
+- **Iron Tillotson (compressed branch), Wissing & Hobbs 2020 (A&A 635 A21), refit to Brown et al. 2000
+  shock data:** ρ₀=7850, A=128 GPa, B=181.5 GPa, a=0.5, b=1.28, E₀=14.25 MJ/kg. (Vapor-branch E_iv/E_cv/α/β
+  NOT given there — still need the primary Melosh table for those; but the compressed branch is all a static
+  planet needs.) My current `eos::iron` has A=128 GPa ✓ but b, B, E₀ differ from this refit — update pending.
+- **Real Earth-layer structure, Wissing & Hobbs 2020 Table 1** (their PREM fit — a validation dataset for a
+  layered particle Earth): inner core ρ₀=7744/B₀=166 GPa, outer core 6920/115, lower mantle 4121/231,
+  transition 3622/160, asthenosphere 3380/130, crust 2300/100; M=5.97e24 kg, central P=**364.1 GPa**,
+  T_c=5300 K. (A is ≈ the bulk modulus B₀, so these cross-check the Tillotson A values.)
+- **Basalt Tillotson: VERIFIED, Benz & Asphaug 1999 Table 2** (exact match to `eos::basalt`).
+- **Differentiated-body METHOD, confirmed from Genda et al. 2012 (the puff-up fix):** SPH particles all
+  **equal mass**, placed on a **3D FCC lattice** (iron inside, rock outside), internal energy set to
+  **1.0×10⁶ J/kg**, relaxed until velocities < 100 m/s. My equal-VOLUME/unequal-mass init was the bug.
+
+Still blocked (needs the primary Melosh 1989 p.234 table or paywall access): full Tillotson sets (esp. the
+vapor branch) for **granite, dunite, and iron**. Flagged provisional in `eos.rs`.
+
+---
+
+## 2026-07-17 — Honesty pass: EOS parameter provenance + stage-2b puff-up (docs/33)
+
+**What.** Two honest corrections while extending stage 2 to a layered/differentiated planet (stage 2b):
+
+1. **EOS parameter provenance.** Stage 1's tests verify only SELF-CONSISTENCY (cold P=0, K=A, continuity),
+   NOT agreement with the literature — so a wrong-but-self-consistent parameter passes. I had written the
+   Tillotson params from memory and labeled them "cited." Verified what I could: **BASALT matches Benz &
+   Asphaug 1999 (Table 2) exactly** (ρ₀=2700, A=B=26.7 GPa, E₀=487, E_iv=4.72, E_cv=18.2 MJ/kg, α=β=5) —
+   which is why stage 2a settled cleanly. GRANITE, DUNITE, IRON I could NOT verify online (papers cite
+   Melosh 1989 p.234 but don't reproduce the table; PDFs weren't text-extractable), so `eos.rs` now flags
+   them **PROVISIONAL — unverified against the primary table**. One confirmed fix: dunite ρ₀ 3500 → **3320**
+   (Chau et al. 2018). No false "cited" claim stands.
+
+2. **Stage 2b (differentiated iron-core + peridotite-mantle body) PUFFED UP** — RMS radius blew from 2000 km
+   to ~15,700 km, mantle density collapsed to 507 kg/m³. The prototype's assertions were too weak and it
+   FALSELY passed; I reverted it. Two likely causes, both flagged: (a) the equal-volume / **unequal-mass**
+   SPH init corrupts density at the core–mantle interface — proper differentiated bodies need **equal-mass
+   particles + adaptive smoothing length** (standard SPH); (b) a bad transcribed parameter (dunite `cap_b`
+   is suspect). Deferred until both are resolved: verified params + equal-mass/adaptive-h init.
+
+**Verified.** EOS self-consistency 6/6 still green after the dunite-ρ₀ correction; single-material stage 2a
+(basalt, verified params) stands as the solid milestone. Stage 2b reverted, not shipped.
+
+**Why.** No-fudge (docs/23): don't claim "cited" without verifying, and don't ship a test that passes on a
+physically wrong (puffed-up) body. Recorded the real state rather than a green checkmark.
+
+---
+
+## 2026-07-17 — Realignment stage 2: a particle planet holds itself up (self-gravitating EOS body, docs/33)
+
+**What.** Added `hydrostatic.rs` — a self-gravitating condensed-matter body that holds itself in hydrostatic
+equilibrium as REAL MATTER (a cloud of particles), instead of the rigid analytic boundary the impact scene
+uses (docs/28 root cause #1). It is the "merge" docs/32 §3 identified: it COMPOSES the shared kernels rather
+than forking them — `eos::Tillotson` pressure (stage 1) + the one SPH kernel `atmosphere::sph_w/dw` +
+`bhtree::BarnesHut` self-gravity. `HydroBody::new_sphere` fills a sphere with equal-mass particles at ρ₀,
+each with `u=c·T`; `relax_step` settles it (damped) under self-gravity + the symmetric SPH-EOS pressure
+force `a=−Σm(P_i/ρ_i²+P_j/ρ_j²)∇W` with `P=Tillotson(ρ,u)`. The only new physics is the condensed EOS; at
+unification (docs/33 stage 5) this folds INTO `Aggregate` so a planet and its debris are one particle
+system — for now it's a focused, independently-verified module (correctness-first).
+
+**Verified (native, #[ignore], ~215 s).** `a_self_gravitating_eos_body_settles_into_hydrostatic_balance`:
+a 1500 km basalt body (N=3000) relaxed under self-gravity + Tillotson pressure —
+- **Stable:** settled RMS radius **1383 km**, spread **1.1%** over the last steps (no collapse/explosion).
+- **Hydrostatic balance pointwise:** dP/dr vs −ρ(r)·g(r) [g=G·M(<r)/r² from the enclosed particle mass] —
+  at r=484 km, −902 vs −1081 (17%); at r=761 km, **−1660 vs −1617 (3%)** — right sign, within SPH operator
+  tolerance (cf. atmosphere.rs's 3D balance at ~35%).
+- **Central pressure 2.29 GPa** vs the uniform-density self-gravity estimate 3.17 GPa — same order, a real
+  planet pressure.
+Full fast suite 151/151; wasm builds. Isothermal (u fixed) this stage — the adiabatic energy equation
+under compression is the stage 2b/3 refinement. Not yet in a scene.
+
+**Why.** The prerequisite for dissolving the rigid boundary (docs/28 #1, docs/31): a planet that is real
+matter can shed its own mantle into the disk. Proves the merge works before touching the tested `Aggregate`.
+
+---
+
+## 2026-07-17 — Realignment stage 1: the Tillotson condensed-matter EOS (docs/33)
+
+**What.** Added `eos.rs` — the **Tillotson equation of state**, `P(ρ, u)` for condensed matter across cold /
+shock-compressed / decompressed / vapor states in one closure (the giant-impact standard: Tillotson 1962;
+Melosh 1989 App. II; Benz, Cameron & Melosh 1989). This is the missing physics docs/32 §5 flagged: solids
+previously resisted compression only via a linear-elastic contact penalty (E·r/m) and planet densities were
+declared constants, so shock-compressed rock had no way to develop pressure from its density. `Tillotson`
+carries the cited parameters for **granite, basalt, peridotite (dunite/olivine analog), and iron**;
+`pressure(ρ,u)`, `sound_speed_sq(ρ,u)` (central-difference, for CFL + bulk-modulus readout), and
+`for_material(name)` lookup. Params live in `eos.rs` for now; migrating them into `data/materials.json` (a
+`tillotson` block beside `thermal`) is the flagged source-of-truth follow-up (docs/04).
+
+**Why.** The keystone of the realignment (docs/33): ONE pressure law spanning solid→liquid→vapor, replacing
+the ideal-gas-vapor + linear-elastic-penalty + declared-density patchwork. The SPH pressure-force machinery
+(`aggregate`/`atmosphere`, `a=−Σm(P_i/ρ_i²+P_j/ρ_j²)∇W`) is untouched — only the `P(ρ,u)` it evaluates
+changes — which is why a self-gravitating condensed-matter planet (stage 2) is a merge, not new machinery.
+
+**Verified (native, TDD — 6 tests).** `cold_reference_state_has_zero_pressure` (P(ρ₀,0)≈0);
+`cold_compression_gives_the_bulk_modulus` (K=ρ·dP/dρ at ρ₀ matches each material's A within 2% — a REAL
+bulk modulus, not a contact-spring surrogate); `compression_monotonically_raises_pressure` (stiffens to GPa
+scale — the impact regime); `hot_expansion_relaxes_toward_vanishing_pressure` (fully-vaporized expanded
+parcel → the ideal-gas limit a·ρu); `pressure_is_continuous_across_the_vaporization_boundaries` (no jump at
+E_iv/E_cv); `sound_speed_is_real_and_of_the_expected_order` (c≈√(A/ρ₀), km/s). Full fast suite 151/151; wasm
+builds. Not yet wired into any scene (stage 2 builds the self-gravitating planet on it) — nothing to
+rig-watch/deploy yet.
+
+---
+
+## 2026-07-17 — Architecture map + first-principles realignment plan (docs/32, docs/33, CLAUDE.md)
+
+**What.** Mapped the whole engine and wrote it up for future Claude sessions (Robin: too many "surprises"
+about what already exists). Four parallel readers covered the physics core, terrain/atmosphere, scene/render/
+GPU, and docs/build/deploy; synthesized into **docs/32-architecture-map.md** (module-by-module with
+`file:line` anchors, the shared-laws-vs-forked-solvers map, the EOS inventory, the birth-of-the-Moon scene
+trace, and the workflow rules), a concise auto-loaded **CLAUDE.md** pointing to it, and
+**docs/33-architecture-realignment.md** — a staged plan to realign the architecture to Integrity's
+principles (Robin's three framings: material physics scalable · calculations tiered on energy scale ·
+everything a natural product of the real physics).
+
+**Key finding.** The physics *laws* are already unified and scale-invariant (`granular::Contact`, the SPH
+kernel, `Furrow` excavation, `plough_loft`, `Body`, `LayeredBody`); the *solvers and containers* are FORKED
+— two container universes (CPU `Aggregate` f64 vs voxel-`World`/GPU f32), four integrators over one law, the
+rigid-boundary fork (Earth is a penalty sphere, not particles — docs/28 #1), and **no condensed-matter EOS**
+(solids resist via a linear-elastic contact penalty; planet densities are declared constants). A
+self-gravitating EOS planet turns out to be a MERGE, not new machinery: `atmosphere.rs`'s verified SPH
+pressure kernel + `bhtree.rs` self-gravity + `aggregate.rs::apply_thermo` energy equation, with the ideal-gas
+EOS swapped for a Tillotson EOS — only the EOS is genuinely new.
+
+**The realignment (docs/33).** One particle/material engine every scene drives: one container (bulk forms
+are the coarse *energy tier* of the same particles, not a separate universe), one pressure law (Tillotson EOS
+spanning solid→liquid→vapor, replacing the ideal-gas + linear-elastic + declared-density patchwork), one
+energy-tiered stepper (fidelity T0 bulk → T1 quasi-static → T2 granular+thermal → T3 full EOS shock/vapor,
+selected by energy density vs the material's own thresholds — generalizing docs/08/13 spatial LOD to
+energy-tiered physics via the docs/16 awake-set). Staged correctness-first: (1) Tillotson EOS module +
+tests, (2) self-gravitating EOS planet vs planet.rs's analytic hydrostatic profile, (3) two-body impact both
+bodies as particles → re-measure the isotopic crisis, (4) GPU-resident unified stepper at N~10⁵, (5) unify
+the containers, (6) formalize the energy-tiered awake-set. Full-particle-Earth is milestones 2–3.
+
+**Why.** Robin's directives: all particle physics in ONE scale-invariant module; build the hard correct
+physics first (GPU/full-res if needed), optimize physics-faithfully later; everything a natural product of
+the real physics. The map stops the rediscovery; the plan makes the full-particle-Earth build the forcing
+function of the realignment rather than a side quest.
+
+**Verified.** Docs only — no code change. Existing suite unaffected.
+
+---
+
+## 2026-07-16 — The isotopic crisis: physics says proto-Earth spin is NOT the lever (docs/31)
+
+**What.** Opened the isotopic crisis (docs/31, "Option C"): the canonical impact makes a **Theia-dominated**
+disk, but the real Moon is isotopically Earth-like. Tested **Ćuk & Stewart (2012)'s** proposed resolution —
+a *fast-spinning* proto-Earth flings its own mantle into the disk. Implemented proto-Earth spin honestly:
+the excavated Earth cap is surface mantle that was **co-rotating before the impact**, so each `SOURCE_TARGET`
+grain is now born with `ω × (pos − centre)` (added in `build_impact_debris_scaled` before the ploughing
+loft, so the momentum exchange acts on the real pre-impact velocity; `earth_omega = 0` is byte-identical to
+before). Scene wired: `lib.rs` converts `spin_l → ω = L/I` (solid sphere) and passes it, default **zero**
+(unknown IC, flagged) — nothing changes on screen; the plumbing just lets a spin be *explored*.
+
+**MEASURED (physics deciding against the hypothesis).** `a_fast_spinning_protoearth_makes_the_disk_earth_
+derived` (#[ignore], N=256+512, 3000×2 s), non-spinning vs a 2.3 h-day proto-Earth (ω·R ≈ 4835 m/s):
+- ω=0    : Earth **0.162** | Theia 1.241 M☾ → disk is **12 % Earth**
+- ω=fast : Earth **0.181** | Theia 2.412 M☾ → disk is **7 % Earth**
+
+A fast spin lofts *slightly* more Earth material (0.162→0.181) and injects a lot of angular momentum, so the
+whole bound disk grows (1.40→2.59 M☾) — but it retains proportionally **more Theia**, so the Earth *fraction*
+FALLS, 12 %→7 %. **Spinning the target does not resolve the crisis in our model.**
+
+**Why — and the real lever.** Direct consequence of docs/28 root cause #1: **Earth is a rigid boundary**, so
+the only Earth material that can reach the disk is the small excavated cap. The actual Ćuk & Stewart
+mechanism is a spinning proto-Earth shedding its **bulk mantle** — which a rigid analytic sphere cannot do.
+So 7 % is a LOWER BOUND the rigid boundary imposes, and adding spin only speeds up the material that *is*
+free to move (overwhelmingly Theia). The honest resolution needs **Earth-as-deformable-matter** (docs/28 #1)
+or **vapor-phase Earth↔Theia mixing** (now partly reachable via the SPH vapor field, docs/26/27) — NOT
+target spin. Documented in docs/31 with the next experiments.
+
+**Why.** No-fudge (docs/23): we set a physical initial condition (spin) and let the disk provenance EMERGE;
+when it emerged *against* the hypothesis we recorded that, and the test now asserts only the robust mechanics
+(spin ⇒ larger bound disk) plus the measured ceiling (fraction does not rise), printing the provenance split.
+
+**Verified (native).** Full fast suite 145/145; the measurement test green with the corrected (measured)
+assertions; wasm builds; scene byte-unchanged at the default zero spin.
+
+---
+
+## 2026-07-16 — The accelerated compute module: neighbour grid + Barnes–Hut + block timesteps (docs/30)
+
+**What.** Built the reusable **accelerated particle compute module** (docs/30) so the impact disk can run
+at high N without the O(N²) wall — a general substrate (any particle system: weather, clouds, fluids), not
+an impact special-case. Four stages, each its own crate/module with a brute-force fallback below a size
+threshold and a test that pins it to the exact/near-exact reference:
+
+- **Stage 1a/1b — neighbour grid** (`neighbors.rs`). A spatial-hash `NeighborGrid::build(pos, cell)` +
+  `for_each_pair` that finds every short-range pair in O(N) instead of O(N²), then wired into the contact
+  and SPH density/pressure loops (one `sr_grid` built per step from shared `sr_pos`/`masses`). Brute-force
+  below 512 bodies. Test: `grid_finds_exactly_the_brute_force_pairs` (exact — the grid is not an
+  approximation).
+- **Stage 1c — Barnes–Hut self-gravity** (`bhtree.rs`). An octree caching per-node COM+mass; a particle
+  uses a node as ONE source when its angular size `(2·half)/dist < θ` (θ=0.5), turning O(N²) self-gravity
+  into O(N log N). Same Plummer softening as the direct sum — the same physics, grouped. Test:
+  `barnes_hut_matches_brute_force_within_theta_bound` (RMS < 1% at θ=0.5; θ→0 recovers brute force to 1e-9).
+- **Stage 3 — block timesteps** (`aggregate.rs`). A per-particle timestep criterion (`particle_timesteps`:
+  √(ε/|a|) free-fall, capped by the |v|/|a| turnaround), then a hierarchical **block KDK** integrator
+  (`step_block`): power-of-two rungs, the quiescent disk coasts while the shocked/vapor core sub-steps.
+  The subset-force pass (`accelerations_masked` + `BarnesHut::accelerations_active`) recomputes gravity
+  only for the bodies being kicked this sub-step — O(N_active log N). Thermo (PdV cooling, radiation,
+  phase flip, dissipation heating) was extracted into `apply_thermo` and now runs each sub-step, so
+  `step_block` is a faithful full-physics drop-in for `step()`. Wired into the space scene.
+
+Also this pass: the impact scene now runs at **high N (512 debris + 1024 cap)** with the cap-mass fix
+restored (`cap_mass` summed from the real per-grain target masses, not the `moon_mass·CAP_N/DEBRIS_N`
+bookkeeping that the 07-15 entry flagged as ≈6.5× high); and two **watching** tools so the agent can see
+what Robin sees — `rig/birth_shot.mjs` (headless-Chromium screenshots of birth.html at timed marks) and a
+"📷 Share view" button on the space band that POSTs the live canvas.
+
+**Why.** docs/30: temporal + spatial coherence is the "MPEG for physics" — most of the cloud barely moves
+per step (the block scheduler's coasting rungs are the delta-frames; the grid/tree are the spatial
+compression). Getting the disk to lunar-mass resolution needs O(N log N), and the module has to be generic
+because the same substrate runs every future particle system. No-fudge (docs/23): every accelerator is
+proven against its exact/θ-bounded reference, so speed never changes the answer.
+
+**Verified (native).** Full suite green; `grid_finds_exactly_the_brute_force_pairs`,
+`barnes_hut_matches_brute_force_within_theta_bound`, `contact_grid_matches_brute_force`,
+`particle_timesteps_shrink_with_acceleration`, `step_block_conserves_energy_and_matches_global_dt`, and
+— the decisive one — `birth_impact_with_step_block_reproduces_the_disk`: the REAL coupled impact gives
+**global step() 0.772 M☾ vs block step_block 0.788 M☾** (matches). `step_block_speedup_bench` measures
+**5.5× faster** on an aftermath-shape cloud (1330 ms → 241 ms). On-screen: deployed to
+integrity.bothead.net (build 20260716.081104) and rig-watched — the disk forms and evolves identically to
+the global integrator (T+24m: 2.44 M☾ in 42 accreting moonlets, Earth-origin material aloft), no regression.
+
+---
+
+## 2026-07-15 — Vapor gets a real pressure field: SPH + a latent-heat reservoir (docs/26/27, docs/28 item 5)
+
+**What.** Replaced the vapor "overlap hack" with a real **SPH pressure field** so the impact-generated
+vapor expands and cools as a gas from first principles, not a scripted push. `aggregate.rs`: a cubic-spline
+kernel gives each vapor particle a density ρ=Σm_jW(r,h); pressure P=ρ·R_s·T; a symmetric,
+momentum-conserving pressure force; and a PdV energy equation so expansion does real work and the gas
+cools itself. Then a **latent-heat reservoir** (docs/28): the pressure reads the *thermal* temperature
+`T − L_v/c`, so the energy locked in the vaporization latent heat is not double-counted as pressure — the
+vapor holds heat honestly on the phase boundary instead of over-puffing. Also shipped the
+`disk_orbit_vs_resolution` diagnostic sweep (the disk grows toward lunar mass with N: 0.77→1.27→1.41 M☾ at
+N=384/768/1536).
+
+**Why.** docs/26/27: the atmosphere/vapor must be *matter under its own pressure*, not a visual. The old
+overlap repulsion was a fudge (docs/23); SPH is the honest continuum form, and the latent-heat correction
+keeps the first law intact across the solid↔vapor phase change (docs/28 item 5).
+
+**Verified (native).** `vapor_sph_expands_and_cools_conserving_energy` — a hot vapor ball expands under
+its own pressure and self-cools (80k → 18.5k K), total energy conserved to within drift; the latent-heat
+fix dropped a spurious vapor↔vapor dissipation heating that had inflated both temperature and disk mass
+(disk 0.066 → 0.132 M☾, peak T 52k → 18.5k K — honest physics over the bigger-but-wrong number). Full
+suite green.
+
+---
+
 ## 2026-07-15 — The Moon becomes Earth-derived: a momentum-conserving loft breaks the 0.000 deficit
 
 **What.** Closed docs/28 step 3. Earth (target) material now LOFTS into the bound proto-lunar disk —

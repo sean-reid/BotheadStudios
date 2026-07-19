@@ -34,6 +34,33 @@ pub fn gas_contact_from_material(mat: &Material, radius: f64, parcel_mass: f64, 
 }
 
 /// Specific gas constant R_s = R_u/M (J/(kg·K)) from the material's declared molar mass.
+/// Cubic spline SPH kernel W(r, h), 3D-normalized (σ = 8/(π h³)), support 0..h. The ONE kernel used by
+/// both the air field ([`AirField`]) and the impact vapor (`aggregate`'s SPH pressure) — docs/23: one law.
+pub fn sph_w(r: f64, h: f64) -> f64 {
+    let q = r / h;
+    let sigma = 8.0 / (std::f64::consts::PI * h.powi(3));
+    if q < 0.5 {
+        sigma * (6.0 * (q * q * q - q * q) + 1.0)
+    } else if q < 1.0 {
+        sigma * 2.0 * (1.0 - q).powi(3)
+    } else {
+        0.0
+    }
+}
+
+/// dW/dr — the cubic-spline kernel gradient magnitude (negative on 0..h ⇒ pressure is repulsive).
+pub fn sph_dw(r: f64, h: f64) -> f64 {
+    let q = r / h;
+    let sigma = 8.0 / (std::f64::consts::PI * h.powi(4));
+    if q < 0.5 {
+        sigma * (18.0 * q * q - 12.0 * q)
+    } else if q < 1.0 {
+        sigma * -6.0 * (1.0 - q) * (1.0 - q)
+    } else {
+        0.0
+    }
+}
+
 pub fn specific_gas_constant(mat: &Material) -> f64 {
     let m = mat.thermal.as_ref().map_or(0.0, |t| t.molar_mass as f64);
     if m > 0.0 {
@@ -156,28 +183,12 @@ impl AirField {
 
     /// Cubic spline kernel W(r, h), 3D-normalized (σ = 8/(π h³)), support 0..h.
     fn w(&self, r: f64) -> f64 {
-        let q = r / self.h;
-        let sigma = 8.0 / (std::f64::consts::PI * self.h.powi(3));
-        if q < 0.5 {
-            sigma * (6.0 * (q * q * q - q * q) + 1.0)
-        } else if q < 1.0 {
-            sigma * 2.0 * (1.0 - q).powi(3)
-        } else {
-            0.0
-        }
+        sph_w(r, self.h)
     }
 
     /// dW/dr — the kernel gradient magnitude.
     fn dw(&self, r: f64) -> f64 {
-        let q = r / self.h;
-        let sigma = 8.0 / (std::f64::consts::PI * self.h.powi(4));
-        if q < 0.5 {
-            sigma * (18.0 * q * q - 12.0 * q)
-        } else if q < 1.0 {
-            sigma * -6.0 * (1.0 - q) * (1.0 - q)
-        } else {
-            0.0
-        }
+        sph_dw(r, self.h)
     }
 
     /// Kernel density estimate at every parcel (includes self-contribution and floor ghosts).

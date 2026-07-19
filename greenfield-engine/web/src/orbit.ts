@@ -103,12 +103,21 @@ async function main(): Promise<void> {
     // this one script via <body data-moons>/<body data-scene>).
     const demo = await OrbitDemo.create(canvas, numMoons);
     // Birth of the Moon (docs/27): body 2 becomes Theia, inbound ~5 real seconds from impact — the
-    // physics is identical machinery; only the declared impactor changes.
+    // physics is identical machinery; only the declared impactor changes. (The GPU SPH deformable impact
+    // — docs/33 stage 5 — is available via the "🌋 GPU Impact" button; auto-starting it on load blocks the
+    // main thread on the CPU relax, so it stays a deliberate trigger until that build is made non-blocking.)
+    // Birth of the Moon (docs/27): body 2 becomes Theia, inbound ~5 real seconds from impact — the CPU
+    // Aggregate scene that lofts an orbiting disk → moonlets → a Moon in orbit. The GPU SPH deformable impact
+    // (docs/33 stage 5) is available via the "🌋 GPU Impact" button, but at browser resolution (N~700, no
+    // per-substep adaptive dt) it still disperses rather than forming a stable orbiting disk — so it stays a
+    // WORK-IN-PROGRESS demo, not the default birth scene, until its energy conservation is fixed.
     if (birthScene) demo.start_birth();
     hideStatus();
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;
     report("info", "orbit demo created OK");
+    // Rig-watch / debug handle (docs/33 stage 4c.4): lets a headless driver call demo.start_gpu_impact().
+    (window as unknown as { __demo?: OrbitDemo }).__demo = demo;
 
     // --- Control bar: frame of reference + the orbital-decay experiment + time control ---
     // Controls live on the LEFT, stacked vertically — the bottom bar overlapped the simulation
@@ -164,10 +173,22 @@ async function main(): Promise<void> {
 
     // The viewport is a physical frame of reference (docs/17): the camera rides a body, so we can watch
     // the encounter from either standpoint. "Camera on Moon" frames the impact site once it shatters.
+    let wantShot = false;
     const camEarth = mkBtn("📷 Earth", () => demo.focus_earth());
     const camMoon = mkBtn("📷 Moon", () => demo.focus_moon());
+    // Share view: upload exactly what's on screen (the canvas) so the agent can look at the debris swarm /
+    // disk. Grabbed in the render loop right after present; POSTed to /__shot (dev server, or the deployed
+    // shot receiver proxied at /__shot).
+    mkBtn("📷 Share view", () => {
+      wantShot = true;
+      setStatus("capturing view…");
+    });
     void camEarth;
     void camMoon;
+
+    // GPU deformable-Earth giant impact (docs/33 stage 4c.4): swap the rigid-Earth model for the live
+    // GPU SPH particle field — two differentiated bodies colliding, stepped by sph_step.wgsl in-browser.
+    mkBtn("🌋 GPU Impact", () => demo.start_gpu_impact());
 
     // Orbital decay: brake the Moon until its orbit crashes into the planet. (The birth scene has no
     // such controls — the encounter IS the scene; Reset replays it.)
@@ -396,6 +417,14 @@ async function main(): Promise<void> {
       if (demo.earth_day_hours() > 0) {
         physics.push(`Earth day <b>${demo.earth_day_hours().toFixed(1)} h</b>`);
       }
+      // GPU SPH impact (docs/33 stage 5): live disk provenance from the read-back particle field.
+      const gpuDisk = demo.gpu_disk_stats_json();
+      if (gpuDisk !== "null") {
+        const g = JSON.parse(gpuDisk) as { disk: number; earth_pct: number; moon: number };
+        physics.push(
+          `GPU impact · disk <b>${g.disk.toFixed(2)}</b> M☾ (<b>${g.earth_pct}%</b> Earth) · moon <b>${g.moon.toFixed(2)}</b> M☾`,
+        );
+      }
       hud.update({
         title: `<b>${windowTitle}</b> · Sun · Earth · ${body3} · frame <b>${demo.focus_label()}</b>`,
         physics,
@@ -445,6 +474,22 @@ async function main(): Promise<void> {
       } catch (err) {
         setStatus(`render error: ${String(err)}`, true);
         return;
+      }
+      // Share view: capture the freshly-presented frame and upload it (see the button above).
+      if (wantShot) {
+        wantShot = false;
+        try {
+          const url = canvas.toDataURL("image/png");
+          void fetch("/__shot", {
+            method: "POST",
+            headers: { "content-type": "text/plain" },
+            body: url,
+          })
+            .then(() => report("info", `view posted (${url.length} chars)`))
+            .catch((e) => report("error", `view upload failed: ${String(e)}`));
+        } catch (e) {
+          report("error", `view capture failed: ${String(e)} (WebGPU canvas may need readback)`);
+        }
       }
       if (firstFrame) {
         report("info", "first orbit frame rendered OK");
