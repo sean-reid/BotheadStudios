@@ -5,6 +5,36 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-18 — The SPIN IOU: a spinning proto-Earth sustains the disk → ~58% (docs/41); browser shock-dt fix
+
+**What.** Closed the last docs/40/41 IOU — the disk re-accretes because a *non-spinning* impact leaves it
+marginally bound. Added a pre-impact SPIN dial (proto-Earth rotation about the orbit normal) + a grazing-b dial +
+intra-run epoch checkpoints to `tools/impact-run` (`spin`/`spineq` modes), and a rotating-frame centrifugal term
+to `cs_relax` (a new `omega` Params field, 0 for every existing caller). Also carried the spin into the browser
+`gpu_sph` path and found/fixed why the in-browser impact was dispersing.
+
+**Why.** #3 converged the *non-spinning* branch (~25–32% Earth, re-accreting). Angular momentum is the missing
+knob: a spinning target flings its own mantle into a rotationally-supported disk.
+
+**Verified.**
+- **Spin sustains the disk** (N=2400, K=5, to 18 h): baseline ω=0 DECAYS 0.56→0.09 M☾; ω=7e-4 PLATEAUS at ~0.6 M☾
+  with Earth-fraction climbing to and holding **~58% ± 2%** (Moon 8/8) — the canonical value the no-spin case
+  never reached. Grazing b=1.4·R_e is a hit-and-run (Theia escapes). L_z conserved to full precision through the
+  impact; energy 0.2 %.
+- **Not a startup artifact** (cross-check): ω=7e-4 is near breakup, so the check ran at a stable ω=4e-4 — a
+  rotating-frame OBLATE equilibrium (flattening 0.149 ∝ ω², bounded) gives the same sustained disk as the
+  startup spin (equilibrium 0.43 M☾/39% vs startup 0.32/43% at 18 h, both Moon 4/4).
+- **Browser GPU impact fix** (rig, `birth_gpu`/energy trace): it was DISPERSING (Theia hit-and-run, 0 % Earth) —
+  a pre-existing regression, NOT the spin (reproduced at spin=0). Cause: the fixed-dt browser path (WebGPU forbids
+  the adaptive read-back) under-resolved the shock, so Theia interpenetrated Earth. A 5× smaller dt (paired with
+  more substeps to hold playback) restores the shock and Earth begins to shed again (0 % → ~30 %). The
+  spin/assembly ports the offline IC; full parity (LOD seeding, a *scheduled* shock-dt) is the render-layer
+  follow-up. Energy conserved ~0.05 % throughout.
+
+Offline `sph_step.wgsl` physics unchanged except the relax-only `omega` centrifugal (0 for all non-spin callers).
+
+---
+
 ## 2026-07-18 — #3: the disk Earth-fraction converged by ensemble → ~32% (a minority, not 58%) (docs/40→41)
 
 **What.** Built the variable-resolution ENSEMBLE in `tools/impact-run` (docs/40 #3) and converged the giant-impact

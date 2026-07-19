@@ -68,7 +68,7 @@ struct Params {
     bucket_k: u32,
     dt: f32,
     damp: f32,
-    _p0: f32,
+    omega: f32, // cs_relax rotating-frame rate (rad/s); 0 for all non-spin-relax dispatches
     _p1: f32,
     _p2: f32,
 }
@@ -217,6 +217,17 @@ fn body_radius(ps: &[Particle]) -> f64 {
     let c = com(ps);
     ps.iter().map(|p| { let d = [p.pos[0] as f64 - c[0], p.pos[1] as f64 - c[1], p.pos[2] as f64 - c[2]]; (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() }).fold(0.0, f64::max)
 }
+// Equatorial (x-y plane) and polar (|z|) extents about the COM — a rotating equilibrium is oblate (r_eq > r_pol).
+fn earth_shape(ps: &[Particle]) -> (f64, f64) {
+    let c = com(ps);
+    let (mut r_eq, mut r_pol) = (0.0f64, 0.0f64);
+    for p in ps {
+        let (x, y, z) = (p.pos[0] as f64 - c[0], p.pos[1] as f64 - c[1], p.pos[2] as f64 - c[2]);
+        r_eq = r_eq.max((x * x + y * y).sqrt());
+        r_pol = r_pol.max(z.abs());
+    }
+    (r_eq, r_pol)
+}
 // perigee of a bound orbit (None if unbound) — ports orbit::perigee.
 fn perigee(rel_p: [f64; 3], rel_v: [f64; 3], mu: f64) -> Option<f64> {
     let r = (rel_p[0] * rel_p[0] + rel_p[1] * rel_p[1] + rel_p[2] * rel_p[2]).sqrt();
@@ -345,13 +356,13 @@ impl Gpu {
     }
 
     // Damped GPU relaxation at a fixed dt (chosen from the initial signal min) for `steps` steps.
-    fn relax(&self, particles: &[Particle], eos: &[Eos], soft: f64, cfl: f64, damp: f64, steps: usize) -> Vec<Particle> {
+    fn relax(&self, particles: &[Particle], eos: &[Eos], soft: f64, cfl: f64, damp: f64, steps: usize, omega: f64) -> Vec<Particle> {
         let cell_size = particles.iter().map(|p| p.h).fold(0.0f32, f32::max);
         // AV-FREE relaxation (docs/35): the CPU `HydroBody::relax_step` settles on gravity + SPH pressure only
         // (`accelerations()`, no Monaghan AV). AV is a velocity-dependent dissipation for APPROACHING particles;
         // leaving it on during the damped settle corrupts the equilibrium and the subsequent impact DISPERSES
         // (loses orbits) — the docs/35 GPU finding. AV is restored (α=1,β=2) for the impact, where the shock is.
-        let mut params = Params { n: particles.len() as u32, softening: soft as f32, av_alpha: 0.0, av_beta: 0.0, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0, damp: damp as f32, _p0: 0.0, _p1: 0.0, _p2: 0.0 };
+        let mut params = Params { n: particles.len() as u32, softening: soft as f32, av_alpha: 0.0, av_beta: 0.0, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0, damp: damp as f32, omega: omega as f32, _p1: 0.0, _p2: 0.0 };
         let b = self.make_buffers(particles, eos, &params);
         // dt from the initial state (density → signal); fixed for the relaxation.
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -375,17 +386,20 @@ impl Gpu {
         self.read_particles(&b)
     }
 
-    // KDK impact with adaptive Courant dt (per-step signal read-back). Integrates until the physical time
-    // reaches `t_target` seconds (or the `max_steps` safety cap), so runs at DIFFERENT N are compared at the
-    // SAME epoch — essential because the disk RE-ACCRETES over time, so the fraction is epoch-dependent and a
-    // fixed step count integrates different physical times at different N. Returns (final particles, total t).
-    fn impact(&self, particles: &[Particle], eos: &[Eos], soft: f64, cfl: f64, max_steps: usize, t_target: f64) -> (Vec<Particle>, f64) {
+    // KDK impact with adaptive Courant dt (per-step signal read-back). Integrates through the ascending
+    // `checkpoints` (seconds), reading back a snapshot at each — so ONE run reveals the disk's time-evolution
+    // (does it plateau = rotationally sustained, or decay = re-accrete?). A checkpoint read-back copies the
+    // particle buffer without disturbing the sim, so integration continues unaffected. Returns one snapshot per
+    // checkpoint (final state padded in if the max_steps safety cap is hit early) and the total physical time.
+    fn impact(&self, particles: &[Particle], eos: &[Eos], soft: f64, cfl: f64, max_steps: usize, checkpoints: &[f64]) -> (Vec<Vec<Particle>>, f64) {
         let cell_size = particles.iter().map(|p| p.h).fold(0.0f32, f32::max);
-        let mut params = Params { n: particles.len() as u32, softening: soft as f32, av_alpha: AV_ALPHA, av_beta: AV_BETA, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0, damp: 1.0, _p0: 0.0, _p1: 0.0, _p2: 0.0 };
+        let mut params = Params { n: particles.len() as u32, softening: soft as f32, av_alpha: AV_ALPHA, av_beta: AV_BETA, cell_size, table_mask: TABLE_SIZE - 1, bucket_k: BUCKET_K, dt: 0.0, damp: 1.0, omega: 0.0, _p1: 0.0, _p2: 0.0 };
         let b = self.make_buffers(particles, eos, &params);
+        let t_end = checkpoints.last().copied().unwrap_or(0.0);
+        let mut snaps: Vec<Vec<Particle>> = Vec::with_capacity(checkpoints.len());
         let mut t = 0.0f64;
         let mut s = 0usize;
-        while t < t_target && s < max_steps {
+        while t < t_end && s < max_steps {
             // eval 1 (+ signal) → read adaptive dt → half-kick+drift
             let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             self.force_eval(&mut enc, &b);
@@ -402,14 +416,21 @@ impl Gpu {
             self.queue.submit(Some(enc.finish()));
             t += dt;
             s += 1;
+            // read back a snapshot for every checkpoint the step just crossed
+            while snaps.len() < checkpoints.len() && t >= checkpoints[snaps.len()] {
+                self.device.poll(wgpu::Maintain::Wait);
+                snaps.push(self.read_particles(&b));
+            }
             if s % 500 == 0 {
                 self.device.poll(wgpu::Maintain::Wait);
-                println!("  impact step {:>5} (≤{})  dt={:.3}s  t={:.0}s ({:.2}/{:.2} h)", s, max_steps, dt, t, t / 3600.0, t_target / 3600.0);
+                println!("  impact step {:>5} (≤{})  dt={:.3}s  t={:.0}s ({:.2}/{:.2} h)", s, max_steps, dt, t, t / 3600.0, t_end / 3600.0);
             }
         }
+        // pad any un-reached checkpoints with the final state (max_steps cap hit before t_end)
         self.device.poll(wgpu::Maintain::Wait);
-        println!("  impact done: {} steps → t={:.2} h (target {:.2} h)", s, t / 3600.0, t_target / 3600.0);
-        (self.read_particles(&b), t)
+        while snaps.len() < checkpoints.len() { snaps.push(self.read_particles(&b)); }
+        println!("  impact done: {} steps → t={:.2} h ({} checkpoints)", s, t / 3600.0, checkpoints.len());
+        (snaps, t)
     }
 }
 
@@ -458,7 +479,7 @@ const R_THEIA: f64 = 2.7e6; // ~1/7 Earth mass, differentiated (iron core essent
 
 // Build + relax (once) the LOD Earth and the fine Theia at the given fine mass. `earth_n` sets the TOTAL Earth
 // particle count (m_fine is solved from it and COARSE_FACTOR). Returns (earth_relaxed, theia_relaxed, soft).
-fn build_and_relax(gpu: &Gpu, eos: &[Eos], earth_n: usize) -> (Vec<Particle>, Vec<Particle>, f64) {
+fn build_and_relax(gpu: &Gpu, eos: &[Eos], earth_n: usize, omega_relax: f64) -> (Vec<Particle>, Vec<Particle>, f64) {
     const FTP: f64 = 4.0 / 3.0 * std::f64::consts::PI;
     let r_ic = 0.5 * R_SURF;
     let (iron, basalt) = (eos_iron(), eos_basalt());
@@ -476,19 +497,49 @@ fn build_and_relax(gpu: &Gpu, eos: &[Eos], earth_n: usize) -> (Vec<Particle>, Ve
     println!("build: Earth {} particles ({} coarse core @ {:.1}×m_fine + {} fine mantle), Theia {} particles, m_fine={:.2e} kg, soft={:.0} m",
         earth.len(), n_core, COARSE_FACTOR, earth.len() - n_core, theia.len(), m_fine, soft);
 
-    println!("relaxing Earth ({} particles)...", earth.len());
-    earth = gpu.relax(&earth, eos, soft, 0.2, 0.94, (earth.len() / 3 + 1500).min(6000));
+    if omega_relax != 0.0 {
+        println!("relaxing Earth ({} particles) in the ROTATING frame at ω={:.2e} rad/s (oblate equilibrium)...", earth.len(), omega_relax);
+    } else {
+        println!("relaxing Earth ({} particles)...", earth.len());
+    }
+    earth = gpu.relax(&earth, eos, soft, 0.2, 0.94, (earth.len() / 3 + 1500).min(6000), omega_relax);
     println!("relaxing Theia ({} particles)...", theia.len());
-    theia = gpu.relax(&theia, eos, soft, 0.2, 0.94, (theia.len() / 3 + 1500).min(6000));
-    println!("post-relax radii: R_earth={:.0} km, R_theia={:.0} km", body_radius(&earth) / 1e3, body_radius(&theia) / 1e3);
+    theia = gpu.relax(&theia, eos, soft, 0.2, 0.94, (theia.len() / 3 + 1500).min(6000), 0.0);
+    // report the equatorial vs polar radius (oblateness) so a spun relaxation is visibly flattened
+    let (r_eq, r_pol) = earth_shape(&earth);
+    println!("post-relax radii: R_earth={:.0} km (eq {:.0} / pol {:.0} → flattening {:.3}), R_theia={:.0} km", body_radius(&earth) / 1e3, r_eq / 1e3, r_pol / 1e3, (r_eq - r_pol) / r_eq.max(1.0), body_radius(&theia) / 1e3);
     (earth, theia, soft)
 }
 
-// Place the relaxed bodies into the oblique collision IC, optionally apply a tiny deterministic jitter (an
-// ensemble realization), integrate the impact on the GPU, and return the order-independent measurement.
-// `jitter_run = None` is the nominal (unperturbed) impact. `verbose` prints the per-run diagnostics.
-fn run_and_measure(gpu: &Gpu, eos: &[Eos], earth_relaxed: &[Particle], theia_relaxed: &[Particle], soft: f64, t_target: f64, jitter_run: Option<u64>, verbose: bool) -> Measure {
-    const MAX_STEPS: usize = 40000; // safety cap; the physical-time target is the real stop
+// The collision initial condition. `b_over_re` is the impact parameter in units of R_earth (baseline 1.0;
+// larger = more grazing = more ORBITAL angular momentum). `omega` is a pre-impact SPIN of proto-Earth about the
+// orbit-normal (+z) axis in rad/s (adds SPIN angular momentum, coherent with the orbital L). The spin IOU
+// (docs/41): with too little L the disk re-accretes; raising L (grazing and/or spin) should let it plateau.
+#[derive(Clone, Copy)]
+struct Ic {
+    b_over_re: f64,
+    omega: f64,
+}
+impl Default for Ic {
+    fn default() -> Self { Ic { b_over_re: 1.0, omega: 0.0 } } // the docs/41 baseline (b = R_earth, no spin)
+}
+
+// Net angular momentum about +z (the orbital-plane normal): Σ mᵢ (xᵢ vyᵢ − yᵢ vxᵢ), about the system COM.
+fn angular_momentum_z(body: &[Particle]) -> f64 {
+    let c = com(body);
+    let mut lz = Vec::with_capacity(body.len());
+    for p in body {
+        let (x, y) = (p.pos[0] as f64 - c[0], p.pos[1] as f64 - c[1]);
+        lz.push(p.mass as f64 * (x * p.vel[1] as f64 - y * p.vel[0] as f64));
+    }
+    sum_oi(&mut lz)
+}
+
+// Place the relaxed bodies into the collision IC (`ic`), optionally apply a tiny deterministic jitter (an
+// ensemble realization), integrate the impact on the GPU, and return the order-independent measurement AT EACH
+// checkpoint epoch (seconds, ascending). `jitter_run = None` is the nominal impact; `verbose` prints diagnostics.
+fn run_and_measure(gpu: &Gpu, eos: &[Eos], earth_relaxed: &[Particle], theia_relaxed: &[Particle], soft: f64, ic: Ic, checkpoints: &[f64], jitter_run: Option<u64>, verbose: bool) -> Vec<Measure> {
+    const MAX_STEPS: usize = 60000; // safety cap; the physical-time checkpoints are the real stop
     let mut earth = earth_relaxed.to_vec();
     let mut theia = theia_relaxed.to_vec();
     let (m_earth, m_theia): (f64, f64) = (earth.iter().map(|p| p.mass as f64).sum(), theia.iter().map(|p| p.mass as f64).sum());
@@ -496,11 +547,14 @@ fn run_and_measure(gpu: &Gpu, eos: &[Eos], earth_relaxed: &[Particle], theia_rel
     let n_earth = earth.len();
     let contact = r_e + r_t;
     let v_esc = 1.15 * (2.0 * G * (m_earth + m_theia) / contact).sqrt();
-    let (d0, b_param) = (1.6 * contact, 1.0 * r_e);
+    let (d0, b_param) = (1.6 * contact, ic.b_over_re * r_e);
+    // Proto-Earth at the origin, spun as a rigid body about +z: v = ω ẑ × r = ω(−y, x, 0). (Applied to the
+    // relaxed sphere and impacted promptly — not re-relaxed into a rotational equilibrium; ω is kept modest.)
     let ec = com(&earth);
     for p in earth.iter_mut() {
         for k in 0..3 { p.pos[k] -= ec[k] as f32; }
-        p.vel = [0.0; 3];
+        let (x, y) = (p.pos[0] as f64, p.pos[1] as f64);
+        p.vel = [(-ic.omega * y) as f32, (ic.omega * x) as f32, 0.0];
     }
     let tc = com(&theia);
     let offset = [d0, b_param, 0.0];
@@ -521,31 +575,27 @@ fn run_and_measure(gpu: &Gpu, eos: &[Eos], earth_relaxed: &[Particle], theia_rel
 
     let with_pe = verbose && body.len() <= 40000; // O(N²) CPU PE — only for the single-run diagnostic
     let (ke0, ie0, pe0) = total_energy(&body, soft, with_pe);
+    let lz0 = angular_momentum_z(&body);
     if verbose {
-        println!("collision: M_e={:.3e} kg, M_t={:.3e} kg, v_esc={:.0} m/s, b={:.0} km, N={}", m_earth, m_theia, v_esc, b_param / 1e3, body.len());
+        println!("collision: M_e={:.3e} kg, M_t={:.3e} kg, v_esc={:.0} m/s, b={:.2}·R_e, ω={:.2e} rad/s, L_z={:.3e} kg·m²/s, N={}", m_earth, m_theia, v_esc, ic.b_over_re, ic.omega, lz0, body.len());
         println!("energy before: KE={:.3e} IE={:.3e}{}", ke0, ie0, if with_pe { format!(" PE={:.3e} TOT={:.3e}", pe0, ke0 + ie0 + pe0) } else { " (PE skipped)".into() });
     }
-    let (body, t_total) = gpu.impact(&body, eos, soft, 0.1, MAX_STEPS, t_target);
+    let (snaps, _t_total) = gpu.impact(&body, eos, soft, 0.1, MAX_STEPS, checkpoints);
+    let measures: Vec<Measure> = snaps.iter().map(|s| measure(s, n_earth)).collect();
     if verbose {
-        println!("integrated {:.0}s ({:.2} h) of aftermath to the epoch target", t_total, t_total / 3600.0);
-        let (ke1, ie1, pe1) = total_energy(&body, soft, with_pe);
+        let last = snaps.last().unwrap();
         if with_pe {
+            let (ke1, ie1, pe1) = total_energy(last, soft, true);
             let (e0, e1) = (ke0 + ie0 + pe0, ke1 + ie1 + pe1);
-            println!("energy after:  KE={:.3e} IE={:.3e} PE={:.3e} TOT={:.3e}  (ΔTOT/|TOT0| = {:.1}%)", ke1, ie1, pe1, e1, 100.0 * (e1 - e0).abs() / e0.abs());
-        } else {
-            println!("energy after:  KE={:.3e} IE={:.3e}  (IE/IE0 = {:.2}× shock heating)", ke1, ie1, ie1 / ie0.max(1.0));
+            println!("energy after:  KE={:.3e} IE={:.3e} PE={:.3e} TOT={:.3e}  (ΔTOT/|TOT0| = {:.1}%, L_z {:.3e}→{:.3e})", ke1, ie1, pe1, e1, 100.0 * (e1 - e0).abs() / e0.abs(), lz0, angular_momentum_z(last));
         }
-    }
-    let m = measure(&body, n_earth);
-    if verbose {
-        print_measure(&m, m_earth, m_theia, v_esc);
+        print_measure(measures.last().unwrap(), m_earth, m_theia, v_esc);
         // step-2 self-check: the reduction is order-independent — re-measure the SAME snapshot, assert identical.
-        let m2 = measure(&body, n_earth);
-        assert_eq!(m.earth_frac.to_bits(), m2.earth_frac.to_bits(), "measurement not order-independent");
-        assert_eq!(m.disk_kg.to_bits(), m2.disk_kg.to_bits(), "measurement not order-independent");
+        let m2 = measure(last, n_earth);
+        assert_eq!(measures.last().unwrap().earth_frac.to_bits(), m2.earth_frac.to_bits(), "measurement not order-independent");
         println!("  [order-independent reduction verified: re-measure bit-identical]");
     }
-    m
+    measures
 }
 
 fn mean_std(xs: &[f64]) -> (f64, f64) {
@@ -556,45 +606,103 @@ fn mean_std(xs: &[f64]) -> (f64, f64) {
     (mean, var.sqrt())
 }
 
+// docs/41 spin IOU — run K perturbed-IC impacts with the IC `ic`, measuring the disk at 4 epochs, so the disk's
+// TIME-EVOLUTION shows PLATEAU (rotationally sustained) vs DECAY (re-accretes). `relax_omega` picks the proto-
+// Earth relaxation: 0 = spherical hydrostatic + startup spin (the fast check); ω = a rotating-frame OBLATE
+// equilibrium (the cross-check that the sustained disk is not a startup-non-equilibrium artifact).
+fn spin_sweep(gpu: &Gpu, eos: &[Eos], earth_n: usize, ic: Ic, t_max_h: f64, k: usize, relax_omega: f64, label: &str) {
+    let cps: Vec<f64> = (1..=4).map(|q| t_max_h * 3600.0 * q as f64 / 4.0).collect();
+    println!("=== docs/41 {}: earth_n={}, ω={:.2e} rad/s, b={:.2}·R_e, K={}, relax_ω={:.2e}, epochs={:.1}/{:.1}/{:.1}/{:.1} h ===",
+        label, earth_n, ic.omega, ic.b_over_re, k, relax_omega, cps[0] / 3600.0, cps[1] / 3600.0, cps[2] / 3600.0, cps[3] / 3600.0);
+    let (earth, theia, soft) = build_and_relax(gpu, eos, earth_n, relax_omega);
+    let (mut fr, mut dk): (Vec<Vec<f64>>, Vec<Vec<f64>>) = (vec![vec![]; 4], vec![vec![]; 4]);
+    let mut moon: [usize; 4] = [0; 4];
+    for run in 0..k {
+        let ms = run_and_measure(gpu, eos, &earth, &theia, soft, ic, &cps, Some(run as u64), false);
+        for (e, m) in ms.iter().enumerate() {
+            if m.disk_kg > 0.0 { fr[e].push(m.earth_frac); }
+            dk[e].push(m.disk_kg / M_MOON);
+            if m.clump_kg > 0.0 { moon[e] += 1; }
+        }
+        println!("  run {:>2}: disk M☾ by epoch = [{}]  | Earth% = [{}]", run,
+            ms.iter().map(|m| format!("{:.3}", m.disk_kg / M_MOON)).collect::<Vec<_>>().join(", "),
+            ms.iter().map(|m| format!("{:.0}", m.earth_frac)).collect::<Vec<_>>().join(", "));
+    }
+    println!("\n=== TIME-EVOLUTION (ω={:.2e}, b={:.2}·R_e, relax_ω={:.2e}, K={}) — PLATEAU or DECAY? ===", ic.omega, ic.b_over_re, relax_omega, k);
+    for e in 0..4 {
+        let (fm, fs) = mean_std(&fr[e]);
+        let (dm, ds) = mean_std(&dk[e]);
+        println!("  {:>5.1} h:  disk {:.3} ± {:.3} M☾  | Earth {:.1}% ± {:.1}%  | Moon {}/{}", cps[e] / 3600.0, dm, ds, fm, fs, moon[e], k);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let gpu = Gpu::new();
     let eos = [eos_basalt(), eos_iron()];
 
-    if args.get(1).map(|s| s.as_str()) == Some("ensemble") {
-        // Usage: cargo run --release -- ensemble [earth_n] [t_hours] [K]  — integrate every run to the SAME
-        // physical epoch `t_hours` (the disk re-accretes, so the fraction is epoch-dependent; a fixed epoch is
-        // what makes the N-comparison clean — docs/41).
-        let earth_n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1800);
-        let t_hours: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(11.0);
-        let k: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
-        let t_target = t_hours * 3600.0;
-        println!("=== docs/40 #3 ENSEMBLE: K={} perturbed-IC variable-res impacts, earth_n={}, epoch={:.1} h ===", k, earth_n, t_hours);
-        let (earth, theia, soft) = build_and_relax(&gpu, &eos, earth_n);
-        let (mut fracs, mut disks, mut clumps): (Vec<f64>, Vec<f64>, Vec<f64>) = (vec![], vec![], vec![]);
-        let mut n_with_moon = 0;
-        for run in 0..k {
-            let m = run_and_measure(&gpu, &eos, &earth, &theia, soft, t_target, Some(run as u64), false);
-            if m.disk_kg > 0.0 { fracs.push(m.earth_frac); }
-            disks.push(m.disk_kg / M_MOON);
-            clumps.push(m.clump_kg / M_MOON);
-            if m.clump_kg > 0.0 { n_with_moon += 1; }
-            println!("  run {:>2}: {:>4.0}% Earth  | disk {:.3} M☾ | largest clump {:.3} M☾ ({} clumps, {} bound){}",
-                run, m.earth_frac, m.disk_kg / M_MOON, m.clump_kg / M_MOON, m.n_clumps, m.n_bound, if m.clump_kg > 0.0 { " ← Moon" } else { "" });
+    match args.get(1).map(|s| s.as_str()) {
+        Some("ensemble") => {
+            // Usage: ensemble [earth_n] [t_hours] [K] — K perturbed-IC runs to the SAME epoch (docs/41).
+            let earth_n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1800);
+            let t_hours: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(11.0);
+            let k: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(8);
+            println!("=== docs/40 #3 ENSEMBLE: K={} perturbed-IC variable-res impacts, earth_n={}, epoch={:.1} h ===", k, earth_n, t_hours);
+            let (earth, theia, soft) = build_and_relax(&gpu, &eos, earth_n, 0.0);
+            let cps = [t_hours * 3600.0];
+            let (mut fracs, mut disks, mut clumps): (Vec<f64>, Vec<f64>, Vec<f64>) = (vec![], vec![], vec![]);
+            let mut n_with_moon = 0;
+            for run in 0..k {
+                let m = run_and_measure(&gpu, &eos, &earth, &theia, soft, Ic::default(), &cps, Some(run as u64), false)[0];
+                if m.disk_kg > 0.0 { fracs.push(m.earth_frac); }
+                disks.push(m.disk_kg / M_MOON);
+                clumps.push(m.clump_kg / M_MOON);
+                if m.clump_kg > 0.0 { n_with_moon += 1; }
+                println!("  run {:>2}: {:>4.0}% Earth  | disk {:.3} M☾ | largest clump {:.3} M☾ ({} clumps, {} bound){}",
+                    run, m.earth_frac, m.disk_kg / M_MOON, m.clump_kg / M_MOON, m.n_clumps, m.n_bound, if m.clump_kg > 0.0 { " ← Moon" } else { "" });
+            }
+            let (f_mean, f_std) = mean_std(&fracs);
+            let (d_mean, d_std) = mean_std(&disks);
+            let (c_mean, c_std) = mean_std(&clumps);
+            println!("\n=== CONVERGED (K={} runs) ===", k);
+            println!("  EARTH-FRACTION: {:.1}% ± {:.1}%  (n={} disk-forming runs; stdev = the chaos scatter)", f_mean, f_std, fracs.len());
+            println!("  DISK MASS:      {:.3} ± {:.3} M☾", d_mean, d_std);
+            println!("  LARGEST CLUMP:  {:.3} ± {:.3} M☾  · bound Moon-mass clump accreted in {}/{} runs", c_mean, c_std, n_with_moon, k);
         }
-        let (f_mean, f_std) = mean_std(&fracs);
-        let (d_mean, d_std) = mean_std(&disks);
-        let (c_mean, c_std) = mean_std(&clumps);
-        println!("\n=== CONVERGED (K={} runs) ===", k);
-        println!("  EARTH-FRACTION: {:.1}% ± {:.1}%  (n={} disk-forming runs; stdev = the chaos scatter)", f_mean, f_std, fracs.len());
-        println!("  DISK MASS:      {:.3} ± {:.3} M☾", d_mean, d_std);
-        println!("  LARGEST CLUMP:  {:.3} ± {:.3} M☾  · bound Moon-mass clump accreted in {}/{} runs", c_mean, c_std, n_with_moon, k);
-    } else {
-        // Single run: cargo run --release -- [earth_n] [t_hours]
-        let earth_n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1800);
-        let t_hours: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(11.0);
-        let (earth, theia, soft) = build_and_relax(&gpu, &eos, earth_n);
-        run_and_measure(&gpu, &eos, &earth, &theia, soft, t_hours * 3600.0, None, true);
+        Some("spin") => {
+            // docs/41 spin IOU: Usage: spin [earth_n] [omega] [b_over_re] [t_max_h] [K]. Run K perturbed-IC
+            // impacts with a pre-spin ω and grazing b, measuring the disk at 4 epochs (t_max·{¼,½,¾,1}) — so the
+            // disk's TIME-EVOLUTION shows whether added angular momentum makes it PLATEAU (sustained) or DECAY
+            // (re-accrete). Baseline (ω=0, b=1.0) re-accretes (docs/41 Finding A).
+            let earth_n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2400);
+            let omega: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let b_over_re: f64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1.0);
+            let t_max_h: f64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(24.0);
+            let k: usize = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(6);
+            // spin: spherical relaxation + startup spin (relax_ω = 0)
+            spin_sweep(&gpu, &eos, earth_n, Ic { b_over_re, omega }, t_max_h, k, 0.0, "SPIN IOU");
+        }
+        Some("spineq") => {
+            // Cross-check: same as `spin` but proto-Earth is relaxed in the ROTATING frame first (oblate
+            // equilibrium), so the sustained-disk result can't be a startup-non-equilibrium artifact.
+            // Usage: spineq [earth_n] [omega] [b_over_re] [t_max_h] [K]
+            let earth_n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2400);
+            let omega: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(7.0e-4);
+            let b_over_re: f64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1.0);
+            let t_max_h: f64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(24.0);
+            let k: usize = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(6);
+            // spineq: rotating-frame oblate-equilibrium relaxation at the SAME ω as the impact
+            spin_sweep(&gpu, &eos, earth_n, Ic { b_over_re, omega }, t_max_h, k, omega, "SPIN-EQ CROSS-CHECK");
+        }
+        _ => {
+            // Single run: [earth_n] [t_hours] [omega] [b_over_re]
+            let earth_n: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1800);
+            let t_hours: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(11.0);
+            let omega: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let b_over_re: f64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1.0);
+            let (earth, theia, soft) = build_and_relax(&gpu, &eos, earth_n, 0.0);
+            run_and_measure(&gpu, &eos, &earth, &theia, soft, Ic { b_over_re, omega }, &[t_hours * 3600.0], None, true);
+        }
     }
 }
 

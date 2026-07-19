@@ -30,7 +30,9 @@ struct Params {
   bucket_k: u32,    // max particles stored per cell
   dt: f32,          // integration timestep for cs_kick_drift/cs_kick/cs_relax (KDK leapfrog, stage 4c.1)
   damp: f32,        // velocity damping for cs_relax (settle to hydrostatic equilibrium, stage 4c.2)
-  _p0: f32, _p1: f32, _p2: f32,
+  omega: f32,       // cs_relax ONLY: rigid-rotation rate (rad/s) about +z for a ROTATING-frame relaxation
+                    // (adds centrifugal ω²·(x,y,0) so the body settles to its oblate equilibrium). 0 elsewhere.
+  _p1: f32, _p2: f32,
 }
 
 struct Particle {
@@ -243,9 +245,15 @@ fn cs_kick(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn cs_relax(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= P.n) { return; }
-  let v = (particles[i].vel + acc[i] * P.dt) * P.damp;
+  // Rotating-frame relaxation: add the centrifugal acceleration ω²·(x,y,0) so a spinning body settles to its
+  // OBLATE equilibrium (Coriolis −2ω×v_frame → 0 as the damped frame velocity → 0, so it's omitted). ω=0
+  // (the default for every non-spin caller) recovers the exact hydrostatic relaxation. The body is centred at
+  // the origin during relaxation, so (x,y) is measured from its own spin axis.
+  let p = particles[i].pos;
+  let a_cf = P.omega * P.omega * vec3<f32>(p.x, p.y, 0.0);
+  let v = (particles[i].vel + (acc[i] + a_cf) * P.dt) * P.damp;
   particles[i].vel = v;
-  particles[i].pos = particles[i].pos + v * P.dt;
+  particles[i].pos = p + v * P.dt;
 }
 
 // Per-particle Courant signal speed h_i/(c_i+|v_i|); the CPU reduces min·cfl → the adaptive dt (stage 4c.2).

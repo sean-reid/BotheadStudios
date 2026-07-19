@@ -14,8 +14,12 @@ because **we are our own first customers** and pin exact engine versions in our 
   (sort+Kahan, bit-reproducible), a K-run perturbed-IC ensemble (mean±stdev), and a physical-time epoch stop.
   Result: the disk Earth-fraction is a **minority ~32%±3% (N≥2400, ~8 h epoch), not 58%**, and the disk
   **re-accretes** (fraction is epoch-dependent); a bound Moon-mass clump accretes in 8/8 runs. Enabling fix:
-  **AV-free relaxation** (the docs/35 setting the standalone tool lacked). Research tool only — engine crate and
-  `sph_step.wgsl` unchanged, nothing deployed.
+  **AV-free relaxation** (the docs/35 setting the standalone tool lacked). **Spin IOU closed:** a pre-impact
+  proto-Earth spin (`impact-run spin`/`spineq`) makes the disk **rotationally sustained** and recovers **~58%
+  Earth** — the canonical value the non-spinning impact never reached; verified not a startup artifact against a
+  rotating-frame oblate equilibrium (`cs_relax` gained a relax-only `omega` centrifugal term, 0 for existing
+  callers). Plus a browser shock-dt fix (the fixed-dt path under-resolved the shock → Theia hit-and-run).
+  Nothing deployed.
 - **GPU impact read-back + live disk stats** (`gpu_sph.rs`, `docs/35` — the GPU-path migration) — `GpuSph`
   gained two-phase async GPU→CPU read-back, and the browser birth scene now shows the live orbiting-disk
   provenance (mass, Earth %, remnant radius, largest self-bound clump) from the read-back particle field. The

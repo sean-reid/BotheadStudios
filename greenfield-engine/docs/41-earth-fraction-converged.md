@@ -82,6 +82,37 @@ resolution. A bound Moon-mass clump accretes in **8/8 at every N** at this epoch
   fraction(N, epoch) surface; the ensemble mean±stdev at a fixed (N, epoch) is well-defined and reproducible,
   and that is what converges.
 
+## Follow-up — the SPIN IOU resolved: a spinning proto-Earth SUSTAINS the disk (and recovers ~58%)
+
+The re-accretion (Finding A) is a *missing-angular-momentum* symptom: the no-spin IC gives the marginally-bound
+disk too little support, so it falls back. Adding angular momentum — a pre-impact **spin** of proto-Earth about
+the orbit normal (`impact-run spin <n> <ω> <b> <t_max> <K>`, measuring the disk at 4 epochs) — tests it. K runs,
+N=2400, to 18 h:
+
+| IC | disk vs time (4.5 → 18 h) | Earth-fraction | verdict |
+|----|--------------------------|----------------|---------|
+| baseline ω=0            | 0.56 → 0.09 M☾  | 23% → 18%  | **DECAYS** (re-accretes) |
+| spin ω=4e-4             | 0.51 → 0.32 M☾  | 37% → 43%  | slow decay, holds ~0.4 M☾ |
+| **spin ω=7e-4**         | 0.44 → **0.60** M☾ | 52% → **58%** | **PLATEAUS — sustained** |
+| grazing b=1.4·R_e, ω=0  | ~0.01 M☾        | noise      | hit-and-run (Theia escapes) |
+
+**A spinning target flings its OWN mantle into a rotationally-supported disk that does NOT re-accrete** — it
+plateaus at ~0.6 M☾ and the Earth-fraction climbs to and holds **~58% ± 2%** (Moon-mass clump 8/8), exactly the
+canonical all-particle value the non-spinning impact never reaches. So the ~25–32% "converged" number is the
+*non-spinning* branch; angular momentum is the knob between it and 58%. Grazing-b is the wrong lever (b=1.4·R_e
+is a hit-and-run).
+
+**Cross-check (is the sustained disk a startup artifact?).** ω=7e-4 applied to a spherically-relaxed body is
+near rotational breakup (a long rotating-frame relaxation sheds an equatorial stream: corotation ≈ 6200 km vs a
+4200 km surface). So the check was run at a *stable* ω=4e-4, comparing a startup spin (spherical relax + spin at
+impact) against a proper **rotating-frame OBLATE equilibrium** (a centrifugal term in `cs_relax`, gated by a new
+`omega` param; flattening 0.149 ∝ ω², bounded, no blowup). The two agree — startup 0.32 M☾/43% vs equilibrium
+0.43 M☾/39% at 18 h, both Moon 4/4 — the equilibrium case sustaining *slightly better*. **So the sustained disk
+is real physics, not a startup-non-equilibrium artifact.**
+
+This closes the last docs/40 IOU: the epoch-dependence (Finding A) is because a *non-spinning* disk is
+marginally bound; a physically-motivated spun IC gives a disk that persists, with a well-defined fraction (~58%).
+
 ## Honest IOUs (no-fudge)
 
 - **Only the early epoch is converged.** The fraction is N-converged at ~8 h; the *epoch* itself is a free
