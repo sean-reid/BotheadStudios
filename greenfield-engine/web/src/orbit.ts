@@ -183,9 +183,31 @@ async function main(): Promise<void> {
     void camEarth;
     void camMoon;
 
-    // GPU deformable-Earth giant impact (docs/33 stage 4c.4): swap the rigid-Earth model for the live
-    // GPU SPH particle field — two differentiated bodies colliding, stepped by sph_step.wgsl in-browser.
-    mkBtn("🌋 GPU Impact", () => demo.start_gpu_impact());
+    // docs/42 render-layer slider: cross-fade the PRETTY render (sphere/atmosphere) ⇄ the raw PHYSICS particles.
+    // The physics underneath is always the real GPU SPH impact; this only changes how it's drawn. Birth scene only.
+    if (birthScene) {
+      const slot = document.createElement("div");
+      Object.assign(slot.style, {
+        display: "flex", flexDirection: "column", gap: "3px",
+        padding: "8px 11px", color: "#fff",
+        font: "600 12px/1.2 system-ui, sans-serif",
+        background: "rgba(20,24,40,0.72)", border: "1px solid rgba(255,255,255,0.25)",
+        borderRadius: "10px", backdropFilter: "blur(6px)",
+      });
+      const lbl = document.createElement("div");
+      lbl.textContent = "Pretty ⇄ Physics";
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.min = "0"; slider.max = "100"; slider.value = "0"; // pretty by default (docs/42)
+      slider.style.width = "128px";
+      slider.style.cursor = "pointer";
+      slider.addEventListener("input", () => demo.set_render_blend(Number(slider.value) / 100));
+      slot.append(lbl, slider);
+      bar.appendChild(slot);
+    }
+
+    // (The GPU deformable-Earth impact is now the DEFAULT birth scene — auto-started on load — so the old
+    // "🌋 GPU Impact" trigger button is retired; "Replay" below re-runs it.)
 
     // Orbital decay: brake the Moon until its orbit crashes into the planet. (The birth scene has no
     // such controls — the encounter IS the scene; Reset replays it.)
@@ -202,7 +224,8 @@ async function main(): Promise<void> {
       mkBtn("⏭ Geologic", () => demo.enter_geologic_time());
     }
     mkBtn(birthScene ? "Replay" : "Reset", () => {
-      demo.reset_moon();
+      if (birthScene) demo.start_gpu_impact(); // re-run the GPU impact (now the default scene)
+      else demo.reset_moon();
       followMoon = true;
     });
 

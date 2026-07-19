@@ -2507,6 +2507,10 @@ mod app {
         sph_snapshot: Vec<crate::gpu_sph::SphParticle>,
         /// The GPU impact's setup/step phase (relax on GPU → assemble collision → dynamics). See `advance`.
         sph_phase: SphPhase,
+        /// docs/42 render-layer blend: 0 = the PRETTY render (sphere/atmosphere), 1 = the raw PHYSICS particles.
+        /// Cross-fades by size (grains × (1−blend), billboards × blend), so no alpha-sort. Only meaningful while
+        /// `sph_active`. Default 0 (pretty first — the slider reveals the physics).
+        render_blend: f64,
     }
 
     // Moon-shot Stage A constants.
@@ -2779,7 +2783,13 @@ mod app {
                 sph_soft: 1.0,
                 sph_snapshot: Vec::new(),
                 sph_phase: SphPhase::Dynamics,
+                render_blend: 0.0, // pretty by default (docs/42)
             })
+        }
+
+        /// docs/42: set the pretty⇄physics render blend (0 = pretty sphere, 1 = raw physics particles).
+        pub fn set_render_blend(&mut self, blend: f32) {
+            self.render_blend = (blend as f64).clamp(0.0, 1.0);
         }
 
         // --- Orbital-decay controls: brake the Moon and watch its orbit tighten into a crash. ---
@@ -3830,7 +3840,9 @@ mod app {
                 let cam = crate::gpu_sph::SphCam {
                     view_proj: view_proj.to_cols_array_2d(),
                     origin: [origin.x, origin.y, origin.z, 0.0],
-                    params: [SPH_VIS_SCALE as f32, 0.013, 0.0, 0.0], // (m→display scale, billboard half-size)
+                    // billboard half-size fades with the render blend (docs/42): 0 at the pretty end, full at
+                    // the physics end — the size cross-fade against the pretty Earth shell.
+                    params: [SPH_VIS_SCALE as f32, 0.013 * self.render_blend as f32, 0.0, 0.0],
                 };
                 self.queue.write_buffer(&self.sph_cam.buf, 0, bytemuck::bytes_of(&cam));
             }
@@ -3844,8 +3856,18 @@ mod app {
             // the materialized impact region are hidden — the real (moving, glowing) cap particles are
             // the matter there now, and the void they leave IS the crater.
             let earth_center = r_bodies[1];
-            let shell_spacing = EARTH_RADIUS_M * (4.0 * std::f64::consts::PI / SHELL_N as f64).sqrt();
-            let shell_grain_r = ((0.62 * shell_spacing) * DISPLAY_SCALE) as f32;
+            // docs/42 render layer: while the GPU impact is live, the PRETTY Earth-shell must overlay the SPH
+            // particle field — so it is sized to the sub-scale (5000 km) SPH body and rendered at SPH_VIS_SCALE
+            // (not the real 6371 km at DISPLAY_SCALE), and its grains fade out by `1−render_blend` (the slider
+            // cross-fades to the raw physics billboards). Otherwise (CPU scene) it's the real Earth as before.
+            let (pretty_scale, pretty_r_surf) = if self.sph_active {
+                (SPH_VIS_SCALE, 5.0e6_f64)
+            } else {
+                (DISPLAY_SCALE, EARTH_RADIUS_M)
+            };
+            let pretty_fade = if self.sph_active { (1.0 - self.render_blend) as f32 } else { 1.0 };
+            let shell_spacing = pretty_r_surf * (4.0 * std::f64::consts::PI / SHELL_N as f64).sqrt();
+            let shell_grain_r = ((0.62 * shell_spacing) * pretty_scale) as f32 * pretty_fade;
             let crater_r = 1.1 * self.hole_radius(); // the crater as it stands — healing shrinks it
             // Camera eye in display coordinates (relative to the focus body) — the same construction
             // as view_proj, needed for the per-grain Rayleigh view path.
@@ -3884,12 +3906,12 @@ mod app {
                 let body_dir = crate::impact::fib_dir(i, SHELL_N); // this grain's fixed BODY direction
                 let dir = spin_rot * body_dir; // its current WORLD direction (rotated by the spin)
                 let u = dir.dot(spin_axis);
-                let r_oblate = (EARTH_RADIUS_M - 0.62 * shell_spacing)
+                let r_oblate = (pretty_r_surf - 0.62 * shell_spacing)
                     * (1.0 + flat * (1.0 / 3.0 - u * u)); // +f/3 equator, −2f/3 poles
                 let pos_w = earth_center + dir * r_oblate;
                 let hidden = crater_site.map_or(false, |s| (pos_w - s).length() < crater_r);
                 let scale = if hidden { 0.0 } else { shell_grain_r }; // zero-scale ⇒ not drawn
-                let spos = ((pos_w - focus) * DISPLAY_SCALE).as_vec3();
+                let spos = ((pos_w - focus) * pretty_scale).as_vec3();
                 // Continents & oceans (docs/25): each grain samples the landmask at its fixed BODY direction
                 // — so a continent is a property of the CRUST and CO-ROTATES with the planet (and with the
                 // crater), rather than being painted world-fixed while the grains slide underneath. "Average
@@ -4161,9 +4183,6 @@ mod app {
                     for uni in self.wall_unis.iter() {
                         draw(&mut pass, uni, &self.sphere_gpu); // crater bowl wall (zero-scale when intact)
                     }
-                    for uni in self.shell_unis.iter() {
-                        draw(&mut pass, uni, &self.sphere_gpu); // Earth: a shell of coarse grains
-                    }
                     for (idx, uni) in self.moon_unis.iter().enumerate() {
                         if idx / MOON_SHELL_N == 0 && r_shattered {
                             continue; // shattered — drawn as debris
@@ -4172,6 +4191,14 @@ mod app {
                     }
                     for uni in self.debris_unis.iter().take(debris_count) {
                         draw(&mut pass, uni, &self.sphere_gpu);
+                    }
+                }
+                // The pretty Earth shell (docs/42): the CPU scene always; the GPU-impact scene whenever the blend
+                // isn't fully at the physics end (its grains were sized to the SPH body + faded by 1−blend above,
+                // so they overlay the particle field and cross-fade to it).
+                if !self.sph_active || self.render_blend < 1.0 {
+                    for uni in self.shell_unis.iter() {
+                        draw(&mut pass, uni, &self.sphere_gpu); // Earth: a shell of coarse grains
                     }
                 }
                 // GPU SPH particles: instanced billboards straight from the physics buffer (zero-copy).
