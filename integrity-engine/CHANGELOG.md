@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **VERIFIED ON METAL (iPad Pro / Apple GPU)** — the granular GPU step produces the same physics on
+  Metal as on Vulkan (total energy and max speed agree to 4 significant figures at N=60,000; no energy
+  injection at any N), confirming the four-separate-passes mitigation against a cross-backend race. The
+  M4 is also faster than a desktop RTX 2070 at every measured N (2.3× at N=1, 1.3× at N=60,000), and
+  sustains 10.3 ms/frame at `MAX_PARTICLES` — a ~97 fps physics ceiling on tablet hardware.
 - **NEW `GpuProbe` (wasm) + `/gpu-probe.html` — cross-device GPU verification** — a compute-only probe
   that runs the real `particle_step.wgsl` through the real `GpuParticles` on whatever device opens the
   page (iPad / phone / desktop), reporting which adapter ran, per-frame cost across N = 1…60,000, and

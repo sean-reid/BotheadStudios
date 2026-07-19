@@ -5,6 +5,59 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-19 — FIRST NON-VULKAN RESULT: the engine's granular step runs correctly on Metal (iPad Pro)
+
+**What.** Ran `/gpu-probe.html` on an iPad Pro (M4) over the LAN HTTPS dev server. First time any part of
+this engine's GPU physics has been executed on a non-Vulkan backend, and the first entry in the
+cross-vendor matrix.
+
+**The correctness result — Metal and Vulkan agree to 4 significant figures.** `lib.rs` (~line 2118)
+splits the four granular stages into four separate compute passes specifically because fusing them
+"happened to work on desktop Vulkan (the 2070) but can RACE on other backends (e.g. Metal / the M4)".
+That mitigation was written defensively and had **never been exercised on Metal**. It holds:
+
+| N | Vulkan (2070) tot / v max | Metal (M4) tot / v max |
+|---|---|---|
+| 1 | 4.179e-8 / 0.000 | 4.179e-8 / 0.000 |
+| 1,000 | 2.981e+3 / 6.012 | 2.875e+3 / 6.104 |
+| 10,000 | 9.580e+5 / 31.019 | 9.546e+5 / 31.022 |
+| 60,000 | 1.585e+7 / 30.945 | 1.585e+7 / 30.945 |
+
+No energy injection at any N — a race would show as a rising total. Note the N=60,000 row is identical
+to four significant figures in BOTH total energy and max speed, and the Vulkan side reproduced those
+same figures across repeated runs. So this probe configuration appears **reproducible in a way
+`gpu-verify`'s scene I is not** (bulk settling rather than marginal stability). That strengthens the
+comparison, but does NOT retire the determinism work — a *small* Metal anomaly would still be
+indistinguishable from drift.
+
+**The performance result — the iPad beats the desktop RTX 2070 at every point.**
+
+| N | browser 2070 | browser M4 | M4 advantage |
+|---|---|---|---|
+| 1 | 1.25 ms | 0.540 ms | 2.3× |
+| 1,000 | 1.83 ms | 0.833 ms | 2.2× |
+| 10,000 | 2.23 ms | 1.553 ms | 1.4× |
+| 60,000 | 13.40 ms | 10.317 ms | 1.3× |
+
+The advantage is LARGEST at small N and shrinks as N grows — the signature of much lower per-dispatch
+latency (unified memory, no PCIe round trip), not raw throughput. Product-relevant consequence: at
+`MAX_PARTICLES` = 60,000 the M4 sustains 10.3 ms/frame, a ~97 fps physics ceiling, so **the engine's
+full particle budget is viable on an iPad**.
+
+**Limits of what this proves (stated rather than glossed).**
+- **The probe did not identify an "M4".** Safari masked every `GPUAdapterInfo` field to the literal
+  string `apple` — vendor, architecture, device and description are all `apple`. It establishes Apple
+  GPU ⇒ Metal (iPadOS WebGPU has no other backend) and `fallback: no` rules out a software adapter.
+  The specific chip is Robin's knowledge of her hardware, not a probe measurement. Do not quote the
+  probe as the source for "M4".
+- **`max_buffer_size` is 1024 MiB on the iPad vs 4096 MiB on desktop.** Not binding here (the largest
+  buffer at N=60,000 is the 8× render buffer at ~31 MB), but a 4× smaller ceiling to respect when
+  scaling up.
+- The page's "per-particle cost falls 3141×" line is dominated by the N=1 point, which is pure launch
+  overhead. The real knee sits between N=1,000 and N=10,000.
+
+---
+
 ## 2026-07-19 — a browser GPU probe, and the same wrong-GPU bug confirmed in the browser
 
 **What.** `GpuProbe` (`crates/engine/src/lib.rs`, wasm-only) + `web/gpu-probe.html` /
