@@ -115,6 +115,9 @@ pub fn build_impact_bodies(n_earth: usize, n_theia: usize) -> (crate::hydrostati
 /// two bodies' MUTUAL gravity is negligible (~1/FAR² of self-gravity) so each settles under its OWN gravity in
 /// the shared buffer, but the spatial-hash grid still keeps them in separate cells.
 const RELAX_SEPARATION: f64 = 40.0;
+/// Proto-Earth pre-impact spin (rad/s about +z, the orbital-plane normal) — docs/41's sustained-disk value
+/// (≈ a 2.5 h primordial day). Applied at assembly by [`assemble_from_relaxed`]; see there for the physics.
+const PROTO_EARTH_SPIN: f64 = 7.0e-4;
 
 /// Build the two UNRELAXED bodies as one SPH particle set for GPU relaxation: Earth at the origin, Theia far
 /// away (`RELAX_SEPARATION`× the contact radius), both at rest. The caller relaxes this on the GPU (`cs_relax`,
@@ -162,13 +165,28 @@ pub fn assemble_from_relaxed(particles: &[SphParticle]) -> (Vec<SphParticle>, [S
             out.push(SphParticle { pos: [q.x as f32, q.y as f32, q.z as f32], vel: [vel.x as f32, vel.y as f32, vel.z as f32], ..**p });
         }
     };
+    // Proto-Earth SPIN about +z (docs/41 spin IOU): a spinning target flings its OWN mantle into a
+    // rotationally-SUSTAINED disk (it plateaus instead of re-accreting) and recovers the Earth-rich ~58% disk
+    // that a non-spinning impact never reaches. Applied here at assembly — after the (spherical) relax, prompt
+    // impact — so no rotational-equilibrium relaxation is needed (ω is near breakup only over a long settle).
+    // v = ω ẑ × r, with r measured from Earth's recentred origin. ω≈7e-4 rad/s ≈ a 2.5 h primordial day.
+    let emit_spun = |out: &mut Vec<SphParticle>, ps: &[&SphParticle], off: DVec3, omega: f64| {
+        for p in ps {
+            let q = pos(p) + off;
+            let v = DVec3::new(-omega * q.y, omega * q.x, 0.0);
+            out.push(SphParticle { pos: [q.x as f32, q.y as f32, q.z as f32], vel: [v.x as f32, v.y as f32, v.z as f32], ..**p });
+        }
+    };
     let mut out = Vec::with_capacity(particles.len());
-    emit(&mut out, &earth, -ec, DVec3::ZERO);
+    emit_spun(&mut out, &earth, -ec, PROTO_EARTH_SPIN);
     emit(&mut out, &theia, -tc + DVec3::new(d0, b_param, 0.0), DVec3::new(-v_esc, 0.0, 0.0));
     // softening = the finest (iron) spacing = min_h/4 (h = 2·(m/ρ)^⅓, softening = ½·(m/ρ)^⅓); dt is shock-safe.
     let min_h = out.iter().map(|p| p.h).fold(f32::INFINITY, f32::min);
     let softening = 0.25 * min_h;
-    let dt = (0.05 * min_h as f64 / (20_000.0 + v_esc)) as f32;
+    // Shock-safe dt. The fixed-dt browser path (WebGPU forbids the adaptive read-back) must be small enough to
+    // resolve the impact shock, or Theia interpenetrates Earth and hit-and-runs (docs/41 browser debug): a 5×
+    // reduction from the original lets Earth shed into a disk. Paired with more substeps/frame to hold playback.
+    let dt = (0.01 * min_h as f64 / (20_000.0 + v_esc)) as f32;
     (out, [SphEos::basalt(), SphEos::iron()], softening, dt)
 }
 

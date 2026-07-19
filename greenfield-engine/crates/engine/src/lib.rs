@@ -3353,7 +3353,7 @@ mod app {
                     // disk rather than dispersing (docs/35). An in-kernel per-substep adaptive dt (to trim the
                     // residual escape) is the next refinement.
                     SphPhase::Dynamics => {
-                        const SPH_SUBSTEPS: u32 = 20;
+                        const SPH_SUBSTEPS: u32 = 100; // DIAG: pair with the 5× smaller dt to keep playback rate
                         if let Some(sph) = self.gpu_sph.as_mut() {
                             let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sph-step") });
                             sph.encode_kdk(&mut enc, SPH_SUBSTEPS);

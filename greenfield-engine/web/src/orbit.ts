@@ -102,16 +102,11 @@ async function main(): Promise<void> {
     // Moon count / birth flag were resolved from the page above (orbit.html and twomoons.html share
     // this one script via <body data-moons>/<body data-scene>).
     const demo = await OrbitDemo.create(canvas, numMoons);
-    // Birth of the Moon (docs/27): body 2 becomes Theia, inbound ~5 real seconds from impact — the
-    // physics is identical machinery; only the declared impactor changes. (The GPU SPH deformable impact
-    // — docs/33 stage 5 — is available via the "🌋 GPU Impact" button; auto-starting it on load blocks the
-    // main thread on the CPU relax, so it stays a deliberate trigger until that build is made non-blocking.)
-    // Birth of the Moon (docs/27): body 2 becomes Theia, inbound ~5 real seconds from impact — the CPU
-    // Aggregate scene that lofts an orbiting disk → moonlets → a Moon in orbit. The GPU SPH deformable impact
-    // (docs/33 stage 5) is available via the "🌋 GPU Impact" button, but at browser resolution (N~700, no
-    // per-substep adaptive dt) it still disperses rather than forming a stable orbiting disk — so it stays a
-    // WORK-IN-PROGRESS demo, not the default birth scene, until its energy conservation is fixed.
-    if (birthScene) demo.start_birth();
+    // Birth of the Moon: THE scene is now the GPU SPH deformable-Earth giant impact (docs/33 stage 5, docs/41)
+    // — two differentiated bodies, stepped by sph_step.wgsl in-browser, forming a rotationally-SUSTAINED disk
+    // (the docs/41 spin fix) that accretes a Moon. The relax runs non-blocking in chunks (the phase machine),
+    // so it auto-starts on load. The old CPU-Aggregate impact (`start_birth`) is retired.
+    if (birthScene) demo.start_gpu_impact();
     hideStatus();
     const stats = document.getElementById("stats");
     if (stats) stats.hidden = false;
@@ -174,8 +169,10 @@ async function main(): Promise<void> {
     // The viewport is a physical frame of reference (docs/17): the camera rides a body, so we can watch
     // the encounter from either standpoint. "Camera on Moon" frames the impact site once it shatters.
     let wantShot = false;
-    const camEarth = mkBtn("📷 Earth", () => demo.focus_earth());
-    const camMoon = mkBtn("📷 Moon", () => demo.focus_moon());
+    // 👁 (eye) not 📷 (camera): these set the camera's FRAME OF REFERENCE (whose eyes we watch from); the
+    // camera icon is reserved for "Share view" (capture the screen). Distinct icons so the two don't blur.
+    const camEarth = mkBtn("👁 Earth", () => demo.focus_earth());
+    const camMoon = mkBtn("👁 Luna", () => demo.focus_moon());
     // Share view: upload exactly what's on screen (the canvas) so the agent can look at the debris swarm /
     // disk. Grabbed in the render loop right after present; POSTed to /__shot (dev server, or the deployed
     // shot receiver proxied at /__shot).
