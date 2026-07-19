@@ -66,7 +66,18 @@ change per frame.
 - **Theia render:** a second textured sphere inbound, or only Earth + ejecta?
 - **Crater persistence:** does the post-impact Earth keep a visible scar into geologic time (bake-back), or heal?
 
-## Status (2026-07-18)
+## Status (2026-07-18) — ALL FOUR PHASES BUILT & rig-verified
 
-Physics + fixes landed & pushed (docs/41: spin IOU, browser shock-dt, eyes icons; the birth scene auto-starts the GPU
-impact). This doc is the render-layer plan; Phase 1 is the next build.
+- **Phase 1** ✓ `render_blend` (0=pretty,1=physics) + `set_render_blend` + a "Pretty ⇄ Physics" slider; the pretty
+  Earth shell is sized to the sub-scale SPH body (scale reconciliation) and size-cross-fades against the particles.
+- **Phase 2** ✓ crater from the GPU field (first Theia contact freezes the impact direction; bowl opens with the
+  shock, persists = bake-back); the exposed interior glows as a magma ocean; crust grains opaque so melt shows only
+  through the crater.
+- **Phase 3** ✓ ejecta (matter beyond the remnant glows as incandescent motes even at the pretty end) + a boosted,
+  shocked-vapor atmosphere (hazier limb).
+- **Phase 4** ✓ self-bound disk clumps (`moonlet_bodies`) render as growing warm rock spheres → the Moon.
+
+**Follow-up (not blocking the render):** the browser physics itself (fixed-dt, N≈2800, uniform bodies) forms only a
+weak/dispersing disk, so multi-moonlet accretion is intermittent — full offline parity (LOD seeding, a *scheduled*
+shock-dt) would make the disk/Moon reliable. The render layer is correct and physics-driven; it just needs better
+physics beneath it for the richest result. The converged physics remains the offline `tools/impact-run` (docs/41).
