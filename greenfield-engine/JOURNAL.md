@@ -5,6 +5,31 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-18 — FIX: the accreted Moon was escaping (Robin caught it) — near-breakup spin + inside-Roche mislabel
+
+**What.** Robin watched the browser Moon accrete, compress, then leave on a near-straight outward trajectory —
+and switching to Geologic found nothing (`disk_moonlets` empty → hand-off no-ops). Confirmed by tracing the
+largest clump's orbit (`gpu_moon_track_json`, a new diagnostic): the clump accreted to ~0.23 M☾ on a tight bound
+orbit (a≈11,800 km), then over ~10 s its semi-major axis blew out 11,800 → 27,800 km and it receded and unbound.
+It formed at **~1 remnant-radius, INSIDE the Roche limit**, moving ~6.3 km/s (circular ~4.9, escape ~7.0) — i.e.
+launched near-radially at near-escape speed, exactly Robin's "straight line, no slowing."
+
+**Two causes, both fixed.** (1) The proto-Earth spin was **7e-4 rad/s — near rotational breakup**, flinging the
+near-surface disk out at ~escape speed. Eased to **4e-4** (the cross-check's stable value, ~4.4 h day). (2)
+`moonlet_bodies` / the tracker counted ANY bound clump as the Moon — including inside-Roche ones, which are tidal
+DEBRIS (they form skimming the surface and escape), not moons. Now only **bound + outside-Roche** clumps
+(`Clump::accretes()`) are the Moon; inside-Roche material renders as ejecta.
+
+**Verified (rig `moon_track3`).** The real (outside-Roche) Moon now accretes to ~0.5 M☾ while its orbit
+CIRCULARIZES (a: 79,000 → 22,000 km) and then **holds a stable bound orbit** — dist ≈ 29,500 km, v ≈ 1.6 km/s,
+a ≈ 22,600 km, bound, steady over t=200–236 s. It orbits and stays. (The first-generation inside-Roche disk still
+partly escapes — physical for this energetic sub-scale impact at browser fidelity — but it's ejecta, not the
+Moon.) Full suite green; redeployed.
+
+**Note to self:** don't explain away a direct observation with aggregate stats — track the actual thing observed.
+
+---
+
 ## 2026-07-18 — HOTFIX: adaptive GPU-load control — the sim was freezing the tab/OS (docs/42)
 
 **What.** The deployed GPU impact encoded a FIXED 100 KDK substeps (and a 300-step relax chunk) per frame — ~100

@@ -3319,6 +3319,24 @@ mod app {
             crate::gpu_sph::disk_stats_json(&self.sph_snapshot)
         }
 
+        /// docs/42 escape-check: the largest proto-Moon clump's orbit about the remnant — distance (km), speed
+        /// (km/s), whether it is BOUND (specific orbital energy < 0), and semi-major axis (km). Tracks whether
+        /// the accreted Moon is receding / unbinding. `"null"` if there's no clump yet.
+        pub fn gpu_moon_track_json(&self) -> String {
+            if !self.sph_active {
+                return String::from("null");
+            }
+            match crate::gpu_sph::largest_moonlet_orbit(&self.sph_snapshot) {
+                Some((r, v, e, a, mass)) => format!(
+                    "{{\"dist_km\":{:.0},\"v_kms\":{:.3},\"bound\":{},\"a_km\":{},\"mass_moon\":{:.3}}}",
+                    r / 1e3, v / 1e3, e < 0.0,
+                    if a.is_finite() { format!("{:.0}", a / 1e3) } else { "\"unbound\"".to_string() },
+                    mass / 7.342e22,
+                ),
+                None => String::from("null"),
+            }
+        }
+
         /// Energy diagnostic of the live GPU impact (docs/35): kinetic / internal / gravitational-PE / total
         /// (J), from the latest read-back. A steadily rising total = the integrator is injecting energy (the
         /// remnant then puffs apart instead of orbiting). `"null"` before the first read-back.

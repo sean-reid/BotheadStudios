@@ -127,9 +127,11 @@ pub fn build_impact_bodies(n_earth: usize, _n_theia: usize) -> (crate::hydrostat
 /// two bodies' MUTUAL gravity is negligible (~1/FAR² of self-gravity) so each settles under its OWN gravity in
 /// the shared buffer, but the spatial-hash grid still keeps them in separate cells.
 const RELAX_SEPARATION: f64 = 40.0;
-/// Proto-Earth pre-impact spin (rad/s about +z, the orbital-plane normal) — docs/41's sustained-disk value
-/// (≈ a 2.5 h primordial day). Applied at assembly by [`assemble_from_relaxed`]; see there for the physics.
-const PROTO_EARTH_SPIN: f64 = 7.0e-4;
+/// Proto-Earth pre-impact spin (rad/s about +z, the orbital-plane normal). 7e-4 (docs/41's peak sustained-disk
+/// value) is NEAR ROTATIONAL BREAKUP — it flings the near-surface disk out at ~escape speed, so the accreted
+/// Moon forms inside Roche on a near-radial escaping trajectory and leaves. 4e-4 (the cross-check's stable value,
+/// ~a 4.4 h day) still sheds a disk but keeps the Moon bound and orbiting. Applied at assembly (see there).
+const PROTO_EARTH_SPIN: f64 = 4.0e-4;
 
 /// Build the two UNRELAXED bodies as one SPH particle set for GPU relaxation: Earth at the origin, Theia far
 /// away (`RELAX_SEPARATION`× the contact radius), both at rest. The caller relaxes this on the GPU (`cs_relax`,
@@ -312,11 +314,58 @@ pub fn moonlet_bodies(particles: &[SphParticle]) -> Vec<(glam::DVec3, f64, f64)>
     let mean_h: f64 = particles.iter().map(|p| p.h as f64).sum::<f64>() / particles.len() as f64;
     let clumps = crate::accretion::find_clumps(&dp, &dv, &dm, &dr, 2.0 * mean_h, crate::orbit::G, 1.0e4, com, m_remnant, r_remnant);
     // Self-bound clumps of ≥3 members: the moonlets forming in the disk (COM position kept Earth-relative).
+    // Only bound clumps OUTSIDE Roche are real moonlets (an inside-Roche clump is tidal debris that escapes —
+    // it must render as ejecta, not a moon sphere). `accretes()` = bound + outside-Roche + ≥2 members.
     clumps
         .iter()
-        .filter(|c| c.members.len() >= 3 && c.bound)
+        .filter(|c| c.accretes() && c.members.len() >= 3)
         .map(|c| (c.com_pos, c.radius, c.mass))
         .collect()
+}
+
+/// docs/42 escape-check: the LARGEST self-bound disk clump's orbit about the remnant — distance, speed, specific
+/// orbital energy (bound iff < 0), semi-major axis, mass. Returns None if there is no clump. This tracks the
+/// actual proto-Moon's trajectory (is it receding / unbinding?) rather than aggregate disk mass.
+pub fn largest_moonlet_orbit(particles: &[SphParticle]) -> Option<(f64, f64, f64, f64, f64)> {
+    use glam::DVec3;
+    if particles.len() < 2 {
+        return None;
+    }
+    let m_total: f64 = particles.iter().map(|p| p.mass as f64).sum();
+    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+    let vel = |p: &SphParticle| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
+    let com: DVec3 = particles.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
+    let v_com: DVec3 = particles.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
+    let mut radii: Vec<(f64, f64)> = particles.iter().map(|p| ((pos(p) - com).length(), p.mass as f64)).collect();
+    radii.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let (mut cum, mut r_remnant, mut m_remnant) = (0.0, radii.last().map_or(0.0, |x| x.0), m_total);
+    for &(r, m) in &radii {
+        cum += m;
+        if cum >= 0.85 * m_total { r_remnant = r; m_remnant = cum; break; }
+    }
+    let mu = crate::orbit::G * m_remnant;
+    let (mut dp, mut dv, mut dm, mut dr) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for pt in particles {
+        if matches!(crate::orbit::perigee(pos(pt) - com, vel(pt) - v_com, mu), Some(pg) if pg > r_remnant) {
+            dp.push(pos(pt)); dv.push(vel(pt)); dm.push(pt.mass as f64); dr.push(pt.rho.max(1.0) as f64);
+        }
+    }
+    if dp.len() < 2 {
+        return None;
+    }
+    let mean_h: f64 = particles.iter().map(|p| p.h as f64).sum::<f64>() / particles.len() as f64;
+    let clumps = crate::accretion::find_clumps(&dp, &dv, &dm, &dr, 2.0 * mean_h, crate::orbit::G, 1.0e4, com, m_remnant, r_remnant);
+    // Only a bound clump OUTSIDE the Roche limit is a real Moon — an inside-Roche clump is tidal debris (it
+    // forms skimming the surface and escapes; it must not be counted/rendered as the Moon).
+    let biggest = clumps.iter().filter(|c| c.accretes() && c.members.len() >= 3).max_by(|a, b| a.mass.partial_cmp(&b.mass).unwrap())?;
+    // Its orbit about the remnant (COM-relative).
+    let rel_p = biggest.com_pos - com;
+    let rel_v = biggest.com_vel - v_com;
+    let r = rel_p.length();
+    let v = rel_v.length();
+    let energy = 0.5 * v * v - mu / r.max(1.0); // specific orbital energy: bound iff < 0
+    let a = if energy < 0.0 { -mu / (2.0 * energy) } else { f64::INFINITY };
+    Some((r, v, energy, a, biggest.mass))
 }
 
 pub fn disk_moonlets(particles: &[SphParticle], earth_radius: f64) -> Vec<crate::tides::Moonlet> {
