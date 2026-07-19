@@ -5,6 +5,263 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-19 — iPhone 15 Pro Max: a latency/throughput CROSSOVER, and the same physics on a third device
+
+**What.** Third entry in the cross-vendor matrix (iPhone 15 Pro Max, A17 Pro, Metal), run through
+`/gpu-probe.html` on the LAN dev server.
+
+**Correctness — three devices, two backends, one answer.** At N=60,000 all of Vulkan/RTX 2070,
+Metal/M4 and Metal/A17 report `tot = 1.585e+7` and `vmax = 30.945`; at N=1 all report
+`tot = 4.179e-8`. No energy injection anywhere. The four-separate-passes race mitigation holds on
+every device tested.
+
+**The finding — a latency/throughput crossover between N=1,000 and N=10,000.**
+
+| N | 2070 (Vulkan) | M4 (Metal) | A17 Pro (Metal) | iPhone vs 2070 |
+|---|---|---|---|---|
+| 1 | 1.25 ms | 0.540 ms | 0.613 ms | **2.0× faster** |
+| 1,000 | 1.83 ms | 0.833 ms | 1.113 ms | **1.6× faster** |
+| 10,000 | 2.23 ms | 1.553 ms | 2.793 ms | 0.8× (slower) |
+| 60,000 | 13.40 ms | 10.317 ms | 16.017 ms | 0.84× (slower) |
+
+A phone BEATS a desktop discrete GPU below the knee and loses above it. The A17 Pro is the ideal probe
+for this because it has Apple's latency advantage with much less throughput, so the two effects
+separate. The ratios confirm the mechanism quantitatively — A17 Pro has a 6-core GPU vs the M4's 10
+(a 1.67× core ratio):
+
+- **N=60,000: M4/A17 = 1.55×** ≈ the core ratio ⇒ throughput-bound, core count predicts the gap.
+- **N=1: M4/A17 = 1.14×** ≪ the core ratio ⇒ latency-bound, core count nearly irrelevant.
+
+Same silicon family, same backend, two limiting regimes, crossover at the knee. This is the §7
+saturation-knee argument (`gpu-perf`) showing up as hardware ranking that REVERSES with N — a single
+benchmark point would have ranked these devices wrong in either direction depending on which N it
+happened to pick.
+
+**Product consequence — the phone's practical particle budget is well under `MAX_PARTICLES`.** At
+N=60,000 physics alone costs 16.0 ms, a ~62 fps ceiling with essentially nothing left for rendering
+inside a 16.67 ms frame. At 0.267 µs/particle, keeping physics to about half the frame budget implies
+roughly **30,000 grains on an A17-class phone** (vs 60,000 viable on the M4). Not a bug — a real
+device-tier limit to design scenes against.
+
+**This raises the priority of the O(table) grid clear.** Its ~0.53 ms/frame is FIXED regardless of N,
+so it is proportionally most expensive exactly where Apple hardware is otherwise strongest (small N),
+and it eats a bigger share of a tighter phone frame budget. The epoch-tag fix is output-neutral and
+now has a clear beneficiary.
+
+**Unchanged limits:** Safari masks every `GPUAdapterInfo` field to the literal string `apple` on this
+device too, so "A17 Pro" is the operator's knowledge of the hardware, not a probe measurement.
+`max_buffer_size` is 1024 MiB, same as the iPad — the N=60,000 run completed without hitting it
+(a prior concern that iOS Safari's tighter per-tab memory limits might kill the run did not
+materialise).
+
+---
+
+## 2026-07-19 — FIRST NON-VULKAN RESULT: the engine's granular step runs correctly on Metal (iPad Pro)
+
+**What.** Ran `/gpu-probe.html` on an iPad Pro (M4) over the LAN HTTPS dev server. First time any part of
+this engine's GPU physics has been executed on a non-Vulkan backend, and the first entry in the
+cross-vendor matrix.
+
+**The correctness result — Metal and Vulkan agree to 4 significant figures.** `lib.rs` (~line 2118)
+splits the four granular stages into four separate compute passes specifically because fusing them
+"happened to work on desktop Vulkan (the 2070) but can RACE on other backends (e.g. Metal / the M4)".
+That mitigation was written defensively and had **never been exercised on Metal**. It holds:
+
+| N | Vulkan (2070) tot / v max | Metal (M4) tot / v max |
+|---|---|---|
+| 1 | 4.179e-8 / 0.000 | 4.179e-8 / 0.000 |
+| 1,000 | 2.981e+3 / 6.012 | 2.875e+3 / 6.104 |
+| 10,000 | 9.580e+5 / 31.019 | 9.546e+5 / 31.022 |
+| 60,000 | 1.585e+7 / 30.945 | 1.585e+7 / 30.945 |
+
+No energy injection at any N — a race would show as a rising total. Note the N=60,000 row is identical
+to four significant figures in BOTH total energy and max speed, and the Vulkan side reproduced those
+same figures across repeated runs. So this probe configuration appears **reproducible in a way
+`gpu-verify`'s scene I is not** (bulk settling rather than marginal stability). That strengthens the
+comparison, but does NOT retire the determinism work — a *small* Metal anomaly would still be
+indistinguishable from drift.
+
+**The performance result — the iPad beats the desktop RTX 2070 at every point.**
+
+| N | browser 2070 | browser M4 | M4 advantage |
+|---|---|---|---|
+| 1 | 1.25 ms | 0.540 ms | 2.3× |
+| 1,000 | 1.83 ms | 0.833 ms | 2.2× |
+| 10,000 | 2.23 ms | 1.553 ms | 1.4× |
+| 60,000 | 13.40 ms | 10.317 ms | 1.3× |
+
+The advantage is LARGEST at small N and shrinks as N grows — the signature of much lower per-dispatch
+latency (unified memory, no PCIe round trip), not raw throughput. Product-relevant consequence: at
+`MAX_PARTICLES` = 60,000 the M4 sustains 10.3 ms/frame, a ~97 fps physics ceiling, so **the engine's
+full particle budget is viable on an iPad**.
+
+**Limits of what this proves (stated rather than glossed).**
+- **The probe did not identify an "M4".** Safari masked every `GPUAdapterInfo` field to the literal
+  string `apple` — vendor, architecture, device and description are all `apple`. It establishes Apple
+  GPU ⇒ Metal (iPadOS WebGPU has no other backend) and `fallback: no` rules out a software adapter.
+  The specific chip is Robin's knowledge of her hardware, not a probe measurement. Do not quote the
+  probe as the source for "M4".
+- **`max_buffer_size` is 1024 MiB on the iPad vs 4096 MiB on desktop.** Not binding here (the largest
+  buffer at N=60,000 is the 8× render buffer at ~31 MB), but a 4× smaller ceiling to respect when
+  scaling up.
+- The page's "per-particle cost falls 3141×" line is dominated by the N=1 point, which is pure launch
+  overhead. The real knee sits between N=1,000 and N=10,000.
+
+---
+
+## 2026-07-19 — a browser GPU probe, and the same wrong-GPU bug confirmed in the browser
+
+**What.** `GpuProbe` (`crates/engine/src/lib.rs`, wasm-only) + `web/gpu-probe.html` /
+`web/src/gpu-probe.ts` + `web/rig/gpu_probe.mjs`: a compute-only probe that runs the REAL
+`particle_step.wgsl` through the REAL `GpuParticles` (no canvas, no surface, no reimplementation) and
+reports (1) which adapter actually ran, (2) per-frame cost across N = 1 … 60,000, (3) whether total
+energy stays bounded. Two-phase like `begin_readback`/`take_readback` — `start_run` submits, JS polls
+`poll()` — because a browser cannot block on a buffer map. Also fixes two `scripts/dev-lan.sh` bugs
+(below) and registers the page in `vite.config.ts` (an unregistered page works in `dev` and silently
+vanishes from `build`).
+
+**Why.** The engine ships to browser WebGPU across vendors, but nothing in `web/` ever touched
+`navigator.gpu` beyond an existence check, and `Engine::create` (`lib.rs:321`) requests an adapter
+with `HighPerformance` and never reports what it got. So a browser run was silent about the hardware
+that produced it — the same ambiguity PR #11 fixed natively. Robin has an iPad Pro (M4); this is the
+first step of a growing cross-vendor matrix (AMD / Apple / Arc).
+
+**Verified (desktop Chromium over Vulkan, xvfb).** Probe reproduces the native baseline on the SAME
+card, which is what validates the probe itself before it meets unfamiliar hardware:
+
+| N | native 2070 (gpu-verify) | browser 2070 (probe) |
+|---|---|---|
+| 1 | 1.58 ms | 1.25 ms |
+| 1,000 | 1.91 ms | 1.83 ms |
+| 10,000 | 3.86 ms | 2.23 ms |
+| 60,000 | 14.4 ms | 13.40 ms |
+
+**Energy invariant holds on Vulkan** — fixed N = 10,000, increasing frames, total energy must never
+rise: `1.83e6 → 1.31e6 → 1.99e5 → 1.37e5` over 60/120/240/480 frames, KE decaying to 37.8 and
+`vmax` 0.65 (settled). This is the reference the M4 run will be compared against; a backend race
+would show as rising energy.
+
+**Two findings that change how browser results must be read.**
+
+1. **wgpu's `AdapterInfo` is EMPTY in a browser.** Under `Backends::BROWSER_WEBGPU` wgpu delegates to
+   the browser and cannot see the driver: `get_info()` returns no name, no driver, and
+   `backend: BrowserWebGpu`. It can never tell you whether you are on Metal. The authoritative source
+   is the browser's own `navigator.gpu` → `GPUAdapterInfo.vendor` / `.architecture`. The probe now
+   reports BOTH and the rig prints the browser's.
+2. **The browser picked the WRONG GPU too — and you cannot override it.** With
+   `powerPreference: "high-performance"`, Chromium reported `vendor: nvidia, architecture: turing` —
+   the RTX 2070, not the 5060 Ti. Corroborated independently by timing (13.4 ms at N=60k matches the
+   2070's native 14.4 ms, not the 5060 Ti's 5.67 ms). Chromium's `--gpu-vendor-id` / `--gpu-device-id`
+   flags did NOT move it. **WebGPU exposes no adapter enumeration at all** — `requestAdapter()`
+   returns one adapter and the spec offers no way to choose — so unlike the native harness, which can
+   now refuse to guess, in a browser the only available defence is to RECORD which GPU you got. That
+   is precisely what this probe does, and why its provenance output is not optional decoration.
+
+**Not achievable on this host (stated rather than quietly dropped):** reproducing the 2.5×
+5060-vs-2070 gap *in the browser*. Chromium cannot be pointed at the second card, so the browser leg
+is validated against the 2070 only.
+
+**`scripts/dev-lan.sh` — two bugs fixed.** (1) The readiness probe grepped the served `/` for
+`greenfield`, which appears nowhere under `web/` (it survives only as a wgpu device label in Rust and
+never reaches the HTML), so the script never reused a running server and always exited 1 after a
+perfectly healthy start; it now greps a `SENTINEL` that is actually in `index.html`. (2) `needs_build`
+searched only `crates/` and `data/` for `*.rs|*.toml|*.json`, missing `shaders/**.wgsl` — but every
+shader is `include_str!`'d into the wasm, so editing one changed the binary while the script reported
+"✓ wasm up to date" and served the OLD shader. Silently stale results are the worst possible failure
+for on-device verification, which is exactly what this script exists for.
+
+**Known cosmetic gap:** every page 404s `/favicon.ico` (the repo ships no favicon). Pre-existing,
+affects all pages equally, not introduced here.
+
+---
+
+## 2026-07-19 — gpu-verify was verifying on the wrong GPU (and is not run-to-run reproducible)
+
+**What.** `tools/gpu-verify` selected its device with `request_adapter(PowerPreference::HighPerformance)`.
+On a host with two *discrete* NVIDIA cards that preference cannot discriminate — it silently took whichever
+Vulkan enumerated first. Replaced it with `pick_adapter()`: `GPU_VERIFY_ADAPTER` (case-insensitive substring
+of the adapter name) selects explicitly; with exactly one non-CPU adapter present that one is used; with
+several and no variable set it **panics rather than guessing**, listing what it found. The chosen adapter,
+its device type, and the driver version now print on every run, so a log always records which silicon
+produced it. `tools/gpu-verify/.cargo/config.toml` supplies the host default via cargo's `[env]`
+(`force = false`, so a real env var still wins). CPU adapters (Mesa llvmpipe) are filtered out — they are
+not verification targets.
+
+**Why.** A verification harness that quietly changes hardware is worse than one that fails: every prior
+"PASS" carried an unstated assumption about which GPU produced it. Capability-based auto-selection was
+considered and rejected on evidence — both cards report *identical* `wgpu` limits (`max_buffer_size`,
+workgroup dims), so there is nothing to choose on. Explicit-or-refuse is the only honest option.
+
+**Verified.** All four paths exercised: default via cargo → `adapter: NVIDIA GeForce RTX 5060 Ti
+(DiscreteGpu, 580.173.02)`; `GPU_VERIFY_ADAPTER=2070` → the 2070; no variable + two GPUs → panics with
+`2 discrete GPUs present (…) — refusing to guess`; unmatched name → `matched no adapter; available: …`.
+Full suite run on both cards: **same 25 PASS / 2 scene FAIL on each** (the pre-existing scene-D repose
+deficiency and scene-J impact-energy failure — unchanged by this work, not addressed here).
+
+**Recorded, not fixed — the harness is nondeterministic.** Comparing the two cards showed small numeric
+drift, so the same card was run twice: it drifts *by the same magnitude against itself*
+(`I energy-conservation: E 16303→-2684→-6490` vs `16303→-2670→-6480`; scene E spread 21.3 m vs 21.0 m).
+So the cross-card deltas are **not** architectural divergence — both are the same underlying
+nondeterminism, most likely order-dependent float accumulation in the GPU force/neighbour reduction.
+This matters because scene I is the FUDGE DETECTOR: its margin is currently larger than its
+reproducibility. Worth a determinism pass before any number from this harness is quoted as exact.
+
+**Timing (informational, not a benchmark).** Full suite 65.7 s on the 5060 Ti vs 79.4 s on the 2070
+(~17% faster). Single samples of a wall-clock that includes shader compilation and CPU-side setup —
+this harness is not GPU-bound, so do not read it as a measure of the cards. See the next entry: that
+17% is an artifact of the harness's scale and says nothing about the engine.
+
+---
+
+## 2026-07-19 — the 17% was the harness, not the hardware: gpu-verify runs 1–5 particles per scene
+
+**What.** Chased why a 3-generation-newer GPU only won 17% on the suite. `GPU_VERIFY_STATS=1` (added
+to `simulate`, stderr-only) dumps the workload shape. The harness's real distribution over 458
+sim-calls: **219 calls at 1 particle, 205 at 5, 11 at 2** — i.e. ~95% of calls dispatch a SINGLE
+workgroup with 63 of 64 lanes idle. Only one call reaches 13,456 particles. Meanwhile every substep
+clears the whole `TABLE_SIZE` grid regardless of N. Totals for one suite run: **1,036,448 submits,
+4,145,792 dispatches, 33.96 G threads in CLEAR vs 0.90 G in physics (37.5 : 1)**. At ~16 µs of
+launch latency per dispatch that accounts for the runtime — the suite measures driver launch
+overhead, not the shader.
+
+**Why it matters.** The harness's scale is not the engine's, and the two batch differently:
+gpu-verify creates an encoder and **submits per substep**, while `Engine::step_physics` records all
+`DEBRIS_SUBSTEPS` into **one** encoder and submits once per frame. A perf conclusion drawn from this
+harness does NOT transfer to the engine — which is exactly the error the 17% invited.
+
+**Verified — at engine scale the new card is 2.5× faster.** Benchmarked the real
+`shaders/particle_step.wgsl` at the engine's configuration (`GRID_TABLE_SIZE = 1<<18`, 16 substeps in
+one encoder, one submit), 3 warmup + 20 timed frames, both cards:
+
+| N | RTX 2070 | RTX 5060 Ti | speedup |
+|---|---|---|---|
+| 1 | 1.58 ms | 1.24 ms | 1.27× |
+| 1,000 | 1.91 ms | 1.50 ms | 1.28× |
+| 10,000 | 3.86 ms | 2.26 ms | 1.71× |
+| 60,000 (`MAX_PARTICLES`) | 14.4 ms | 5.67 ms | **2.55×** |
+
+Reproduced across reps (5060 Ti 5.50/5.67/5.72 ms; 2070 14.11/14.39/14.45 ms). The advantage grows
+with N exactly as expected once the workload saturates the wider GPU. `nvidia-smi dmon` during a
+suite run: `sm` 70–88%, **`mem` 0%**, `fb` < 100 MB — not bandwidth-bound, working set trivially
+small. (`sm%` only means ≥1 warp resident; it is not saturation.)
+
+**Recorded, not fixed — the grid clear is O(table), not O(N).** `cs_grid_clear` dispatches
+`GRID_TABLE_SIZE = 262,144` threads (4,096 workgroups) every substep independent of particle count,
+measured at **~0.53 ms per 16-substep frame on both cards** (flat in N). That is ~9% of frame time at
+N=60,000 and ~30% at N=1. Candidate fixes: an epoch/generation tag per cell (compare a frame counter
+on read, never clear), clearing only cells touched last frame, or sizing the table to live N —
+`GRID_TABLE_SIZE` is currently 4.4× `MAX_PARTICLES` though the comment at lib.rs:125 says "≥ ~2×".
+Not changed here: this branch is the adapter fix, and a grid-lifecycle change needs its own docs/NN
+and re-verification.
+
+**An invalid ablation, recorded so it is not repeated.** First attempt to price the clear simply
+removed the pass and re-timed — it came out **6× SLOWER** (36.5 ms vs 5.67 ms at N=60,000). Removing
+the clear does not remove work: `grid_count` then accumulates across substeps and `cs_forces` walks
+saturated `bucket_k`-deep buckets. It measured a different, worse simulation. A negative measured
+cost is the tell. Stage cost was taken from the clear running alone instead.
+
+---
+
 ## 2026-07-19 — Worlds-as-data #2: the Space + Two Moons deorbit scenes are now DATA (docs/43)
 
 **What.** The second worlds-as-data consumer, proving the schema generalizes from a static planet (Terra) to

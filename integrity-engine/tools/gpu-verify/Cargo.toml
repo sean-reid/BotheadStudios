@@ -1,6 +1,8 @@
 # Standalone (NOT a workspace member — its own [workspace] table) so the native Vulkan wgpu build
 # never leaks into the engine's browser (webgpu-only) wasm build via feature unification. This runs
-# shaders/particle_step.wgsl on a real GPU (the box's RTX 2070) to VERIFY the granular sim headlessly.
+# shaders/particle_step.wgsl on a real GPU to VERIFY the granular sim headlessly. WHICH GPU is chosen
+# explicitly via GPU_VERIFY_ADAPTER (see .cargo/config.toml and `pick_adapter` in src/main.rs) — with
+# several discrete GPUs present the harness refuses to guess.
 [package]
 name = "gpu-verify"
 version = "0.0.0"

@@ -160,6 +160,56 @@ fn init_gpu() -> Gpu {
     init_gpu_src(SHADER)
 }
 
+/// Choose which physical GPU to verify on. This box has TWO discrete NVIDIA cards (an RTX 5060 Ti
+/// 16 GiB and an RTX 2070 8 GiB), and the previous `request_adapter(HighPerformance)` call silently
+/// took whichever Vulkan enumerated first — the 2070 — so runs were quietly NOT exercising the card
+/// the physics is meant to ship against. `PowerPreference` cannot discriminate between two *discrete*
+/// GPUs, and neither can `Limits`: both cards report identical `max_buffer_size` / workgroup limits,
+/// so there is nothing to auto-select on. Hence: select explicitly, and NEVER guess.
+///
+/// `GPU_VERIFY_ADAPTER` = case-insensitive substring of the adapter name (e.g. `5060`). Unset with
+/// exactly one discrete GPU present, that one is used. Unset with several, this PANICS rather than
+/// picking arbitrarily — a silently-wrong card is the bug being fixed here. The repo's
+/// `.cargo/config.toml` supplies the default for this box; a real env var overrides it.
+fn pick_adapter(instance: &wgpu::Instance) -> wgpu::Adapter {
+    // llvmpipe (Mesa's software rasteriser) also enumerates; it is not a verification target.
+    let gpus: Vec<wgpu::Adapter> = instance
+        .enumerate_adapters(wgpu::Backends::VULKAN)
+        .into_iter()
+        .filter(|a| a.get_info().device_type != wgpu::DeviceType::Cpu)
+        .collect();
+    assert!(!gpus.is_empty(), "no non-CPU Vulkan adapter found");
+    // Materialise the name list up front so the panic arms can use it after `gpus` is consumed.
+    let names = gpus
+        .iter()
+        .map(|a| a.get_info().name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let n = gpus.len();
+
+    let want = std::env::var("GPU_VERIFY_ADAPTER").ok().filter(|s| !s.is_empty());
+    let adapter = match want {
+        Some(w) => {
+            let needle = w.to_lowercase();
+            gpus.into_iter()
+                .find(|a| a.get_info().name.to_lowercase().contains(&needle))
+                .unwrap_or_else(|| {
+                    panic!("GPU_VERIFY_ADAPTER={w:?} matched no adapter; available: {names}")
+                })
+        }
+        None if n == 1 => gpus.into_iter().next().unwrap(),
+        None => panic!(
+            "{n} discrete GPUs present ({names}) — set GPU_VERIFY_ADAPTER to choose; refusing to guess"
+        ),
+    };
+
+    // Print the choice EVERY run (not just once): a verification harness that silently switches
+    // hardware is exactly what went wrong before, so the provenance stays in the output.
+    let info = adapter.get_info();
+    println!("adapter: {} ({:?}, {})", info.name, info.device_type, info.driver_info);
+    adapter
+}
+
 /// Build the pipelines from an ARBITRARY shader source (not just the on-disk SHADER). Used by the
 /// MAX_SURFACE_CORRECTION robustness sweep, which recompiles the real shader with the constant edited to
 /// prove the storm-fix outcome is insensitive to it (a relaxation rate, not a tuned edge).
@@ -168,13 +218,7 @@ fn init_gpu_src(shader_src: &str) -> Gpu {
         backends: wgpu::Backends::VULKAN,
         ..Default::default()
     });
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .expect("no Vulkan adapter (RTX 2070 expected)");
-    println!("adapter: {}", adapter.get_info().name);
+    let adapter = pick_adapter(&instance);
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("gpu-verify"),
@@ -251,6 +295,14 @@ fn init_gpu_src(shader_src: &str) -> Gpu {
 fn simulate(gpu: &Gpu, particles: Vec<Particle>, frames: u32, scene: &Scene) -> Vec<Particle> {
     use wgpu::util::DeviceExt;
     let count = particles.len() as u32;
+    // `GPU_VERIFY_STATS=1` dumps the workload shape (to stderr, so it never pollutes scene output).
+    // Added because the suite's wall-clock turned out to be dominated by launch overhead, not physics:
+    // most scenes here run 1–5 particles (ONE workgroup, 63 idle lanes) while every substep still
+    // clears the whole TABLE_SIZE hash grid. Use it before drawing any perf conclusion from this
+    // harness — its scale is nothing like the engine's.
+    if std::env::var("GPU_VERIFY_STATS").is_ok() {
+        eprintln!("STATS count={count} frames={frames} substeps={SUBSTEPS}");
+    }
     let params = scene.params(count);
 
     let pbuf = gpu
