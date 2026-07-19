@@ -5,6 +5,93 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-19 — gpu-verify was verifying on the wrong GPU (and is not run-to-run reproducible)
+
+**What.** `tools/gpu-verify` selected its device with `request_adapter(PowerPreference::HighPerformance)`.
+On a host with two *discrete* NVIDIA cards that preference cannot discriminate — it silently took whichever
+Vulkan enumerated first. Replaced it with `pick_adapter()`: `GPU_VERIFY_ADAPTER` (case-insensitive substring
+of the adapter name) selects explicitly; with exactly one non-CPU adapter present that one is used; with
+several and no variable set it **panics rather than guessing**, listing what it found. The chosen adapter,
+its device type, and the driver version now print on every run, so a log always records which silicon
+produced it. `tools/gpu-verify/.cargo/config.toml` supplies the host default via cargo's `[env]`
+(`force = false`, so a real env var still wins). CPU adapters (Mesa llvmpipe) are filtered out — they are
+not verification targets.
+
+**Why.** A verification harness that quietly changes hardware is worse than one that fails: every prior
+"PASS" carried an unstated assumption about which GPU produced it. Capability-based auto-selection was
+considered and rejected on evidence — both cards report *identical* `wgpu` limits (`max_buffer_size`,
+workgroup dims), so there is nothing to choose on. Explicit-or-refuse is the only honest option.
+
+**Verified.** All four paths exercised: default via cargo → `adapter: NVIDIA GeForce RTX 5060 Ti
+(DiscreteGpu, 580.173.02)`; `GPU_VERIFY_ADAPTER=2070` → the 2070; no variable + two GPUs → panics with
+`2 discrete GPUs present (…) — refusing to guess`; unmatched name → `matched no adapter; available: …`.
+Full suite run on both cards: **same 25 PASS / 2 scene FAIL on each** (the pre-existing scene-D repose
+deficiency and scene-J impact-energy failure — unchanged by this work, not addressed here).
+
+**Recorded, not fixed — the harness is nondeterministic.** Comparing the two cards showed small numeric
+drift, so the same card was run twice: it drifts *by the same magnitude against itself*
+(`I energy-conservation: E 16303→-2684→-6490` vs `16303→-2670→-6480`; scene E spread 21.3 m vs 21.0 m).
+So the cross-card deltas are **not** architectural divergence — both are the same underlying
+nondeterminism, most likely order-dependent float accumulation in the GPU force/neighbour reduction.
+This matters because scene I is the FUDGE DETECTOR: its margin is currently larger than its
+reproducibility. Worth a determinism pass before any number from this harness is quoted as exact.
+
+**Timing (informational, not a benchmark).** Full suite 65.7 s on the 5060 Ti vs 79.4 s on the 2070
+(~17% faster). Single samples of a wall-clock that includes shader compilation and CPU-side setup —
+this harness is not GPU-bound, so do not read it as a measure of the cards. See the next entry: that
+17% is an artifact of the harness's scale and says nothing about the engine.
+
+---
+
+## 2026-07-19 — the 17% was the harness, not the hardware: gpu-verify runs 1–5 particles per scene
+
+**What.** Chased why a 3-generation-newer GPU only won 17% on the suite. `GPU_VERIFY_STATS=1` (added
+to `simulate`, stderr-only) dumps the workload shape. The harness's real distribution over 458
+sim-calls: **219 calls at 1 particle, 205 at 5, 11 at 2** — i.e. ~95% of calls dispatch a SINGLE
+workgroup with 63 of 64 lanes idle. Only one call reaches 13,456 particles. Meanwhile every substep
+clears the whole `TABLE_SIZE` grid regardless of N. Totals for one suite run: **1,036,448 submits,
+4,145,792 dispatches, 33.96 G threads in CLEAR vs 0.90 G in physics (37.5 : 1)**. At ~16 µs of
+launch latency per dispatch that accounts for the runtime — the suite measures driver launch
+overhead, not the shader.
+
+**Why it matters.** The harness's scale is not the engine's, and the two batch differently:
+gpu-verify creates an encoder and **submits per substep**, while `Engine::step_physics` records all
+`DEBRIS_SUBSTEPS` into **one** encoder and submits once per frame. A perf conclusion drawn from this
+harness does NOT transfer to the engine — which is exactly the error the 17% invited.
+
+**Verified — at engine scale the new card is 2.5× faster.** Benchmarked the real
+`shaders/particle_step.wgsl` at the engine's configuration (`GRID_TABLE_SIZE = 1<<18`, 16 substeps in
+one encoder, one submit), 3 warmup + 20 timed frames, both cards:
+
+| N | RTX 2070 | RTX 5060 Ti | speedup |
+|---|---|---|---|
+| 1 | 1.58 ms | 1.24 ms | 1.27× |
+| 1,000 | 1.91 ms | 1.50 ms | 1.28× |
+| 10,000 | 3.86 ms | 2.26 ms | 1.71× |
+| 60,000 (`MAX_PARTICLES`) | 14.4 ms | 5.67 ms | **2.55×** |
+
+Reproduced across reps (5060 Ti 5.50/5.67/5.72 ms; 2070 14.11/14.39/14.45 ms). The advantage grows
+with N exactly as expected once the workload saturates the wider GPU. `nvidia-smi dmon` during a
+suite run: `sm` 70–88%, **`mem` 0%**, `fb` < 100 MB — not bandwidth-bound, working set trivially
+small. (`sm%` only means ≥1 warp resident; it is not saturation.)
+
+**Recorded, not fixed — the grid clear is O(table), not O(N).** `cs_grid_clear` dispatches
+`GRID_TABLE_SIZE = 262,144` threads (4,096 workgroups) every substep independent of particle count,
+measured at **~0.53 ms per 16-substep frame on both cards** (flat in N). That is ~9% of frame time at
+N=60,000 and ~30% at N=1. Candidate fixes: an epoch/generation tag per cell (compare a frame counter
+on read, never clear), clearing only cells touched last frame, or sizing the table to live N —
+`GRID_TABLE_SIZE` is currently 4.4× `MAX_PARTICLES` though the comment at lib.rs:125 says "≥ ~2×".
+Not changed here: this branch is the adapter fix, and a grid-lifecycle change needs its own docs/NN
+and re-verification.
+
+**An invalid ablation, recorded so it is not repeated.** First attempt to price the clear simply
+removed the pass and re-timed — it came out **6× SLOWER** (36.5 ms vs 5.67 ms at N=60,000). Removing
+the clear does not remove work: `grid_count` then accumulates across substeps and `cs_forces` walks
+saturated `bucket_k`-deep buckets. It measured a different, worse simulation. A negative measured
+cost is the tell. Stage cost was taken from the clear running alone instead.
+
+---
+
 ## 2026-07-19 — Worlds-as-data #2: the Space + Two Moons deorbit scenes are now DATA (docs/43)
 
 **What.** The second worlds-as-data consumer, proving the schema generalizes from a static planet (Terra) to

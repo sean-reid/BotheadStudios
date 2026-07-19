@@ -9,6 +9,11 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **`tools/gpu-verify` selects its GPU explicitly** — on a host with more than one discrete GPU the old
+  `PowerPreference::HighPerformance` request silently picked whichever enumerated first, so runs could
+  verify against an unintended card. Set `GPU_VERIFY_ADAPTER` (substring of the adapter name) to choose;
+  with several GPUs and no value set the harness now refuses to run rather than guess. The selected
+  adapter and driver version are printed on every run. Dev-tooling only — no engine/API change.
 - **Worlds-as-data #2 — Space + Two Moons are now DATA scenes (docs/43)** — the world schema gained a
   `type:"system"` variant with a `bodies[]` array (orbital initial conditions: mass/radius/pos/vel/spin/profile)
   and an orbit camera (`yaw/pitch/zoom/focus`). New `OrbitDemo::load_world(json)` seeds the N-body scene from the

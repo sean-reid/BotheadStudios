@@ -1,0 +1,13 @@
+# Which physical GPU gpu-verify runs on. This box has two discrete NVIDIA cards and wgpu cannot tell
+# them apart on capability (identical limits), so the choice is explicit rather than inferred — see
+# `pick_adapter` in src/main.rs. The RTX 5060 Ti (16 GiB, Blackwell) is the faster of the two and the
+# card the GPU physics should be verified against; the RTX 2070 (8 GiB, Turing) remains available.
+#
+# `force = false` means a real environment variable wins, so a one-off cross-check is just:
+#   GPU_VERIFY_ADAPTER=2070 cargo run --release
+#
+# NOTE: cargo applies this only when the binary is launched THROUGH cargo. Running
+# `./target/release/gpu-verify` directly gets no default and (with two GPUs present) will refuse to
+# guess — set the variable yourself in that case.
+[env]
+GPU_VERIFY_ADAPTER = { value = "5060", force = false }
