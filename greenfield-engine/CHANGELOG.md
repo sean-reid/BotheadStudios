@@ -15,7 +15,9 @@ because **we are our own first customers** and pin exact engine versions in our 
   Earth sphere · magma impact crater · ejecta plume · shocked-vapor atmosphere · accreting moonlet spheres) against
   the raw particle field. Browser physics brought to parity — **LOD seeding** (`HydroBody::new_lod`) + a **scheduled
   shock-dt** take the impact from a 0%-Earth hit-and-run to a ~27%-Earth disk with an accreting moonlet. Earth/Luna
-  frame buttons use 👁 (eyes). Live at integrity.bothead.net.
+  frame buttons use 👁 (eyes). The per-frame GPU load is now **adaptive** (frame-budget-controlled substeps) so
+  the sim can't freeze the tab/OS, and a **zoom slider** gives reliable zoom when wheel events drop under load.
+  Live at integrity.bothead.net.
 - **Giant-impact disk Earth-fraction converged by ensemble** (`tools/impact-run`, `docs/40`→`docs/41` #3) — the
   offline GPU impact tool gained variable-resolution ("LOD") seeding, an order-independent disk measurement
   (sort+Kahan, bit-reproducible), a K-run perturbed-IC ensemble (mean±stdev), and a physical-time epoch stop.

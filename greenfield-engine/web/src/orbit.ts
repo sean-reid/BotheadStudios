@@ -206,6 +206,42 @@ async function main(): Promise<void> {
       bar.appendChild(slot);
     }
 
+    // Zoom slider — a reliable direct-value control. Under heavy GPU load the browser coalesces/drops wheel
+    // events, so scroll-zoom becomes unreliable; a range input always registers. Universal to every scene.
+    // Log-mapped over the camera's zoom range (left = out/far, right = in/close), and kept two-way in sync
+    // with wheel/pinch/follow (updated from cam.zoom each frame, unless the user is dragging it).
+    const ZMIN = 0.05, ZMAX = 6;
+    const zoomToSlider = (z: number): number => 100 * Math.log(z / ZMAX) / Math.log(ZMIN / ZMAX);
+    const sliderToZoom = (v: number): number => ZMAX * Math.pow(ZMIN / ZMAX, v / 100);
+    let zoomDragging = false;
+    const zoomSlider = document.createElement("input");
+    {
+      const slot = document.createElement("div");
+      Object.assign(slot.style, {
+        display: "flex", flexDirection: "column", gap: "3px",
+        padding: "8px 11px", color: "#fff",
+        font: "600 12px/1.2 system-ui, sans-serif",
+        background: "rgba(20,24,40,0.72)", border: "1px solid rgba(255,255,255,0.25)",
+        borderRadius: "10px", backdropFilter: "blur(6px)",
+      });
+      const lbl = document.createElement("div");
+      lbl.textContent = "Zoom  out ⇄ in";
+      zoomSlider.type = "range";
+      zoomSlider.min = "0"; zoomSlider.max = "100"; zoomSlider.value = "50";
+      zoomSlider.style.width = "128px";
+      zoomSlider.style.cursor = "pointer";
+      zoomSlider.style.touchAction = "none"; // let the slider own the drag under load, not the page
+      zoomSlider.addEventListener("input", () => {
+        cam.zoom = sliderToZoom(Number(zoomSlider.value));
+        followMoon = false; // manual zoom takes the camera over (like wheel/pinch)
+        userInteracted = true;
+      });
+      zoomSlider.addEventListener("pointerdown", () => { zoomDragging = true; });
+      window.addEventListener("pointerup", () => { zoomDragging = false; });
+      slot.append(lbl, zoomSlider);
+      bar.appendChild(slot);
+    }
+
     // (The GPU deformable-Earth impact is now the DEFAULT birth scene — auto-started on load — so the old
     // "🌋 GPU Impact" trigger button is retired; "Replay" below re-runs it.)
 
@@ -485,6 +521,8 @@ async function main(): Promise<void> {
         cam.zoom += (followZoom() - cam.zoom) * 0.08;
       }
       demo.set_orbit(cam.yaw, cam.pitch, cam.zoom);
+      // Keep the zoom slider in sync with wheel/pinch/follow-driven zoom (unless the user is dragging it).
+      if (!zoomDragging) zoomSlider.value = String(zoomToSlider(cam.zoom));
       try {
         const __r0 = performance.now();
         demo.render();
