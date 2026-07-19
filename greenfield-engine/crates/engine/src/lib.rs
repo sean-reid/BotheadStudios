@@ -2814,6 +2814,139 @@ mod app {
             self.render_blend = (blend as f64).clamp(0.0, 1.0);
         }
 
+        /// docs/43 — load a "system" world (Sun/Earth/Moon initial conditions) from JSON, replacing the built-in
+        /// constants with declared DATA. `create(canvas, num_moons)` must have been called with the world's moon
+        /// count first (the GPU per-moon uniforms are sized there); this sets the physical initial conditions
+        /// (positions/velocities/masses), the planet's spin, the composition-derived tints, the time scale, the
+        /// frame-of-reference focus, and the orbit-camera framing. The deorbit stays a user control
+        /// (`brake_moon`/`drop_moon`) — no scripted outcome. (The planet's render radius still uses the
+        /// `EARTH_RADIUS_M` constant in v1; per-body render radii from data is a flagged follow-up.)
+        pub fn load_world(&mut self, world_json: &str) -> Result<(), JsValue> {
+            use crate::terra::world_def::{BodyDef, World};
+            let w = World::parse(world_json).map_err(|e| JsValue::from_str(&e))?;
+            let defs = w
+                .bodies
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("system world is missing a `bodies` array"))?;
+
+            // Mass/radius resolve from an explicit field or a named profile (declared, not fudged). The Sun's mass
+            // EMERGES from its composition (`planet::sun`), like the current hardcoded path.
+            let body_mass = |d: &BodyDef| -> f64 {
+                d.mass_kg.unwrap_or_else(|| match d.profile.as_deref() {
+                    Some("sun") => crate::planet::sun().total_mass(),
+                    Some("earth") => EARTH_MASS,
+                    Some("moon") => MOON_MASS,
+                    _ => 0.0,
+                })
+            };
+            let body_radius = |d: &BodyDef| -> f64 {
+                d.radius_m.unwrap_or_else(|| match d.profile.as_deref() {
+                    Some("earth") => EARTH_RADIUS_M,
+                    Some("moon") => MOON_RADIUS_M,
+                    _ => 0.0,
+                })
+            };
+
+            let mut bodies = Vec::with_capacity(defs.len());
+            let mut planet_idx = 1usize;
+            let mut moon_count = 0usize;
+            for (i, d) in defs.iter().enumerate() {
+                bodies.push(crate::orbit::Body {
+                    pos: glam::DVec3::from_array(d.pos_m),
+                    vel: glam::DVec3::from_array(d.vel_ms),
+                    mass: body_mass(d),
+                });
+                // Tint: explicit override, else aggregated from the profile's real composition (docs/17) — the
+                // borrow of `self.mats` is confined to this block, released before we mutate the tint fields.
+                let tint = |profile: Option<&str>, mats: &[materials::Material]| -> [f32; 4] {
+                    if let Some(t) = d.tint {
+                        return [t[0], t[1], t[2], 1.0];
+                    }
+                    let comp: Vec<(usize, f32)> = match profile {
+                        Some("earth") => vec![
+                            (materials::index_of(mats, "water"), 0.71),
+                            (materials::index_of(mats, "granite"), 0.24),
+                            (materials::index_of(mats, "ice"), 0.05),
+                        ],
+                        Some("moon") => vec![(materials::index_of(mats, "basalt"), 1.0)],
+                        _ => vec![(materials::index_of(mats, "granite"), 1.0)],
+                    };
+                    let a = materials::aggregate_albedo(&comp, mats);
+                    [a[0], a[1], a[2], 1.0]
+                };
+                match d.role.as_str() {
+                    "planet" => {
+                        planet_idx = i;
+                        self.earth_tint = tint(d.profile.as_deref(), &self.mats);
+                        if let Some(p) = d.spin_period_s {
+                            self.spin_l = glam::DVec3::new(0.0, 0.0, 1.0)
+                                * (crate::tides::moment_of_inertia(body_mass(d), body_radius(d))
+                                    * (2.0 * std::f64::consts::PI / p));
+                            self.initial_spin_l = self.spin_l;
+                        }
+                    }
+                    "moon" => {
+                        moon_count += 1;
+                        self.moon_tint = tint(d.profile.as_deref(), &self.mats);
+                        self.impactor_radius = body_radius(d);
+                        self.impactor_mass = body_mass(d);
+                    }
+                    _ => {}
+                }
+            }
+            // `moon_unis` is a fixed render pool (drawn per moon body); guard only that we don't exceed it.
+            if moon_count > self.moon_unis.len() {
+                return Err(JsValue::from_str(&format!(
+                    "world declares {moon_count} moon(s), exceeding the render pool of {}",
+                    self.moon_unis.len()
+                )));
+            }
+
+            self.bodies = bodies;
+            self.acc = crate::orbit::accelerations(&self.bodies);
+            self.initial_bodies = self.bodies.clone();
+            // Per-moon impact-hit flags sized to this world (the physics state; `moon_unis` is just the pool).
+            self.moon_hit = vec![false; moon_count];
+
+            if let Some(t) = w.time.as_ref() {
+                self.time_scale = t.scale.clamp(1.0, 2_000_000.0);
+            }
+
+            // Orbit camera: frame-of-reference focus body + framing.
+            self.focus = planet_idx;
+            if let Some(c) = w.camera.as_ref() {
+                if let Some(f) = c.focus.as_deref() {
+                    if let Some(idx) = defs.iter().position(|d| d.name == f) {
+                        self.focus = idx;
+                    }
+                }
+                if let Some(y) = c.yaw {
+                    self.camera.yaw = y as f32;
+                }
+                if let Some(p) = c.pitch {
+                    self.camera.pitch = p as f32;
+                }
+                if let Some(z) = c.zoom {
+                    self.camera.zoom = z as f32;
+                }
+            }
+            // Frame the view on the planet→moon separation (fall back to the current base distance).
+            if let Some(moon) = self.bodies.get(planet_idx + 1) {
+                let sep = (moon.pos - self.bodies[planet_idx].pos).length();
+                if sep > 0.0 {
+                    self.camera.base_distance = (sep * DISPLAY_SCALE) as f32 * 1.7;
+                }
+            }
+
+            log::info!(
+                "orbit demo: loaded system world '{}' — {} bodies, {moon_count} moon(s), {:.0}x time",
+                w.name,
+                self.bodies.len(),
+                self.time_scale,
+            );
+            Ok(())
+        }
+
         // --- Orbital-decay controls: brake the Moon and watch its orbit tighten into a crash. ---
 
         /// Halve **every** moon's velocity relative to the Earth — the orbital-decay control (all moons
@@ -4846,7 +4979,11 @@ mod app {
             lc_h: u32,
         ) -> Result<(), JsValue> {
             let w = crate::terra::world_def::World::parse(world_json).map_err(|e| JsValue::from_str(&e))?;
-            self.planet_radius = w.planet.radius_m;
+            let planet = w
+                .planet
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("Terra world is missing a `planet` section"))?;
+            self.planet_radius = planet.radius_m;
             let p_ratio = w
                 .atmosphere
                 .as_ref()
@@ -4911,7 +5048,7 @@ mod app {
             log::info!(
                 "Terra: loaded '{}' — radius {:.0} km, rasters land={} elev={} cover={}, land fraction {:?}",
                 w.name,
-                w.planet.radius_m / 1e3,
+                self.planet_radius / 1e3,
                 self.landmask.is_some(),
                 self.elevation.is_some(),
                 self.landcover.is_some(),

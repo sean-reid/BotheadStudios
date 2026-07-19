@@ -62,12 +62,30 @@ async function main(): Promise<void> {
   report("info", `build ${__BUILD_ID__}`);
   report("info", `UA: ${navigator.userAgent}`);
   report("info", `secureContext=${window.isSecureContext} · gpu in navigator=${"gpu" in navigator}`);
-  // The scene identity comes from the page (birth.html / twomoons.html / orbit.html share this script
-  // via body attributes). Resolve it now so the canonical banner can be stamped immediately — before
-  // WASM even loads — so a stale Safari cache is obvious at a glance (the build won't match).
-  const numMoons = Number(document.body.getAttribute("data-moons")) || 1;
+  // The scene identity comes from the page. The DEORBIT scenes (Space, Two Moons) are now DATA worlds
+  // (docs/43, worlds-as-data): `<body data-world="…/world.json">` names an N-body "system" world that the
+  // engine loads. Birth of the Moon stays on the code path (`data-scene="birth"` → GPU SPH impact). Resolve
+  // the identity now so the banner stamps before WASM loads (a stale Safari cache is obvious at a glance).
+  const worldUrl = document.body.getAttribute("data-world");
   const birthScene = document.body.getAttribute("data-scene") === "birth";
-  const sceneName = birthScene ? "birth of the moon" : numMoons === 2 ? "two moons" : "space";
+  let world: { name?: string; bodies?: Array<{ role?: string }> } | null = null;
+  let worldJson = "";
+  if (worldUrl) {
+    try {
+      worldJson = await fetch(worldUrl).then((r) => {
+        if (!r.ok) throw new Error(`world fetch ${worldUrl} → HTTP ${r.status}`);
+        return r.text();
+      });
+      world = JSON.parse(worldJson);
+    } catch (e) {
+      report("error", `world load failed, falling back to defaults: ${String(e)}`);
+    }
+  }
+  const numMoons = world
+    ? (world.bodies ?? []).filter((b) => b.role === "moon").length || 1
+    : Number(document.body.getAttribute("data-moons")) || 1;
+  const sceneName =
+    world?.name?.toLowerCase() ?? (birthScene ? "birth of the moon" : numMoons === 2 ? "two moons" : "space");
   const hud = createSimHud(sceneName);
 
   const canvas = document.getElementById("gpu-canvas") as HTMLCanvasElement | null;
@@ -102,6 +120,13 @@ async function main(): Promise<void> {
     // Moon count / birth flag were resolved from the page above (orbit.html and twomoons.html share
     // this one script via <body data-moons>/<body data-scene>).
     const demo = await OrbitDemo.create(canvas, numMoons);
+    // docs/43: for a DATA world (the deorbit scenes), hand the engine the JSON — it replaces the built-in
+    // Sun/Earth/Moon constants with the world's declared initial conditions, spin, tints, time scale, and
+    // orbit-camera framing. `create` above was given the world's moon count so the GPU per-moon buffers match.
+    if (world && worldJson) {
+      demo.load_world(worldJson);
+      report("info", `loaded system world: ${world.name ?? "?"}`);
+    }
     // Birth of the Moon: THE scene is now the GPU SPH deformable-Earth giant impact (docs/33 stage 5, docs/41)
     // — two differentiated bodies, stepped by sph_step.wgsl in-browser, forming a rotationally-SUSTAINED disk
     // (the docs/41 spin fix) that accretes a Moon. The relax runs non-blocking in chunks (the phase machine),

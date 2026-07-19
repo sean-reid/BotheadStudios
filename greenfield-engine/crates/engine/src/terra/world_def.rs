@@ -1,7 +1,9 @@
 //! docs/43 — the "world" schema: a scene defined as DATA (JSON) that the engine loads and renders. This is the
-//! reusable contract (docs/43 "initial conditions + a few dials"). v1 (terrain) consumes `planet`, `surface`,
-//! `atmosphere`, `camera`; the rest is parsed-and-carried so the schema generalizes to other worlds later.
-//! Optional fields default so a minimal world (`{name, planet:{radius_m}}`) still loads.
+//! reusable contract (docs/43 "initial conditions + a few dials"). Two `type`s exist so far: a `"planet"` world
+//! (terrain — `planet`, `surface`, `atmosphere`, a fly `camera`; consumed by `Terra`) and a `"system"` world
+//! (an N-body space scene — a `bodies[]` array with orbital initial conditions, an orbit `camera`; consumed by
+//! `OrbitDemo`). Optional fields default so a minimal world (`{name, planet:{radius_m}}` or `{name, bodies:[…]}`)
+//! still loads. The renderer picks physics/laws by type; the file only declares initial conditions + a few dials.
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -11,7 +13,12 @@ pub struct World {
     pub name: String,
     #[serde(default, rename = "type")]
     pub kind: String,
-    pub planet: Planet,
+    /// The single planet (a `"planet"`/terrain world). Absent for a `"system"` world.
+    #[serde(default)]
+    pub planet: Option<Planet>,
+    /// The N-body cast (a `"system"`/space world): star + planet + moon(s), each with orbital initial conditions.
+    #[serde(default)]
+    pub bodies: Option<Vec<BodyDef>>,
     #[serde(default)]
     pub surface: Option<Surface>,
     #[serde(default)]
@@ -20,6 +27,35 @@ pub struct World {
     pub camera: Option<CameraDef>,
     #[serde(default)]
     pub time: Option<TimeDef>,
+}
+
+/// One body in a `"system"` world — the declared initial conditions the N-body integrator (`orbit`) evolves.
+/// Mass/radius/tint may come from a named `profile` ("sun"/"earth"/"moon" → `planet::` + composition) so the
+/// bodies stay *declared, not fudged*; explicit `mass_kg`/`radius_m`/`tint` override.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BodyDef {
+    pub name: String,
+    /// "star" (holds + lights the system, not drawn) | "planet" (the focus / impact target) | "moon" (deorbits).
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub mass_kg: Option<f64>,
+    #[serde(default)]
+    pub radius_m: Option<f64>,
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Position (metres) in the shared inertial frame.
+    #[serde(default)]
+    pub pos_m: [f64; 3],
+    /// Velocity (metres/second) in the same frame.
+    #[serde(default)]
+    pub vel_ms: [f64; 3],
+    /// Rotation period (s) about +Z → the body's spin angular momentum (the planet's day). None = no spin.
+    #[serde(default)]
+    pub spin_period_s: Option<f64>,
+    /// Optional linear-RGB tint override (else derived from the profile's composition).
+    #[serde(default)]
+    pub tint: Option<[f32; 3]>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,7 +103,8 @@ pub struct Atmosphere {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CameraDef {
     #[serde(default)]
-    pub mode: Option<String>, // "fly" (v1) | "orbit"
+    pub mode: Option<String>, // "fly" (terrain) | "orbit" (space)
+    // --- fly camera (terrain) ---
     #[serde(default)]
     pub lat: f64,
     #[serde(default)]
@@ -80,6 +117,16 @@ pub struct CameraDef {
     pub min_alt_m: Option<f64>,
     #[serde(default)]
     pub max_alt_m: Option<f64>,
+    // --- orbit camera (space): yaw/pitch/zoom around a focus body (frame of reference) ---
+    #[serde(default)]
+    pub yaw: Option<f64>,
+    #[serde(default)]
+    pub pitch: Option<f64>,
+    #[serde(default)]
+    pub zoom: Option<f64>,
+    /// Name of the body the orbit camera centres on (its frame of reference). Defaults to the "planet" body.
+    #[serde(default)]
+    pub focus: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -117,7 +164,7 @@ mod tests {
         // Minimal: just a named planet with a radius.
         let w = World::parse(r#"{"name":"Bare","planet":{"radius_m":6371000}}"#).unwrap();
         assert_eq!(w.name, "Bare");
-        assert_eq!(w.planet.radius_m, 6_371_000.0);
+        assert_eq!(w.planet.as_ref().unwrap().radius_m, 6_371_000.0);
         assert!(w.surface.is_none());
 
         // Full-ish Earth world (the reference).
@@ -134,10 +181,41 @@ mod tests {
         }"#;
         let w = World::parse(json).unwrap();
         assert_eq!(w.name, "Earth");
-        assert_eq!(w.planet.profile.as_deref(), Some("earth"));
+        assert_eq!(w.planet.as_ref().unwrap().profile.as_deref(), Some("earth"));
         let s = w.surface.unwrap();
         assert_eq!(s.elevation_range_m, Some([-11000.0, 9000.0]));
         assert_eq!(s.biomes.get("1").map(String::as_str), Some("grass"));
         assert_eq!(w.camera.unwrap().mode.as_deref(), Some("fly"));
+    }
+
+    #[test]
+    fn parses_a_system_world_with_bodies() {
+        // A "system" world: Sun + Earth + Moon with orbital initial conditions and an orbit camera.
+        let json = r#"{
+            "name":"Earth–Moon","type":"system",
+            "bodies":[
+                {"name":"Sun","role":"star","profile":"sun","pos_m":[0,0,0],"vel_ms":[0,0,0]},
+                {"name":"Earth","role":"planet","profile":"earth","mass_kg":5.972e24,"radius_m":6371000,
+                    "pos_m":[1.496e11,0,0],"vel_ms":[0,29780,0],"spin_period_s":86164},
+                {"name":"Moon","role":"moon","profile":"moon","mass_kg":7.342e22,"radius_m":1737000,
+                    "pos_m":[1.499844e11,0,0],"vel_ms":[0,30802,0]}
+            ],
+            "camera":{"mode":"orbit","yaw":0.6,"pitch":0.5,"zoom":1.0,"focus":"Earth"},
+            "time":{"scale":118000}
+        }"#;
+        let w = World::parse(json).unwrap();
+        assert_eq!(w.kind, "system");
+        assert!(w.planet.is_none(), "a system world has no single planet");
+        let bodies = w.bodies.as_ref().unwrap();
+        assert_eq!(bodies.len(), 3);
+        assert_eq!(bodies[0].role, "star");
+        assert_eq!(bodies[1].name, "Earth");
+        assert_eq!(bodies[1].pos_m, [1.496e11, 0.0, 0.0]);
+        assert_eq!(bodies[1].spin_period_s, Some(86164.0));
+        assert_eq!(bodies[2].role, "moon");
+        let cam = w.camera.unwrap();
+        assert_eq!(cam.mode.as_deref(), Some("orbit"));
+        assert_eq!(cam.focus.as_deref(), Some("Earth"));
+        assert_eq!(w.time.unwrap().scale, 118000.0);
     }
 }

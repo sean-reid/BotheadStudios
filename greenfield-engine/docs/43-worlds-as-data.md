@@ -47,8 +47,39 @@ parameter sweeps, tests, and the offline `tools/impact-run` runs from the same d
 - How much behavior is data vs a small embedded scripting hook for genuinely-custom triggers.
 - Where the Python/Go SDK lives (a sibling crate/pkg) and how it's versioned against the engine.
 
-## Status
+## DELIVERED — the world format, on two scene kinds (2026-07-19)
 
-Parked/TODO — not started. Theia (birth-of-the-Moon) is the current live scene (docs/42); its render orbits
-physically but reads as dispersal on screen (a render-communication gap, noted docs/42). This world-format work
-is the next architectural thread when picked up.
+The world format now exists and drives real scenes. Two `type`s so far, one reusable schema
+(`crates/engine/src/terra/world_def.rs`):
+
+- **`type: "planet"`** — the terrain world (`Terra`): `planet` + `surface` (rasters, biomes, relief dial) +
+  `atmosphere` + a `"fly"` `camera`. First scene, docs/43 Phases 1–6, live at integrity.bothead.net → Earth.
+- **`type: "system"`** — an N-body space world (`OrbitDemo`): a **`bodies[]`** array + an `"orbit"` camera. This
+  is the migration this doc asked for: the **Space** (one-moon) and **Two Moons** deorbit scenes are now data.
+
+**System-world schema** (`bodies[]` each): `{ name, role: "star"|"planet"|"moon", mass_kg?, radius_m?, profile?
+("sun"/"earth"/"moon" → mass/radius/tint from `planet::` + composition, so bodies stay *declared, not fudged*),
+pos_m:[x,y,z], vel_ms:[x,y,z], spin_period_s?, tint? }`. Camera adds orbit fields `{ mode:"orbit", yaw, pitch,
+zoom, focus: <body name> }` (the frame-of-reference body). `time: { scale }` is the fast-forward dial. A
+`controls` block declares the interactive buttons/keys (brake / drop / reset / focus).
+
+**Engine entry:** `OrbitDemo::load_world(json)` (mirrors `Terra::load_world`) — `create(canvas, num_moons)` then
+`load_world` replaces the built-in Sun/Earth/Moon constants with the declared initial conditions, spin, tints,
+time scale, focus, and orbit-camera framing. The **deorbit stays a user control** (`brake_moon` = ×½ the moon's
+Earth-relative velocity, `drop_moon` = ×0 → radial infall); the crash geometry/energy EMERGES from the N-body
+integrator + swept contact — no scripted outcome (no-fudge). World files:
+`web/public/worlds/{one-moon,two-moons}/world.json`. Host: `web/src/orbit.ts` reads `<body data-world="…">`,
+fetches the JSON, derives the moon count, and calls `create` + `load_world` (Birth of the Moon stays on the code
+path — the GPU-SPH impact — for now).
+
+**Still constant in v1 (flagged follow-ups):** the planet's *render* radius uses the `EARTH_RADIUS_M` constant
+(the world declares a matching `radius_m`, consumed for the moon impactor + framing but not yet threaded into the
+Earth render/contact); the space **controls are not yet bound from `controls.keys`** (the buttons remain the
+existing `orbit.ts` panel — the Terra Phase-6 controls-from-JSON pattern should be applied here); **Birth of the
+Moon** (giant impact) and a **Python/Go world-authoring SDK** are still to migrate. The `events/triggers` section
+(JIT particalize on contact, docs/39/42) is still a sketch — the deorbit needed none (it's a pure impulse).
+
+## Status (superseded above)
+
+Theia (birth-of-the-Moon) is the current GPU-SPH live scene (docs/42). The world-format work is now **underway**:
+`Terra` (planet) + the one/two-moon deorbit **system** worlds ship it end-to-end.

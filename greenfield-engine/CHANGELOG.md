@@ -9,6 +9,13 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Worlds-as-data #2 — Space + Two Moons are now DATA scenes (docs/43)** — the world schema gained a
+  `type:"system"` variant with a `bodies[]` array (orbital initial conditions: mass/radius/pos/vel/spin/profile)
+  and an orbit camera (`yaw/pitch/zoom/focus`). New `OrbitDemo::load_world(json)` seeds the N-body scene from the
+  file instead of hardcoded constants. The Space (one-moon) and Two Moons deorbit scenes now load
+  `web/public/worlds/{one-moon,two-moons}/world.json`; the deorbit stays a user control (brake/drop), the crash
+  emerges from physics. `World.planet` is now optional (a system world has no single planet). Birth of the Moon
+  is unchanged for now.
 - **FIX: Terra "growing black void" on descent** — the globe was back-face culled, so the fly camera looking down
   from just above the surface culled the near (front-facing) triangles → a black void at nadir that grew on
   descent (~250 km). The globe/cap now draw without culling (convex → depth occludes correctly), and the camera's

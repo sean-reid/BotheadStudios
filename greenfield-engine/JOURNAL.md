@@ -1,7 +1,36 @@
 # Development Journal
 
-A running log of major milestones for `greenfield-engine`. Newest entries at the top.
+A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
+
+---
+
+## 2026-07-19 — Worlds-as-data #2: the Space + Two Moons deorbit scenes are now DATA (docs/43)
+
+**What.** The second worlds-as-data consumer, proving the schema generalizes from a static planet (Terra) to
+**dynamic N-body scenes**. Extended the one `World` schema (`terra/world_def.rs`) with a `type:"system"` variant:
+a `bodies[]` array (each `{name, role: star|planet|moon, mass_kg?/radius_m?/profile?, pos_m, vel_ms,
+spin_period_s?, tint?}`) and orbit-camera fields (`yaw/pitch/zoom/focus`). New `OrbitDemo::load_world(json)`
+(mirrors `Terra::load_world`) replaces the built-in Sun/Earth/Moon constants with the declared initial
+conditions, spin, composition-derived tints, time scale, and frame-of-reference focus. New world files
+`web/public/worlds/{one-moon,two-moons}/world.json`; `web/src/orbit.ts` now reads `<body data-world="…">`,
+fetches the JSON, derives the moon count, and calls `create` + `load_world`. **Birth of the Moon** (GPU-SPH
+impact) stays on the code path for now. The **deorbit stays a pure user control** (`brake_moon` ×½ / `drop_moon`
+×0 of the moon's Earth-relative velocity) — the crash emerges from the N-body integrator + swept contact, no
+scripted outcome.
+
+**Why.** Terra was built as the reference worlds-as-data scene; the strategic payoff is a SECOND, structurally
+different scene on the same contract — it confirms the schema (bodies + orbital ICs + events-as-controls)
+generalizes, and turns "add/alter a scene" into editing data, not scene code (docs/43, the recorded near-term
+TODO). `planet` is now `Option` on `World` (a system world has no single planet); `Terra::load_world` errors
+cleanly if its `planet` section is missing.
+
+**Verified (rig `worlds_space`, xvfb).** Space loads from `one-moon/world.json` — HUD reads the declared data
+exactly: Earth–Moon 384,768 km (=MOON_DIST), v 1.02 km/s (=MOON_SPEED), Earth day 23.9 h (=sidereal spin), frame
+Earth (=camera.focus), time ×118,000 (=time.scale). **Deorbit works through the data path:** `drop_moon` → the
+moon falls 384,768 → 8,108 km and **impacts, spawning 1,536 debris particles**. Two Moons loads
+`two-moons/world.json` — "4 bodies, 2 moon(s)". Render path is unchanged, so visuals match the pre-migration
+scenes. Full fast suite **174/174 green** (+1 system-world parse test). TS typechecks.
 
 ---
 
