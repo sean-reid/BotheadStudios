@@ -5,6 +5,33 @@ Each entry records *what* changed, *why*, and *how it was verified*.
 
 ---
 
+## 2026-07-18 — The "pretty render" layer over the GPU impact + browser parity → DEPLOYED (docs/42)
+
+**What.** Built the render-side of the JIT primitive (Robin's vision): the real GPU SPH giant impact underneath, a
+faithful "pretty" render over the top, a **slider** cross-fading them. And brought the browser physics up to parity
+so the pretty layer has a real disk beneath it. The GPU impact is now the DEFAULT birth scene (the old CPU-Aggregate
+impact retired); Earth/Luna frame buttons use 👁 (not 📷). **Deployed live to integrity.bothead.net.**
+
+**Why.** Decouple physics-fidelity from visual-fidelity: the in-browser SPH is N-limited/fixed-dt, so instead of
+forcing raw particles to look photoreal, the pretty layer carries the look while the particles need only be
+physically right. The converged numbers stay the offline `tools/impact-run` (docs/41).
+
+**Verified (rig: `pretty_slider` / `parity_check`; energy conserved ~0.05 %; full suite 163 passed / 18 skipped).**
+- **Pretty render, 4 phases** (`OrbitDemo::render`, `sph_render.wgsl`): (1) `render_blend` slider + a pretty Earth
+  shell sized to the sub-scale SPH body (scale reconcile DISPLAY_SCALE↔SPH_VIS_SCALE), size-cross-fading the
+  particles; (2) a crater from the GPU field (first Theia contact freezes the impact dir; magma-ocean interior glows
+  through an opaque crust; persists = bake-back); (3) ejecta motes (matter beyond the remnant glows) + a boosted
+  shocked-vapor atmosphere; (4) self-bound disk clumps (`gpu_sph::moonlet_bodies`) → warm rock spheres.
+- **Browser parity:** the impact was DISPERSING (Theia hit-and-run, 0 % Earth). Fixes: `HydroBody::new_lod` (coarse
+  iron core + FINE basalt mantle — the mantle sheds a disk) + a **scheduled shock-dt** (WebGPU forbids the adaptive
+  read-back, so the dt is stepped by sim time — small through the ~1.5 h shock, then 5× for the aftermath). → the
+  disk now reaches **~27 % Earth with a bound ~0.03 M☾ moonlet** (was 0 %). Weaker than the offline converged run
+  (spin → ~58 %) and ~2 fps at N≈2800 (direct-sum O(N²)) — both the N wall, not correctness.
+- **Deployed:** `bash scripts/test.sh` green → `./scripts/deploy.sh` (release wasm + vite → /var/www/integrity via
+  nginx :8080 / Cloudflare tunnel). Verified live: `birth.html` HTTP 200 locally and at https://integrity.bothead.net.
+
+---
+
 ## 2026-07-18 — The SPIN IOU: a spinning proto-Earth sustains the disk → ~58% (docs/41); browser shock-dt fix
 
 **What.** Closed the last docs/40/41 IOU — the disk re-accretes because a *non-spinning* impact leaves it

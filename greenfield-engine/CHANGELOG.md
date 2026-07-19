@@ -9,6 +9,13 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Birth-of-the-Moon scene = the GPU impact + a "pretty render" layer, DEPLOYED** (`gpu_sph.rs`, `lib.rs`,
+  `sph_render.wgsl`, `docs/42`) — the browser birth scene now runs the GPU SPH deformable-Earth impact by default
+  (the old CPU-Aggregate impact retired) with a **Pretty ⇄ Physics slider** cross-fading a faithful render (textured
+  Earth sphere · magma impact crater · ejecta plume · shocked-vapor atmosphere · accreting moonlet spheres) against
+  the raw particle field. Browser physics brought to parity — **LOD seeding** (`HydroBody::new_lod`) + a **scheduled
+  shock-dt** take the impact from a 0%-Earth hit-and-run to a ~27%-Earth disk with an accreting moonlet. Earth/Luna
+  frame buttons use 👁 (eyes). Live at integrity.bothead.net.
 - **Giant-impact disk Earth-fraction converged by ensemble** (`tools/impact-run`, `docs/40`→`docs/41` #3) — the
   offline GPU impact tool gained variable-resolution ("LOD") seeding, an order-independent disk measurement
   (sort+Kahan, bit-reproducible), a K-run perturbed-IC ensemble (mean±stdev), and a physical-time epoch stop.
