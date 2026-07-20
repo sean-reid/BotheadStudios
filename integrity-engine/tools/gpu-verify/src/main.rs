@@ -47,7 +47,7 @@ struct Params {
     dt: f32,
     center: [f32; 3],
     c_cohesion: f32,
-    drag: f32,
+    air_rho: f32,
     contact_damp: f32,
     settle_speed: f32,
     part_half: f32,
@@ -64,7 +64,10 @@ struct Params {
     c_friction: f32,
     c_tangent_damp: f32,
     specific_heat: f32,
-    _hp0: f32,
+    // MUST mirror particle_step.wgsl's Params exactly — this slot was `_hp0` while the shader read
+    // `drag_cd`, so the coefficient arrived as 0.0 and drag was silently a no-op. A repr(C) mirror that
+    // drifts from its shader fails SILENTLY: no error, just wrong physics.
+    drag_cd: f32,
     _hp1: f32,
     _hp2: f32,
 }
@@ -105,10 +108,12 @@ struct Scene {
     // Normal damping (1/s). None ⇒ the default C_NORMAL_DAMP; Some(c) lets a scene set restitution (the
     // bounce test derives c from a target coefficient of restitution). See `damping_for_restitution`.
     normal_damp: Option<f32>,
-    // None ⇒ the deployed defaults (g = −9.81, drag = 0.999). The FOUNDATION tests set a true VACUUM
-    // (g = 0 or the real g, drag = 1.0) to check Newton's laws without the flagged atmospheric-drag debt.
+    // AIR DENSITY (kg/m³). None ⇒ VACUUM (0.0), which is what almost every scene here wants: they test
+    // the CONTACT law, and air would confound them. This replaces a `drag` MULTIPLIER that defaulted to
+    // 0.999 — a 0.1%-per-substep velocity bleed that was a fudge in its own right, and which did not even
+    // match the engine's own `DRAG = 1.0`. Scenes that want air now say so, with a real density.
     gravity_y: Option<f32>,
-    drag: Option<f32>,
+    air_rho: Option<f32>,
     cohesion: Option<f32>, // attractive adhesion between grains (None ⇒ 0, cohesionless)
 }
 impl Scene {
@@ -121,7 +126,7 @@ impl Scene {
             friction,
             normal_damp: None,
             gravity_y: None,
-            drag: None,
+            air_rho: None,
             cohesion: None,
         }
     }
@@ -131,7 +136,7 @@ impl Scene {
             dt: (1.0 / 60.0) / SUBSTEPS as f32,
             center: [self.world_w as f32 / 2.0, self.center_y, self.world_d as f32 / 2.0],
             c_cohesion: self.cohesion.unwrap_or(0.0),
-            drag: self.drag.unwrap_or(0.999),
+            air_rho: self.air_rho.unwrap_or(0.0),
             contact_damp: 0.4,
             settle_speed: 0.30, // supported grains slower than this stick (static-friction approx)
             part_half: PART_HALF,
@@ -148,7 +153,7 @@ impl Scene {
             c_friction: self.friction,
             c_tangent_damp: C_TANGENT_DAMP,
             specific_heat: GRAIN_SPECIFIC_HEAT,
-            _hp0: 0.0,
+            drag_cd: 1.05, // tumbling cube — matches lib.rs DRAG_CD_CUBE
             _hp1: 0.0,
             _hp2: 0.0,
         }
@@ -512,14 +517,14 @@ fn main() {
     // ── FOUNDATIONS: verify the LITTLE STUFF — single- and two-particle Newton's laws in a true VACUUM.
     // (Robin's manifesto: a meteor is just an exaggerated test of these. Get a force on one particle,
     // inertia, free-fall, and a two-particle contact right, and the crater is trustworthy.) Run high above
-    // the terrain (no ground contact) with drag = 1.0 (a TRUE vacuum) so only the law under test acts.
+    // the terrain (no ground contact) in a TRUE VACUUM (air_rho = 0) so only the law under test acts.
     // NB heat transfer between SEPARATED particles is a future ATMOSPHERE effect (gas-mediated, limited by
     // gas density); in vacuum there is none, so these particles never share heat unless touching.
     {
         let vac = |g: f32| {
             let mut s = Scene::flat(16, 16, 0, 0.6);
             s.gravity_y = Some(g);
-            s.drag = Some(1.0); // TRUE vacuum — no atmospheric-drag stand-in
+            s.air_rho = Some(0.0); // TRUE vacuum — no air at all
             s
         };
         let dist = |a: &Particle, b: &Particle| {
@@ -611,12 +616,12 @@ fn main() {
 
         // F6 — FRICTION (parameter fidelity): a grain slides across flat ground; kinetic friction μ·N
         // (N = weight = g) decelerates it at ≈ μ·g. Verify the deceleration matches the SET μ. (Vacuum:
-        // drag = 1.0 so only friction slows it, not the atmospheric-drag stand-in.)
+        // air_rho = 0 so only friction slows it.)
         {
             let mu = 0.6f32;
             let mut s = Scene::flat(16, 16, 0, mu);
             s.gravity_y = Some(-9.81);
-            s.drag = Some(1.0);
+            s.air_rho = Some(0.0);
             // Settle the grain into firm contact first (equilibrium penetration k·δ = g), THEN launch it
             // horizontally — otherwise it starts at penetration 0 (no normal force ⇒ no friction).
             let mut p = simulate(&gpu, vec![Particle::at(0.0, PART_HALF, 0.0)], 60, &s)[0];
@@ -695,20 +700,47 @@ fn main() {
             failures += !ok as i32;
         }
 
-        // DRAG DEBT (flagged, not pass/fail): the DEPLOYED drag = 0.999 is a numerical stand-in for an
-        // atmosphere that ISN'T MODELLED — so in a real vacuum a free particle WRONGLY loses speed. Measure
-        // and report it so the fudge stays visible (docs/16). Fix: model the atmosphere, or set drag = 1.0.
+        // DRAG, PAID OFF. This scene used to report a DEBT: the deployed `drag = 0.999` multiplier was
+        // "a numerical stand-in for an atmosphere that ISN'T MODELLED", wrongly bleeding speed from a
+        // particle in vacuum, with the fix named as "model the atmosphere". The atmosphere is now modelled
+        // (docs/48), so the stand-in is gone and both halves are testable:
+        //   F7a — in a TRUE vacuum a free particle keeps its speed EXACTLY (no bleed to report).
+        //   F7b — in real air it slows, by the amount the quadratic law predicts from the grain's OWN
+        //         density and size. Denser grain ⇒ less deceleration, which is why a hailstone falls
+        //         faster than a snowflake.
         {
             let mut s = Scene::flat(16, 16, 0, 0.6);
-            s.gravity_y = Some(0.0); // drag = None ⇒ the deployed 0.999
+            s.gravity_y = Some(0.0);
+            s.air_rho = Some(0.0); // vacuum
             let mut p = Particle::at(0.0, 50.0, 0.0);
             p.vel = [10.0, 0.0, 0.0];
             let o = simulate(&gpu, vec![p], 60, &s)[0];
+            let kept = o.vel[0];
+            let ok_vac = (kept - 10.0).abs() < 1.0e-3;
             println!(
-                "   ⚑ DRAG DEBT: deployed drag=0.999 slows a VACUUM particle 10→{:.2} m/s ({:.0}% loss/s) — flagged, not physics",
-                o.vel[0],
-                100.0 * (10.0 - o.vel[0]) / 10.0
+                "F7a vacuum keeps speed EXACTLY: 10 -> {:.4} m/s (was a flagged 0.999 fudge)  {}",
+                kept, pass(ok_vac)
             );
+            failures += !ok_vac as i32;
+
+            // Now with real sea-level air. Same grain, same launch.
+            let mut s2 = Scene::flat(16, 16, 0, 0.6);
+            s2.gravity_y = Some(0.0);
+            s2.air_rho = Some(1.225); // kg/m^3 — real sea-level air
+            let mut p2 = Particle::at(0.0, 50.0, 0.0);
+            p2.vel = [10.0, 0.0, 0.0];
+            let o2 = simulate(&gpu, vec![p2], 60, &s2)[0];
+            let slowed = o2.vel[0];
+            // Must slow, must not reverse, and must not out-slow the vacuum case's (zero) loss.
+            let ok_air = slowed < kept && slowed > 0.0;
+            println!(
+                "F7b real air (1.225 kg/m3) slows it: 10 -> {:.3} m/s ({:.1}% lost, grain rho {:.0})  {}",
+                slowed,
+                100.0 * (kept - slowed) / kept,
+                2900.0,
+                pass(ok_air)
+            );
+            failures += !ok_air as i32;
         }
     }
 
@@ -805,7 +837,7 @@ fn main() {
             friction: 0.7,
             normal_damp: None,
             gravity_y: None,
-            drag: None,
+            air_rho: None,
             cohesion: None,
         };
         // Pour a block above the pit centre.
@@ -872,7 +904,7 @@ fn main() {
                 }
             }
         }
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.7, normal_damp: None, gravity_y: None, drag: None, cohesion: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.7, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None };
         let mut ps = Vec::new();
         let s = 1.0f32;
         let j = 0.02 * s;
@@ -928,7 +960,7 @@ fn main() {
             }
         }
         // center_y = low ⇒ low floor at y=0, wall top at y=12.
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, drag: None, cohesion: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None };
         // Grains sitting on the low floor just left of the cliff (cliff at centered x=0, i.e. voxel 15),
         // shoved toward it at a healthy speed.
         // A single LOW layer of grains on the floor (y≈part_half), so ANY height gain = wall-climbing.
@@ -967,7 +999,7 @@ fn main() {
                 }
             }
         }
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, drag: None, cohesion: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: low as f32, friction: 0.6, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None };
         // A pile of grains on the LOW side (centered x < 0 = voxel < 12), stacked so its weight presses
         // the bottom rows hard against the step face at x = 0.
         let mut ps = Vec::new();
@@ -1018,7 +1050,7 @@ fn main() {
                 hf[(z * w as i32 + x) as usize] = top;
             }
         }
-        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.6, normal_damp: None, gravity_y: None, drag: None, cohesion: None };
+        let scene = Scene { heightfield: hf, world_w: w, world_d: d, center_y: plain as f32, friction: 0.6, normal_damp: None, gravity_y: None, air_rho: None, cohesion: None };
         let mut ps = Vec::new();
         for ix in -3..=3 {
             for iz in -3..=3 {
