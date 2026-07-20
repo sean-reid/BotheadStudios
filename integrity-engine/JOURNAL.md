@@ -3,6 +3,62 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-19 — the architecture map had gone stale enough to assert that existing physics was absent
+
+**What.** Refreshed `docs/32-architecture-map.md` and docs/33's status block against the code on `main`
+(`1b4381e`), and corrected the same errors where `CLAUDE.md` repeated them. Neither doc had been
+substantively edited since it was written on 2026-07-17 — `git log -- docs/32 docs/33` returns only the
+repo-rename commit — while docs/34–48 and ~20 commits landed.
+
+**Why.** CLAUDE.md instructs every session to read docs/32 before exploring, and docs/46's déjà-vu rule
+rests on the docs being the reliable record. A stale map does not merely omit: it actively misdirects. The
+worst entry told sessions to build a module that already existed, tested and verified.
+
+**Corrections — each checked against the code, not inferred:**
+
+- **§5 said "Condensed-matter EOS … CONFIRMED ABSENT."** False since docs/33 stage 1. `eos.rs` (373 lines,
+  7 tests) implements the three-branch Tillotson `P(ρ,u)` (`:52`) with cited per-material constructors,
+  verified vs Benz & Asphaug 1999. The real gap is **wiring**: `crate::eos::` has exactly two non-test
+  consumers — `hydrostatic.rs:25` and `gpu_sph.rs:110` — so it is live in the space band only, while the
+  terrain/voxel/granular path has no EOS at all and `GpuParticle.rho` (`lib.rs:1907`) is a placeholder ρ₀
+  nothing computes. CLAUDE.md carried the same false claim and is fixed too.
+- **§1 said two scene structs; there are three.** `Terra` (`lib.rs:5140`, docs/43 worlds-as-data) has its
+  own 5-file submodule (910 lines). §1 also said `OrbitDemo` has "No GPU compute — all particle physics is
+  CPU"; it owns a `gpu_sph::GpuSph` (`:2828`) driving `sph_step.wgsl`.
+- **§2 omitted `eos.rs`, `hydrostatic.rs`, `gpu_sph.rs`, `accretion.rs` entirely** — 2,738 lines of the
+  realignment's physics core, invisible to anyone navigating by this map. Added as §2b.
+- **§7 listed 5 shaders (there are 9) and 1 tool (there are 6).** Added `sph_step.wgsl`, `bh_gravity.wgsl`,
+  `sph_render.wgsl`, `globe.wgsl`; `sph-verify`, `gpu-bh-verify`, `bake-earth`, `impact-run`, `shot-server`.
+- **§6's canonical trace had all 8 anchors stale** by 500–800 lines (`start_birth` 2897→3447, `step_substep`
+  3243→3968, `step_block` 3430→4155, …). Re-verified, and documented that a second GPU-SPH path now
+  coexists with the CPU aggregate one in the same scene.
+- **§4:** four integrators → **six**; one WGSL mirror seam → **three**; added fork 7 (**three**
+  terrain-contact implementations of one law — `granular::terrain_contact_resolve:310` with exactly one
+  production caller, the WGSL mirror, and `matter.rs:872-887`'s normal-free snap+`CONTACT_DAMP` — plus a
+  fourth voxel resolver in `body.rs:55`) and fork 8 (`AirField`, a container fork with zero consumers).
+- **§8 deleted.** It restated CLAUDE.md's hard rules and had already drifted from them ("next is docs/34";
+  a stale test count). One question, two answers — the doc-level form of what docs/46 forbids in physics.
+  It now points at CLAUDE.md. Test count corrected there: ~145 → 204 written, 186 running by default (18
+  `#[ignore]`d), and `gpu_sph.rs` has no in-crate tests at all.
+
+**A pattern, beyond the individual fixes.** Three corrections are the shape docs/48 named — built, verified,
+wired nowhere. `bh_gravity.wgsl` is verified standalone and `sph_step.wgsl` still runs direct O(N²) gravity.
+`accretion::accrete()` has no non-test caller, so the disk can be *measured* for gravitationally bound
+clumps and cannot *grow* one — which is exactly the "the disk never accretes a Moon" diagnosis docs/33
+recorded, with the operator now built and still outside the loop. `world.rs`'s `demote_column_to_field` /
+`column_is_bakeable` appear only in tests. Recorded in docs/33's new status section so the next session
+inherits it.
+
+**Verified.** Every count, anchor, and wiring claim above was read off `main` at `1b4381e` (module
+inventory, `git grep` for callers, `git log` for the staleness claim). Docs-only change — no code touched,
+so no CHANGELOG entry.
+
+**NOT verified — stated rather than implied.** The per-symbol `:NNN` anchors inside §2/§3's existing bullets
+were not exhaustively re-checked; only the ones quoted in this entry, plus the module line counts, were
+confirmed. Given §6's anchors had all moved by ~500 lines, assume others in those sections have drifted too
+and re-check before relying on one. The header now says so.
+
+---
 
 ## 2026-07-19 — the probe gets real traction: terrain contact swapped onto the honest constraint
 

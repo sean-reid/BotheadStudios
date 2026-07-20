@@ -27,15 +27,21 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
 
 - **One crate** `crates/engine` (Rust core) → WASM (`wasm-pack`) sharing one `wgpu` device with the
   renderer. `web/` is a thin TS+Vite host. Public: **integrity.bothead.net** (docs/29).
-- **Two scene structs** in `lib.rs`: `Engine` (terrain band, GPU-compute debris) and `OrbitDemo` (space
-  band, CPU `Aggregate` debris — the giant impact / birth-of-the-Moon).
+- **Three scene structs** in `lib.rs`: `Engine` (`:244`, terrain band, GPU-compute debris), `OrbitDemo`
+  (`:2730`, space band, the giant impact / birth-of-the-Moon — now GPU too, it owns a `gpu_sph::GpuSph`
+  running `sph_step.wgsl`), and `Terra` (`:5140`, the docs/43 worlds-as-data planet scene, backed by
+  `crates/engine/src/terra/`).
 - **The key fact:** the physics *laws* are already unified and scale-invariant (`granular::Contact`,
   the SPH kernel, `Furrow` excavation, `plough_loft`, `Body`, `LayeredBody`); the *solvers and containers*
   are FORKED (CPU `Aggregate` f64 vs voxel-`World`/GPU f32; four integrators; Earth-as-rigid-boundary vs
   Earth-as-particles). Do NOT add a new per-scene particle path — extend the shared one. See docs/32 §4.
-- **The physics gap:** there is **no condensed-matter EOS** (Tillotson/Birch–Murnaghan). Solids resist
-  compression via a linear-elastic contact penalty; planet densities are declared constants. This is the
-  keystone of the realignment (docs/32 §5, docs/33).
+- **The physics gap is WIRING, not capability.** The condensed-matter EOS *exists* — `eos.rs` implements
+  Tillotson, verified vs Benz & Asphaug 1999 — but reaches only the space band (`hydrostatic.rs`,
+  `gpu_sph.rs`). The terrain/voxel/granular path still resists compression by linear-elastic contact penalty
+  alone, and planet layer densities are still declared constants (docs/32 §5, docs/33). This entry read "no
+  condensed-matter EOS" until 2026-07-19, which was false and would have sent a session to build what was
+  already there. It is one instance of the pattern docs/48 names — physics built and verified, then wired
+  into one place or none. **Grep for the primitive before writing one.**
 
 ## Hard rules (do not violate)
 
@@ -43,8 +49,10 @@ is being refactored toward is [`docs/33-architecture-realignment.md`](docs/33-ar
 2. **NEVER run `cargo fmt`** — the crate isn't rustfmt-conformant; it reformats the whole tree. Edit by
    hand. (`CONTRIBUTING.md` says otherwise for outside contributors; the working rule is do-not-run.)
 3. **Test:** `bash scripts/test.sh --fast [filter]` (inner loop) · full `bash scripts/test.sh` before any
-   deploy (~145 tests). O(n²) measurement tests are `#[ignore]` (run `--ignored`). Accelerated code is
-   always pinned to its exact/brute-force reference so speed never changes the answer.
+   deploy (~186 run by default, of 204 written). O(n²) measurement tests are `#[ignore]` (18 of them —
+   `hydrostatic.rs` 9, `impact.rs` 8, `aggregate.rs` 1; run `--ignored`). Accelerated code is always pinned
+   to its exact/brute-force reference so speed never changes the answer. Note `gpu_sph.rs` has **no in-crate
+   tests** — it is verified out-of-process by `tools/sph-verify`.
 4. **Rig-watch every visual claim:** `npm run dev` + `npm run wasm`, then
    `xvfb-run -a node web/rig/<scene>.mjs` (headed Chromium — headless can't composite WebGPU). Look at the
    screenshots yourself before claiming a scene works.
