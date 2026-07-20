@@ -1,4 +1,4 @@
-# Architecture realignment to first principles (2026-07-17)
+# Architecture realignment to first principles (written 2026-07-17, status refreshed 2026-07-19)
 
 A reexamination of Integrity's principles and a staged plan to realign the architecture to them. Read
 [`docs/32-architecture-map.md`](32-architecture-map.md) first — this doc assumes that map. Robin has
@@ -42,6 +42,44 @@ now exists: `tides::secular_step` shreds sub-Roche moonlets — the geologic "ba
 fixed — but that is the aftermath; the live-disk accretion operator is the missing piece.) WGSL kernel
 `shaders/sph_step.wgsl` is written (unverified) as the stage-4 GPU stepper start.
 
+## Status update (2026-07-19) — what landed, and the pattern running through it
+
+Two days after this plan was written, docs/34–48 and ~20 commits landed. The stages below are not rewritten;
+this records where each actually stands. The honest summary is not "stage N is done" — it is that **the
+physics keeps getting built and verified, then wired into one place or none.** docs/48 named that pattern
+after finding a third instance; two more are visible here, so treat "does anything call this?" as a
+first-class question when picking up any stage.
+
+- **Stage 4c — largely landed.** `gpu_sph.rs` (710) is real and **is** wired: `OrbitDemo` owns a `GpuSph`
+  (`lib.rs:2828`, ~11 call sites) driving `shaders/sph_step.wgsl` in-browser, with `sph_render.wgsl` drawing
+  the physics buffer zero-copy. Caveat: `gpu_sph.rs` has **0 in-crate tests** by design — its correctness
+  lives entirely in `tools/sph-verify`, so changes there are unguarded unless that tool is run.
+- **GPU Barnes–Hut — built, verified, NOT wired.** `bh_gravity.wgsl` (317) + `tools/gpu-bh-verify`
+  (docs/36/37). Its own header states it was verified standalone *"before it is wired into the SPH step"* —
+  `sph_step.wgsl` still runs the direct O(N²) gravity loop. The O(N log N) win is sitting on the shelf.
+- **The accretion operator — half wired, and the unwired half is the one the diagnosis called for.**
+  `accretion.rs` (298): `find_clumps` is called from `gpu_sph.rs` (`:266/:315/:357/:412`) for moonlet
+  detection, but **`accrete()` has no non-test caller**. The disk can be *measured* for gravitationally
+  bound clumps and still cannot *grow* one — which is exactly the "the disk never accretes a Moon"
+  diagnosis recorded above. The operator now exists; it is still not in the loop.
+- **Stage 6 sub-stage — substrate landed, trigger open.** Commit `3d840ac` gave T0 a real persistent field:
+  `World.displacement` (`world.rs:82`), `demote_column_to_field` (`:271`), `column_is_bakeable` (`:302`),
+  `World::from_voxels` (`:89`) — see docs/32 §3. **Nothing calls demotion in production**; both new
+  functions appear only in tests. Quiescence trigger, per-region tracking, and the bump/normal map remain
+  open. That commit also contributes the admission rule this plan lacked: *promotion asks whether the cheap
+  model provably **differs**; demotion asks whether it can **represent** the state.*
+- **Stage 5 — unchanged, but one input got sharper.** `AirField` is still a standalone fork, and docs/48
+  established it is instantiated in **zero scenes**. Note too that the drag interaction docs/26 verified
+  does **not** live in `AirField`: `atmosphere.rs:502` builds an `Aggregate` of body + air parcels with a
+  `gas_contact_from_material` `Contact` and lets `granular::contact_accel` produce the drag. So folding
+  `AirField` into `Aggregate` is closer to deleting a duplicate than to porting a capability.
+
+**Where the newer docs refine this plan:** docs/44 (resolution by necessity) and docs/47 (granularity) are
+the concrete form of **P3** — they size the *extent* and the *fineness* of resolution from the interaction's
+own energy rather than from scene identity. docs/46 is the charter and conformance ledger that decides
+whether any fork here is legitimate specialization, a declared IOU, or a fudge; its §3 ledger is the live
+list this plan's §2 table was an early draft of. docs/48 is the atmosphere's status.
+
 ## 1. The principles (restated)
 
 From the existing design record (docs/13/15/16/17/23/24) and Robin's three framings (2026-07-16/17):
@@ -70,7 +108,7 @@ all three principles in specific, nameable ways:
 | **Two container universes** — `Aggregate` (Vec\<Body\>, f64, celestial) vs voxel `World`+`MassField`+`MatterSim` (f32, terrain) | P1, P2 | docs/32 §4.1 — a tire and Theia live in different data structures |
 | **Four integrators over one contact law** — GPU trapezoidal, CPU Euler settle-only, CPU Verlet/KDK, SPH relaxation | P1, P2 | docs/32 §4.2 |
 | **Rigid-boundary fork** — in an impact Earth is *both* a few grains AND a rigid penalty sphere + monopole gravity; its bulk is not the same matter as its debris | P1 | docs/28 root cause #1; `aggregate.rs` boundary; docs/31 (blocks the isotopic-crisis fix) |
-| **No condensed-matter EOS** — solids resist via a linear-elastic contact penalty; planet densities are declared constants; shock-compressed rock cannot develop pressure from density | P2 | docs/32 §5 (confirmed absent) |
+| ~~**No condensed-matter EOS**~~ → **EOS built, wired only in the space band** — `eos.rs` implements Tillotson (verified); it reaches `hydrostatic.rs` and `gpu_sph.rs`, but the terrain/voxel/granular path still resists compression by linear-elastic contact penalty alone, and planet layer densities are still declared PREM constants | P2 | docs/32 §5 (rewritten 2026-07-19 — it previously said "confirmed absent", which was false) |
 | **Fidelity chosen by scene, not energy** — GPU-granular for terrain, CPU-full-physics for space; the declared `Furrow::ejection` / `plough_loft` IOUs stand in for the high-energy tier because N is too low | P3 | `impact.rs:88` (the resolution IOU); the GPU path has no self-gravity/SPH/EOS |
 | **GPU/CPU depth split + hand-mirrored WGSL law** | P1, P2 | docs/32 §4.5–§4.6 |
 
