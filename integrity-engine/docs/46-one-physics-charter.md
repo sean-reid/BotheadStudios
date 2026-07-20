@@ -4,6 +4,28 @@
 > This is the product, not an aesthetic preference about code structure. An engine that answers the same
 > physical question two different ways in two different scenes has broken its promise, however good each
 > answer looks on its own.
+>
+> **The span that promise commits to, stated as the acceptance test:** simulate a **star's photosphere
+> and generate a solar flare**, or **a raindrop on a flower petal**, with the *same engine* — without
+> reinventing or re-coding anything. It should fall out of the scale a scene is viewed at and the action
+> occurring in it. **And the player must be able to SEE both.** That is ~15 orders of magnitude with no
+> scene-specific branch on either the physics side or the render side.
+>
+> Judge every change against it: **if it would need re-coding to work at another scale, it is the wrong
+> change** — however good the result looks in the scene it was written for. A new per-scene code path is
+> a failure even when it ships something beautiful.
+
+The mechanism for this is `docs/13-scale-relative-simulation.md` (*"both simulation and rendering cost
+should scale with what is observable from the current viewpoint … detail emerges continuously: star
+field → planet disk → landscape → terrain → the rock → its grains"*), with `docs/44` (resolution
+EXTENT — how much to resolve) and `docs/47` §1 (resolution GRANULARITY — how fine). This charter states
+the promise; those state how it is met, and the split is deliberate — restating their content here would
+itself be two answers to one question. **Neither axis is built yet**, and that is the single largest gap
+between this promise and the code: docs/44 self-audits as unimplemented (`MATERIALIZE_CAP = 14.0` still
+clips the derived footprint at `lib.rs:878`), and granularity is design-only — the GPU `Particle` struct
+has no size field and `part_half` is a per-dispatch uniform, so two grain scales cannot coexist in one
+scene. A tyre contact patch needs centimetre grains in the same world a meteor uses metre grains; until
+that lands, the span above is a promise the code cannot yet keep.
 
 This doc exists so the ledger below is **read, not rediscovered**. Every session so far has re-derived
 some part of it from scratch. `docs/32 §4` maps the forks structurally; this doc states the *rule* that
@@ -92,7 +114,7 @@ docs/32 §4's; the rest were found since and are recorded here so they are not r
 | 3 | **Rigid-boundary fork** — in an impact Earth is simultaneously materialized grains AND a rigid boundary | docs/32 §4.3 | docs/33 |
 | 4 | **Two rigid-body reps** — `body::Sphere` vs the cohesive-`Aggregate` probe | docs/32 §4.4 | docs/38 4c′ |
 | 5 | ~~**Slope stability is half a law.**~~ **CLOSED 2026-07-19.** Terrain and grains now read the same `friction_coefficient` through one law, `granular::face_stable`; `steep_drop` is retired | was: `granular.rs:73` vs `matter.rs:538` (`h_crit = c/ρg` alone), non-convergent at 106→622 grains/pass. Now: fixpoint on the second pass, settled slope asserted against the DB μ, pristine terrain a no-op (470→0 grains) | **docs/45 §7** |
-| 6 | **The de-resolution ladder stops one rung short.** grain→voxel works; voxel→field does not exist | measured: meteor peak 3,605 grains → 78, **98% returned**; but `patch_resolved` is set `true` once and **never** set back — grep shows no writer of `false` after init | docs/39 item #4 (deferred) |
+| 6 | **The de-resolution ladder stops one rung short.** grain→voxel works; voxel→field is built but never triggered. **NARROWED 2026-07-19:** the mechanism is now SAFE — one authoritative `World::ground_top_voxel` answers "where is the ground" for voxels and field alike, and the GPU heightfield, the CPU bilinear surface and the rendered cap all read it. What remains is the TRIGGER, plus `patch_resolved` being one bool for the whole 96 m patch while demotion is per-column | was: three different answers to one question — GPU heightfield read raw voxels (demoted column ⇒ grains fall through), the cap read raw `terrain_height` (demoted crater renders as untouched ground), probe read `bulk_height`. Measured: 98% of grains return (3,605 → 78) | docs/47 §5, docs/39 item #4 |
 | 7 | **Promotion is gated visually in one doc, physically in another.** docs/30: the trigger must be "a physical error bound … never a visual one". docs/39: gate on "camera-visible ∧ interacting" | the two docs, directly | **docs/44** |
 | 8 | **The honest footprint is computed, then discarded.** `crater_radius` from `V = E/σ` is derived, then clipped by `MATERIALIZE_CAP = 14.0`, and `resolve_patch` resolves the whole 96 m patch regardless | `lib.rs:858`, `lib.rs:992` (self-flagged) | **docs/44** |
 | 9 | **Matter leaks at the seam.** ~2% of debris never returns to the field (deposition refused inside a dynamic body; the water branch is a self-flagged static-sea placeholder) | measured: 78 of 3,605 grains stranded per event, monotonic | this doc |

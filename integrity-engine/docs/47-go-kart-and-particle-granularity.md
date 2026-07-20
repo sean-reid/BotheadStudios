@@ -122,8 +122,51 @@ polish item.
 ## 6. Order of work
 
 1. **Voxel → field demotion** (docs/46 item 6). Without it, driving accumulates cost without bound.
+   **Step 1a landed 2026-07-19 — the mechanism is SAFE, but nothing triggers it yet.** §5 called this
+   "not new machinery", which was true of `demote_column_to_field` itself and false of everything around
+   it: the engine held **three different answers to "how high is the ground here?"**, so demoting a
+   column had three silent consequences — the GPU grain heightfield read raw voxels and would have
+   dropped every grain resting there through the floor; the rendered bulk cap read raw `terrain_height`
+   and would have drawn a de-resolved crater as untouched ground; and `demote_column_to_field` sits on
+   `World`, bypassing `MatterSim`, so the remesh dirty flag never rose. There is now ONE query,
+   `World::ground_top_voxel`, and the GPU heightfield, the CPU bilinear surface and the cap all read it.
+   A `demoted` flag disambiguates "baked into the field" from "excavated to nothing", which a zero
+   displacement cannot.
+
+   The useful discovery: **demotion needs no sub-voxel heightfield.** Because the bake preserves the
+   surface exactly and that surface is already voxel-quantised, the field hands back the *identical*
+   integer top, so the GPU's `array<i32>` is untouched. This deliberately does NOT entangle demotion with
+   the deferred f32-surface refactor (docs/45's `SLOPE_QUANTUM_M` IOU).
+
+   **Still open for 1b:** the quiescence TRIGGER (nothing calls demotion), and `patch_resolved` being a
+   single bool for the whole 96 m patch while demotion is per-column — they do not compose. Also
+   unresolved: `bulk_height` still returns pure procedural relief for a column that has been dug but not
+   demoted, so the field/voxel seam is consistent only because `patch_resolved` gates which one is asked.
 2. **The axle constraint.** The one genuinely new mechanism; test it on a single free-spinning wheel
-   before any vehicle exists.
+   before any vehicle exists. **LANDED 2026-07-19 — `crate::axle`, 5 tests, no vehicle yet.**
+
+   Built exactly as §3 proposed: a constraint, not a spring. `axle::resolve` does three things per
+   substep — a velocity-decoupled position projection putting the hub back on its anchor (zero injected
+   KE however far the chassis moved), a COM-velocity match reported as an impulse, and an angular split
+   that preserves spin about the axle axis exactly while refusing everything else.
+
+   The piece §3 left implicit and which turned out to carry the argument: **the wheel's angular velocity
+   is recovered from linear momenta alone**, `ω = I⁻¹L` over the particle cloud. That is the mass-weighted
+   least-squares rigid rotation, which is *why* the constraint is provably non-injecting — subtracting a
+   least-squares projection can only reduce the residual. No rotational DOF is added anywhere, so §3's
+   claim holds in code: a force couple spins the wheel and the axle passes the torque through untouched.
+
+   Two properties worth naming because they are what a penalty joint could not give:
+   - **An axle must not brake its own wheel.** A wheel already spinning freely and centred on its anchor
+     is fully compliant, so `resolve` is a bit-level no-op on it. A joint that bled spin here would look
+     like bearing friction while being a numerical artifact — and would be indistinguishable from the
+     DECLARED bearing-friction model §4 owes a derivation for.
+   - **It does not rigidify the wheel.** Only the best-fit rigid rotation is touched; deformation passes
+     through, which is the whole point of a rubber tyre that has to spread a contact patch and rut.
+
+   Reaction impulses are returned rather than applied, so the chassis receives the equal and opposite
+   ones — a caller that drops them has an axle that creates momentum. Nothing calls it yet: there is no
+   chassis to bolt it to until item 4.
 3. **Multi-granularity particalization** — one scene, two particle scales, per §1.
 4. **The kart**: chassis + four wheels + declared motor/battery/steering.
 

@@ -9,6 +9,33 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **BREAKING (API): `mesher::build_earth_cap` takes a `field: Option<&World>`.** Pass the world and the
+  bulk cap follows the persistent T0 `displacement`, so a de-resolved crater renders as a crater instead
+  of pristine relief. `None` keeps the old pure-procedural behaviour.
+- **NEW `axle` module — the revolute joint (docs/47 §3).** Holds a wheel's hub on a chassis anchor while
+  leaving rotation about ONE axis free, as a CONSTRAINT rather than a spring: a penalty joint stiff enough
+  to hold a wheel on is also stiff enough to launch it. `axle::resolve` projects the hub back onto its
+  anchor without writing velocity (zero injected energy), matches COM velocity as a reported impulse, and
+  preserves spin about the axle axis exactly while refusing wobble. `axle::angular_velocity` recovers a
+  particle cloud's spin from linear momenta alone (`ω = I⁻¹L`) — **no rotational degree of freedom is
+  added anywhere**, so a force couple spins a wheel and the axle passes the torque through. Reactions are
+  returned for the caller to apply to the chassis. No vehicle uses it yet.
+- **FIX: demotion no longer strands the sea.** `column_is_bakeable` now refuses columns under water — a
+  sea column has two surfaces (seabed and waterline) while the T0 field stores one height per column, so
+  baking one recorded the seabed, freed the ground beneath, and left 1,514 water voxels floating. Adds
+  `World::demote_patch_to_field` (atomic — a half-demoted patch cannot be rendered). Consequence worth
+  knowing: whole-patch demotion cannot fire on a world with a sea (7.4% of columns wet, scattered across
+  the patch), so per-column demotion is a prerequisite rather than a refinement.
+- **One authoritative ground query — `World::ground_top_voxel`.** Returns a column's voxel top while it
+  is resolved and the SAME top after it is demoted to the T0 field, so de-resolution is invisible to
+  whoever asks where the ground is. The GPU grain heightfield, the CPU bilinear contact surface and the
+  bulk cap all read it; previously those three disagreed, and demoting a column would have dropped grains
+  through the floor and rendered the crater as untouched ground. Adds `World.demoted`, which separates
+  "baked into the field" from "excavated to nothing" — a zero displacement cannot. Notably this needs
+  **no sub-voxel heightfield**: the bake preserves an already-quantised surface, so the field returns the
+  identical integer top and the GPU's `array<i32>` is untouched. Nothing triggers demotion yet; this
+  makes it safe, not active.
+
 - **BREAKING (API): `MatterSim::materialize_steep_terrain` drops its `steep_drop` argument.** Terrain
   stability is now Mohr–Coulomb — a face stands if friction holds the slope OR cohesion holds the bank —
   so there is no step-height threshold left to pass. Call sites just delete the trailing integer.
