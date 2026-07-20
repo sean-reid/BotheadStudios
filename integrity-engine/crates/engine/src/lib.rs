@@ -2523,11 +2523,14 @@ mod app {
                 // AIR: density derived from the planet's own declared atmosphere mass (docs/48). One
                 // value for the patch — the barometric profile varies 1.1% over 96 m, so resolving it
                 // here buys nothing (docs/44). `matter::DRAG` is gone: it was a velocity multiply.
+                // Same air the engine runs in — the probe exercises SHIPPING code, so it must not
+                // measure a shader configuration the engine never uses. `mats` and `self.gravity` are
+                // this fn's own; the Engine's `self.mats`/`self.surface_g` do not exist on GpuProbe.
                 air_rho: crate::atmosphere::air_density_at(
                     crate::planet::earth().surface_pressure(),
-                    &self.mats[materials::index_of(&self.mats, "air")],
+                    &mats[materials::index_of(&mats, "air")],
                     AIR_TEMP_K,
-                    self.surface_g as f64,
+                    self.gravity as f64,
                     0.0,
                 ) as f32,
                 contact_damp: matter::CONTACT_DAMP,
@@ -2549,7 +2552,7 @@ mod app {
                 // Same constant the production path passes (`gpu_step_params`) — the probe must not
                 // run a different thermodynamic conversion than the engine it is measuring.
                 specific_heat: GRAIN_SPECIFIC_HEAT,
-                _hp0: 0.0,
+                drag_cd: DRAG_CD_CUBE,
                 _hp1: 0.0,
                 _hp2: 0.0,
             }
