@@ -134,6 +134,13 @@ mod app {
     // Normal damping is no longer a constant — it's DERIVED per-material from restitution (docs/24
     // Stage 1), see `granular::damping_for_restitution` in `gpu_step_params`.
     const CONTACT_TANGENT_DAMP: f32 = 100.0; // friction ramp with slip speed
+    /// Air temperature (K) for the surface band's density. ISA sea level; the isothermal assumption is
+    /// the same one `scale_height` and the settling-column emergence test make (docs/26).
+    const AIR_TEMP_K: f64 = 288.0;
+    /// Drag coefficient for a voxel grain — a cube, tumbling. DECLARED shape factor (docs/46 §1); the
+    /// resolved computation it stands in for is the pressure field of `AirField` parcels flowing around
+    /// the grain, so it is deletable when that flow is resolved. ~1.05 is the standard cube value.
+    const DRAG_CD_CUBE: f32 = 1.05;
 
     /// Per-substep position-projection cap for a BODY resolving against the terrain constraint. Mirrors
     /// `particle_step.wgsl::MAX_SURFACE_CORRECTION` (0.01 m) — the bound that makes the projection
@@ -1258,7 +1265,16 @@ mod app {
                 dt,
                 center: [c.x, c.y, c.z],
                 c_cohesion,
-                drag: matter::DRAG,
+                // AIR: density derived from the planet's own declared atmosphere mass (docs/48). One
+                // value for the patch — the barometric profile varies 1.1% over 96 m, so resolving it
+                // here buys nothing (docs/44). `matter::DRAG` is gone: it was a velocity multiply.
+                air_rho: crate::atmosphere::air_density_at(
+                    crate::planet::earth().surface_pressure(),
+                    &self.mats[materials::index_of(&self.mats, "air")],
+                    AIR_TEMP_K,
+                    self.surface_g as f64,
+                    0.0,
+                ) as f32,
                 contact_damp: matter::CONTACT_DAMP,
                 settle_speed: 0.0, // (unused — settle "freeze" removed as a fudge)
                 part_half: DEBRIS_PART_HALF, // the 1 m physics grain's collision half-extent
@@ -1275,7 +1291,7 @@ mod app {
                 c_friction: friction,
                 c_tangent_damp: CONTACT_TANGENT_DAMP,
                 specific_heat: GRAIN_SPECIFIC_HEAT,
-                _hp0: 0.0,
+                drag_cd: DRAG_CD_CUBE,
                 _hp1: 0.0,
                 _hp2: 0.0,
             }
@@ -1915,7 +1931,7 @@ mod app {
         dt: f32,
         center: [f32; 3],
         c_cohesion: f32, // attractive adhesion between touching grains (docs/24)
-        drag: f32,
+        air_rho: f32,
         contact_damp: f32,
         settle_speed: f32,
         part_half: f32,
@@ -1933,7 +1949,7 @@ mod app {
         c_friction: f32,
         c_tangent_damp: f32,
         specific_heat: f32, // J/(kg·K) — grain temp↔u (docs/38)
-        _hp0: f32,
+        drag_cd: f32,
         _hp1: f32,
         _hp2: f32,
     }
@@ -2504,7 +2520,16 @@ mod app {
                 dt: (1.0 / 60.0) / DEBRIS_SUBSTEPS as f32,
                 center: [0.0, 0.0, 0.0], // grains are already in voxel coords ⇒ ground sits at y = 0
                 c_cohesion,
-                drag: matter::DRAG,
+                // AIR: density derived from the planet's own declared atmosphere mass (docs/48). One
+                // value for the patch — the barometric profile varies 1.1% over 96 m, so resolving it
+                // here buys nothing (docs/44). `matter::DRAG` is gone: it was a velocity multiply.
+                air_rho: crate::atmosphere::air_density_at(
+                    crate::planet::earth().surface_pressure(),
+                    &self.mats[materials::index_of(&self.mats, "air")],
+                    AIR_TEMP_K,
+                    self.surface_g as f64,
+                    0.0,
+                ) as f32,
                 contact_damp: matter::CONTACT_DAMP,
                 settle_speed: 0.0,
                 part_half: DEBRIS_PART_HALF,

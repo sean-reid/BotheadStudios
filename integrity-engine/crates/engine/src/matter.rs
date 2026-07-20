@@ -22,14 +22,13 @@ use glam::Vec3;
 
 pub const PARTICLE_HALF: f32 = 0.45; // rendered/collision half-extent (voxel-ish)
 
-// `DRAG` = 1.0: NO per-step velocity damping. This was a fudge — a per-step multiply that bled 62%/s of
-// a vacuum particle's speed (exposed by `gpu-verify` foundational test F, docs/24). It was masking the
-// non-conservative HEIGHTFIELD terrain contact (min-translation normal flip / vertical walls). With that
-// resolved — the momentum-conserving contact solve, the conservative bilinear terrain penalty, and
-// steep-terrain materialization (`materialize_steep_terrain`) — the core model no longer needs it, and a
-// particle in vacuum correctly keeps its momentum (no atmosphere is modelled; when one is, drag emerges
-// from real gas dynamics, not a constant). See docs/16 (no-fakery), docs/15 (honesty invariant).
-pub const DRAG: f32 = 1.0;
+// `DRAG` IS GONE (2026-07-19). It was a per-step velocity multiply that bled 62%/s from a particle in
+// vacuum — a fudge, deleted to 1.0 (a no-op) with the instruction left behind: "when [an atmosphere] is
+// [modelled], drag emerges from real gas dynamics, not a constant". The atmosphere is now modelled
+// (docs/48) and drag is a FORCE: F = ½·ρ_air·v²·C_d·A, computed in `particle_step.wgsl` from the grain's
+// OWN density and size against a real air density derived from the planet's declared atmosphere mass.
+// `gpu-verify` F7a now proves a vacuum particle keeps its speed EXACTLY, which is what the old flagged
+// "DRAG DEBT" scene existed to make visible until it could be paid.
 pub const CONTACT_DAMP: f32 = 0.15; // fraction of velocity kept after touching ground. Loose rock rubble
 //                                    is highly inelastic (coefficient of restitution ~0.1–0.2); 0.35 was
 //                                    too bouncy and, combined with Earth g, left grains jittering forever.
@@ -856,7 +855,10 @@ impl MatterSim {
             let mut p = self.particles[i];
             let accel = field.acceleration_point_approx(p.pos, 6.0);
             p.vel += accel * dt;
-            p.vel *= DRAG;
+            // No drag term here: this CPU stepper is not in the live scene path (the terrain band steps
+            // grains on the GPU, where drag now IS applied as a real force — see particle_step.wgsl).
+            // Removing the old `*= DRAG` no-op rather than porting the force keeps this path honest about
+            // what it does NOT model; wiring air here belongs with whatever revives this stepper.
             p.pos += p.vel * dt;
 
             // Drifted off the world entirely → lost (rare; ejection is sub-escape).

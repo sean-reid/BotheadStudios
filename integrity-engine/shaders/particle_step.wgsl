@@ -18,7 +18,9 @@ struct Params {
     dt           : f32,
     center       : vec3<f32>, // world.center() offset (centered→voxel coords)
     c_cohesion   : f32,       // attractive adhesion (1/s²) between touching grains — cohesion (docs/24)
-    drag         : f32,
+    air_rho      : f32,       // AIR DENSITY (kg/m3) at this patch — 0 = vacuum. Replaces the old `drag`
+                              // multiplier, which was a per-step velocity scale (a fudge: it bled speed
+                              // from a particle in vacuum). Drag is now a FORCE from a real medium.
     contact_damp : f32,       // ground-collision velocity damping
     settle_speed : f32,
     part_half    : f32,
@@ -37,7 +39,8 @@ struct Params {
     c_tangent_damp: f32,      // tangential regularization (1/s)
     // --- thermodynamic state (docs/35 increment 4b, docs/38) ---
     specific_heat : f32,      // J/(kg·K): the grain carries u = c·T, so temp = u/specific_heat (matches hydrostatic.rs)
-    _hp0 : f32, _hp1 : f32, _hp2 : f32, // pad the uniform tail to a full 16-byte row
+    drag_cd : f32,            // drag coefficient (declared shape factor; IOU = resolved flow, docs/46)
+    _hp1 : f32, _hp2 : f32,   // pad the uniform tail to a full 16-byte row
 };
 
 // θ-method blend for the directional implicit contact solve (docs/24 Stage 0+1). θ=0.5 is the
@@ -412,7 +415,20 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
     // explicit, keeping its full free-flight/ejection velocity. Now a compressed contact RETURNS its
     // stored energy — restitution is real and set by the material's damping c (docs/24 Stage 1).
     let acc = forces[i];
-    let a = P.gravity + acc.force;
+    // AERODYNAMIC DRAG — a force from a real medium, not a velocity multiply.
+    //   F = 1/2 rho_air v^2 C_d A ,  A = s^2 ,  m = rho_grain s^3  =>  a = 1/2 rho_air v^2 C_d / (rho_grain s)
+    // so the grain's OWN density (docs/38's `rho`) and size set how much the air can push it: a dense iron
+    // grain and a snow grain of the same size are slowed very differently, which is the physical answer.
+    // rho_air is one value for the whole patch: over 96 m the barometric profile varies 1.1%, so resolving
+    // it here would buy nothing (docs/44 — resolution by necessity, applied to the air itself). Altitude
+    // dependence belongs where altitude actually varies: re-entry and the orbit band.
+    var a = P.gravity + acc.force;
+    let sp = length(pt.vel);
+    if (P.air_rho > 0.0 && sp > 1.0e-9) {
+        let s_grain = max(2.0 * P.part_half, 1.0e-6);
+        let a_drag = 0.5 * P.air_rho * sp * sp * P.drag_cd / (max(pt.rho, 1.0e-6) * s_grain);
+        a = a - (a_drag / sp) * pt.vel;   // opposes motion; can only remove energy
+    }
     // RHS = (I − S)·v + dt·a. The −S·v term (symmetric tensor · old velocity) is the trapezoidal half
     // that makes the scheme conservative rather than dissipative.
     let sv = vec3<f32>(
@@ -443,7 +459,7 @@ fn cs_integrate(@builtin(global_invocation_id) gid : vec3<u32>) {
         (c00 * rhs.x + c01 * rhs.y + c02 * rhs.z) * inv_det,
         (c01 * rhs.x + c11 * rhs.y + c12 * rhs.z) * inv_det,
         (c02 * rhs.x + c12 * rhs.y + c22 * rhs.z) * inv_det,
-    ) * P.drag;
+    );
     // Trapezoidal position update: pos += (dt/2)(v_old + v_new) — consistent with the midpoint velocity
     // solve above (a symplectic-Euler pos += v_new·dt would break the energy conservation the solve buys).
     var pos = pt.offset + (pt.vel + vel) * (0.5 * P.dt);
