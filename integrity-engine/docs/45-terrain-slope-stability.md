@@ -139,9 +139,91 @@ repose already is, instead of a placement decision.
 
 ## 7. Status
 
-Not implemented. `steep_drop = 3` and the cohesion-only criterion are live today; the regolith horizon
-that exposes them is written and held behind this doc, because landing a cohesionless layer on terrain
-that cannot hold it produces a landslide rather than ground.
+**IMPLEMENTED 2026-07-19.** `steep_drop` is retired. The law is `granular::face_stable` (with
+`repose_allowance` and `SLOPE_QUANTUM_M`); `matter::materialize_steep_terrain` applies it and iterates to
+a fixpoint. 199 tests green, wasm clean.
+
+Three things this doc did not anticipate, all found by measuring rather than by reasoning:
+
+**a. The φ term alone does not converge — the REMOVAL TARGET was the bug.** §3 predicted convergence "by
+construction", but adding friction to the old criterion still slides: the old rule cut a failing face all
+the way down to its lowest neighbour, which does not relieve a slope, it *moves* it — the column behind
+becomes the new cliff at nearly the same height. Re-measured here on a cohesionless horizon, the old rule
+sheds **106 → 622 grains over 12 passes, monotonically increasing**, with a 13-voxel face still standing
+(the doc's earlier 308→339 was the same failure on a different pit). Cutting to the *stable* height
+instead turns a cliff into a talus ramp that climbs one column per pass and stops at the plateau. That is
+what makes the end state the repose slope, and it is the half of the fix that mattered most.
+
+**b. Cohesion must be judged on the material's own BANK, not on the drop.** §3's rule reads
+`face_height ≤ c/(ρg)`, and `face_height` is the drop to the neighbour. In a layered world that is wrong:
+a 1 m grass skin over basalt on ground that steps down 2 m is not a 2 m grass bank — grass holds its own
+1 m (`h_crit ≈ 1.09 m`) and the basalt holds the rest (510 m). Judging the veneer against the full drop
+**stripped 470 grains from a pristine world nothing had touched**, since any hillside steeper than the
+skin is thin has a drop exceeding a veneer's critical height. Cohesion now uses the contiguous run of the
+*same* material in the exposed face; friction still uses the drop, because slope is a surface property.
+The two terms measure different heights, which is why they are an OR of two tests and not a max of one.
+
+**c. Faces fail from the BASE.** Scanning down and stopping at the first voxel that holds is backwards
+once (b) is in: a self-supporting sod skin shields the failing 10 m bank beneath it from ever being
+asked. The lowest failing voxel is found first, and everything above it goes with it — basal failure,
+which is how slopes actually let go.
+
+**The quantum, stated plainly.** An integer heightfield cannot express a slope between 0° and 45°, so
+enforcing repose at a one-cell baseline with no allowance would force every soil in the DB perfectly
+FLAT. `SLOPE_QUANTUM_M = 1.0` is exactly one voxel of allowance — a **resolution IOU** (docs/24), not a
+dial. Over a baseline of `r` cells it dilutes to `1/r`, so sustained slopes (the ones that carry a
+landslide) are held to `atan(μ + 1/r)`; at `SLOPE_BASELINE_CELLS = 8` that is ~3.6° above gravel's true
+40°. The continuous sub-voxel surface — deferred part (A) of the terrain-contact work — is what retires
+it. A longer baseline shrinks the residual at O(r²) cost and is not the honest fix.
+
+**§5 (where slumped material goes) is measured resolved, as a side effect of (a).** Grains are shed from
+the wedge *above* the new stable ramp rather than from a column cut to its neighbour's floor, so they are
+no longer left hanging inside the collision surface: worst penetration **2.75 m → 0.50 m, with 1.2% of
+grains penetrating at all** (the regolith branch had made it 3.75 m). They are released at rest and fall
+under the granular sim's gravity, so the talus cone is emergent as §5 asked.
+
+**Still open, and deliberately:** §6's *emergent agreement* test — that a pile of loose grains and the
+terrain's own stable slope reach the same angle — remains blocked on grain-side rolling resistance
+exactly as §6 says. Nothing here was tuned to make the two halves agree.
+
+**Consequence worth knowing before merging regolith:** on the *live* meteor scene this change is close to
+a no-op (76 grains shed before, 0 now), because that world is a 1 m grass skin on basalt and both layers
+are genuinely stable — which is §2's own point. The change earns its keep on cohesionless material, which
+is precisely what `regolith-horizon` introduces.
+
+## 8. Measured against `regolith-horizon` — the landslide is gone, but regolith is NOT yet mergeable
+
+Verified directly, by stacking regolith's `world.rs` (the graded profile; its `matter.rs`
+cascading-slump half is superseded by this doc) on top of this work and measuring. **The claim "docs/45
+unblocks regolith" was too strong, and this is the corrected version.**
+
+**What this doc delivers, confirmed on the real profile.** Repeated stabilisation of the regolith world
+gives `[1466, 0, 0, 0, 0, 0]` grains — **it converges on the first call and every later call is exactly
+zero**, with mass conserved. The unbounded slide the regolith branch hit (308→339 and climbing, 8-voxel
+face after 12 rounds) does not happen. The law also discriminates *correctly by material*: of the 1,466
+grains shed, **870 are dirt, 580 grass, and only 16 gravel** — dirt (φ = 28.8°) fails exactly where the
+cohesionless gravel beneath it (φ = 40°) holds, which is the right ordering and is strong evidence the φ
+term is doing real work rather than firing indiscriminately.
+
+**What still blocks regolith, and it is not this doc.** Those 1,466 grains come off **undisturbed
+ground**: the world is generated *out of equilibrium*. A slope census of the natural relief shows 8-cell
+drops up to **10 m (51°)**, with 22 at 9 m and 34 at 8 m, against gravel's allowance of 7.72 m — and the
+profile lays a uniform 6 m mantle (grass 1 / dirt 2 / gravel 3) over all of it regardless of slope. A
+uniform-thickness soil mantle is not a physical object on ground steeper than the soil's own repose
+angle. **The regolith commit's own comment already knows this** — "thin on steep or glaciated ground" —
+the generator just does not implement it.
+
+**The fix belongs in world generation, not here:** regolith thickness should taper with slope (soil
+production versus transport), so material is never *placed* where it cannot stand. Two alternatives were
+considered and are worse: running a settling pass at generation time dumps ~1,466 grains into a debris
+shower on load, and simply accepting the shedding means every scene begins by relaxing terrain the
+generator should not have built. Related: grain burial on this world is **2.00 m** (101 of 1,466 grains),
+over the 1.2 m tolerance — a symptom of the same thing, since material shed from a mantle lands where
+neighbouring columns still stand.
+
+So the ledger reads: **the landslide is fixed and regolith's blocker has moved** — from "terrain cannot
+hold a slope" to "the generator places soil on slopes that cannot hold it", which is a smaller and much
+better-specified problem than the one this doc was written to solve.
 
 ---
 
