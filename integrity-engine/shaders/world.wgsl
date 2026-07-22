@@ -14,6 +14,9 @@ struct Uniforms {
 @group(0) @binding(2) var samp : sampler;
 // Per-material params: x = roughness, y = metallic (rest reserved).
 @group(0) @binding(3) var<uniform> matparams : array<vec4<f32>, 32>;
+// The material NORMAL maps (docs/12): relief lighting without relief geometry. Same array shape and the
+// same sampler as the albedo — one texture set describing one surface, not two that can disagree.
+@group(0) @binding(4) var ntex : texture_2d_array<f32>;
 
 struct VOut {
     @builtin(position) clip      : vec4<f32>,
@@ -52,7 +55,7 @@ fn triplanar(local : vec3<f32>, n : vec3<f32>, layer : u32) -> vec3<f32> {
 
 @fragment
 fn fs_main(i : VOut) -> @location(0) vec4<f32> {
-    let n = normalize(i.normal);
+    let n = surface_normal_triplanar(i.local, normalize(i.normal), i.mat, TEX_SCALE);
     let l = normalize(u.light_dir.xyz);
 
     let albedo = triplanar(i.local, n, i.mat);

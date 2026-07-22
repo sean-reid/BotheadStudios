@@ -17,8 +17,18 @@ decide it. Full text + rationale: [`docs/00-laws-of-integrity.md`](docs/00-laws-
 7. **Measure and derive; never assume.** A number you did not measure or derive is a guess — wrong until
    checked. Test, then conclude. Pin acceleration to brute force. A negative result, honestly measured, ships.
 
+8. **This is a NEW KIND of engine — challenge what you "know".** Traditional engines only *emulate*
+   physics; Integrity *embodies* it — **to the best of our ability with the compute available**. That
+   clause is the honest bound, not a loophole: the question is never "physics or shortcut?" but *"is
+   this the most physical thing this budget can buy, and does it converge as the budget grows?"* LOD ladders, baked lighting, colliders standing in for objects,
+   bump maps standing in for surfaces — these answer a different question. The test is never "is this
+   how engines do it?" but **"does this embody the physics, or imitate it?"** A borrowed technique is
+   admissible only as a declared stand-in (Law 5): derived from the real quantity, flagged, convergent.
+   When a familiar solution arrives fully formed and obvious, THAT is when to stop and ask what the
+   honest version is.
+
 *In one breath: real physics, one law at every scale, faked nowhere — simulated where seen, computed where
-not, and never assumed where it can be measured.* If any doc, comment, or past decision contradicts a Law,
+not, never assumed where it can be measured, and never borrowed merely because it is familiar.* If any doc, comment, or past decision contradicts a Law,
 the Law wins and the other is the bug.
 
 ---
@@ -99,6 +109,14 @@ If a step cannot be satisfied honestly, the right output is a **flagged IOU that
 computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet approximation.
 
 ## Hard rules (do not violate)
+
+0. **Every scene has a "Share view" button.** Use `web/src/share-view.ts` — do NOT write a second
+   capture path. A scene calls `createShareView(canvas, …)`, places the returned button in its control
+   strip, and calls `share.afterPresent()` **immediately after it presents** (a WebGPU canvas is only
+   readable while its drawing buffer is current; capture anywhere else silently yields a blank image).
+   The frame is POSTed to `/__shot` and written to `shots/shot-<ts>.png`, which is how a picture gets
+   from a scene to whoever is reading the repo. `web/rig/share_button.mjs` asserts the button exists AND
+   that a real PNG lands, on every scene.
 
 1. **Work directly in the main checkout on a feature branch** — `~/workspace/BotheadStudios`. Do NOT
    create git worktrees. (This reversed on 2026-07-19: worktrees existed to isolate parallel agents, and
