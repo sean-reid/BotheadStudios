@@ -182,8 +182,13 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
 6. **Record changes:** design → `docs/NN` · what-happened+proof → `JOURNAL.md` (newest-first, What/Why/
    **Verified**) · consumer delta → `CHANGELOG.md [Unreleased]` · standing context → memory. A substantive
    change usually touches docs+JOURNAL+CHANGELOG together.
-7. **Merging is yours to do:** `main` carries an active ruleset (1 approving code-owner review +
-   `code_quality` + 90% `code_coverage`). Robin: *"I set these rules up for outside contributors when/if
-   we have them. Since we don't yet we have impunity."* → merge with `--admin`. Do not ask each time.
+7. **Merging goes through the front door.** The old rule here was merge with `--admin`, on Robin's
+   grounds that the ruleset existed for outside contributors we did not have: *"Since we don't yet we
+   have impunity."* That premise no longer holds, so the bypass is retired. Two contributors exist,
+   and the `ci` workflow runs the real deploy gate on every PR (`scripts/test.sh`, the full native
+   suite, plus the wasm production build), so the branch ruleset's checks should be real ones that
+   pass on their own. What replaces impunity: CI green, and the other person able to review async.
+   Self-merge is allowed when the change is mechanical and green; when it is not, say so on the PR
+   and wait for the other pair of eyes. Never `gh pr merge --admin`.
 8. **Commit** `area: imperative subject (docs/NN)` (lowercase area). **Deploy only when asked:**
    `./scripts/deploy.sh` (full suite green first) → integrity.bothead.net (PUBLIC).
