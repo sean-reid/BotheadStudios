@@ -51,6 +51,10 @@ pub struct FlyCamera {
 const GROUND_ALT: f64 = 3_000.0;
 const ORBIT_ALT: f64 = 400_000.0;
 
+/// Vertical field of view (radians). One constant, used by the projection AND by the pan gesture's
+/// pixel-to-metres scale, so the two can never disagree about how much world a pixel spans.
+pub const FOV_Y: f64 = 0.9;
+
 impl FlyCamera {
     #[allow(clippy::too_many_arguments)]
     pub fn new(lat: f64, lon: f64, alt_m: f64, yaw: f64, pitch: f64, min_alt: f64, max_alt: f64) -> Self {
@@ -118,7 +122,7 @@ impl FlyCamera {
         // never near-clips the ground underfoot. The old 1e-6 floor was ~6.4 m; at 2 m altitude it cut
         // a hole in the terrain below the camera.
         let near = (alt_disp * near_frac).clamp(5e-9, 0.5).min(far * 0.5);
-        let proj = DMat4::perspective_rh(0.9, aspect.max(1e-3), near, far);
+        let proj = DMat4::perspective_rh(FOV_Y, aspect.max(1e-3), near, far);
         // Built in f64 with the eye at the ORIGIN and cast once; the camera-relative-eye convention
         // (module doc). No absolute-eye matrix is produced anywhere.
         let vp_rel = (proj * DMat4::look_at_rh(DVec3::ZERO, fwd, up_view)).as_mat4();
