@@ -131,6 +131,14 @@ async function main() {
         physics: [
           `standing on <b>${g.surface_material()}</b> · eye <b>${g.eye_altitude_m().toFixed(0)}</b> m above ground`,
           `grains <b>${g.particle_count()}</b> · meteors in flight <b>${g.meteors_in_flight()}</b> · total ever <b>${g.created_total()}</b>`,
+          // The declared solid body (the iron ball), reported from the same state the physics runs on.
+          ...(() => {
+            const bp = g.body_probe();
+            if (bp.length !== 4) return [];
+            return [
+              `ball <b>${bp[0]}</b> parcels · <b>${bp[1]}</b> bonds · com <b>${bp[2].toFixed(1)}</b> m over ground <b>${bp[3].toFixed(1)}</b> m`,
+            ];
+          })(),
         ],
         timeScale: 1,
         fps,

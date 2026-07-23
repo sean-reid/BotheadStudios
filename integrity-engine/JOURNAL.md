@@ -77,6 +77,46 @@ dispatch attached: accel pass at N=3000 15.2 ms to 7.0 ms (2.2x), full step_bloc
 78 ms (1.5x); at N=1500, 31.5 ms to 24.4 ms. Full native suite 335/335 green (the two new GPU tests
 included); wasm32-unknown-unknown check clean. fmt untouched (hand-edited).
 
+## 2026-07-22: the ball is cohesive matter in the ground scene
+
+**What.** docs/23 step 1. A ground world's definition gains a `bodies` list (material, radius,
+position, nothing else); `Simulation` builds each as `Aggregate::cohesive`: a lattice of real
+particles at the material's density, bonds at the material's own elastic modulus (k = E*L, capped
+for explicit stability, flagged), damping from `zeta_for_restitution` of the material's restitution,
+under the named planet's emergent surface gravity. Each step the body substeps to its bond
+stiffness and every particle resolves against the terrain through
+`granular::terrain_contact_resolve`, the same constraint the grains and the camera shell use. The
+renderer draws its particles through the existing instanced path (own albedo, incandescence from
+its temperature); the HUD and `run-definition` report parcels, bonds, and com height over the
+ground beneath. A meteor in flight meets the body through the one door: `fly_meteors` hands the
+swept segment to `interaction::detect_swept`, and on a matter-resolving contact the door's
+reduced-mass energy and the striker's momentum go into the parcels via `Aggregate::deposit_impact`
+(deposited at the point on the body's own outermost matter, since the door's site is the striker's
+centre at contact). No ball-specific collision or destruction branch exists; what the energy does
+next is `damage`'s call in the following step of docs/23.
+
+Found and fixed on the way: the camera-shell sweep re-lerped each sample against its own mutated
+endpoint, contracting every no-contact move toward last frame's eye by n!/n^n, so any move longer
+than the shell froze the camera. The ground scene's wheel dolly and hold-to-walk did nothing while
+mouse-look kept working; it surfaced when walking the camera up to the ball for the visual check.
+The sweep now samples the fixed segment and carries the accumulated correction
+(`granular::sweep_shell_resolve`).
+
+**Why.** The rigid `body::Sphere` probe was the last bespoke object, and the terrain deletion took
+even that; the scene had no ball at all. Making the ball declared DATA plus shared laws (cohesion
+from the material, contact from the one terrain constraint, impact from the one door) is what lets
+the next step assert emergent destruction with no special case to delete.
+
+**Verified.** Native TDD, red first: `a_declared_cohesive_ball_falls_rests_on_the_terrain_and_stays`
+(falls under gravity, lowest parcel comes to rest on the surface within tolerance, stays, no bond
+lost to its own landing), `a_meteors_energy_reaches_the_ball_through_the_shared_door` (parcels heat
+and the com recoils after `detect_swept` reports the contact), `a_body_of_unknown_material_is_refused`,
+plus sweep regressions `an_unobstructed_sweep_reaches_its_destination` and
+`a_sweep_into_the_ground_is_pushed_back_out`. Suite 338/338 green; wasm32 check clean. Live scene
+(macOS headed Chromium, /ground.html): HUD reads ball 33 parcels, 212 bonds, com 36.0 m over ground
+33.5 m, exactly the 2.5 m lattice rest height, stable across 30 s and camera moves; screenshots
+reviewed showing the iron ball seated on the dune crest at the initial crosshair point.
+
 ## 2026-07-22: the live moon-drop wiring reads the generic body
 
 **What.** The live-drop path reconciled with the docs/58 realignment. `live_resolution_crossing`
