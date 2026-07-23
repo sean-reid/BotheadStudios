@@ -28,8 +28,12 @@
 //! grain's material identity survives the rung — gravel comes back as gravel voxels, never as
 //! "terrain". Deposition itself goes through the ONE grain→voxel law ([`crate::matter::deposit_grain`])
 //! so this rung and the per-grain settle path cannot disagree about where matter may return.
-//! FLAGGED (same IOU as `Aggregate::drain_settled`): a binned grain's heat is dropped — the voxel
-//! store carries no temperature yet; the remainder grains keep theirs.
+//! **The crossing's energy is measured, not zeroed** (docs/46 row 17). The voxel store carries no
+//! thermal state, so a binned grain's remaining kinetic energy (settling IS dissipation) and its
+//! carried heat have nowhere physical to land yet; [`Recohered::binned_kinetic_j`] and
+//! [`Recohered::binned_heat_j`] book both at the crossing so the loss is visible in the audit.
+//! Remainder grains keep their own motion and temperature. The deferred computation is the
+//! voxel-side thermal sink itself; `Aggregate::drain_settled` shares the same IOU.
 
 use crate::body::Sphere;
 use crate::materials::Material;
@@ -109,7 +113,8 @@ pub struct FieldGrain {
     pub mass: f32,
     /// Index into the material DB. Identity survives the rung.
     pub material: usize,
-    /// Kelvin — kept on remainder grains; dropped on binned mass (flagged, see module doc).
+    /// Kelvin. Kept on remainder grains; the binned mass's heat above ambient is measured into
+    /// [`Recohered::binned_heat_j`] at the crossing (no voxel-side thermal sink yet, see module doc).
     pub temp_k: f32,
 }
 
@@ -134,6 +139,20 @@ pub struct Recohered {
     /// the one deposit law refused (full to the sky, inside a dynamic body, sea with no room to
     /// displace). These STAY particles — the rung never deletes matter to lower a count.
     pub remainder: Vec<FieldGrain>,
+    /// J. Kinetic energy that crossed the rung and found no sink: energy carried IN by a column's
+    /// grains minus energy carried back OUT by its remainder. Settling is dissipation, so this
+    /// should become heat on the receiving side, and the voxel [`World`] carries no thermal state
+    /// at all (no temperature per voxel, no heat raster). Until that sink exists (the deferred
+    /// computation, docs/46 row 17) the rung MEASURES the loss here instead of zeroing it
+    /// silently. Bounded per grain by `½ m v_q² = m g Δ`, the quiescence criterion's own quantum.
+    pub binned_kinetic_j: f64,
+    /// J. Heat above ambient (`m · c · (T − REF_TEMP_K)`) that crossed the rung and found no sink,
+    /// measured the same way: carried in minus carried out on the remainder. Counted only for
+    /// materials with a SOURCED specific heat ([`Material::specific_heat`]); an unknown `c` means
+    /// the carried heat has no honest value in joules, and an unknown stays unknown (Law VII)
+    /// rather than being invented at the call site. Same missing voxel-side thermal sink, same
+    /// deferral as `binned_kinetic_j` (docs/46 row 17).
+    pub binned_heat_j: f64,
 }
 
 /// **The rung.** Bin a settled particle field into the voxel world, then let the caller re-mesh.
@@ -195,6 +214,23 @@ pub fn recohere_settled(
         };
         let voxel_mass = m.density as f64 * cell_volume;
         let total: f64 = idxs.iter().map(|&i| grains[i].mass as f64).sum();
+        // The crossing's energy books, per column: what the grains carry IN. What the remainder
+        // carries back OUT is subtracted below; the difference is the energy that crossed into the
+        // voxel store and found no thermal sink, measured into the audit rather than zeroed
+        // (docs/46 row 17 names the sink this defers). Heat is counted only where the material's
+        // specific heat is sourced; an unknown c stays unknown (Law VII), never a number invented
+        // here.
+        let c_heat = m.specific_heat();
+        let t_ref = crate::matter::REF_TEMP_K as f64;
+        let kin_in: f64 = idxs
+            .iter()
+            .map(|&i| 0.5 * grains[i].mass as f64 * grains[i].vel.length_squared() as f64)
+            .sum();
+        let heat_in: f64 = c_heat.map_or(0.0, |c| {
+            idxs.iter()
+                .map(|&i| grains[i].mass as f64 * c * (grains[i].temp_k as f64 - t_ref))
+                .sum()
+        });
         // Whole voxel quanta this column's mass can claim. The epsilon forgives the inputs' f32
         // quantization only (a column of exactly-voxel-mass grains must not lose a voxel to the
         // last ulp); it is ~1e-9 of one quantum, far below any physical mass here.
@@ -214,13 +250,23 @@ pub fn recohere_settled(
         let deposited = placed as f64 * voxel_mass;
         out.deposited_mass += deposited;
         let leftover = total - deposited;
+        let mut kin_out = 0.0f64;
+        let mut heat_out = 0.0f64;
         if leftover > voxel_mass * 1e-9 {
             // The unbinned mass rides out on the column's last grain: position, velocity, material
             // and temperature kept; only the mass shrinks to exactly what was not binned.
             let mut gr = grains[*idxs.last().expect("bins are never empty")];
             gr.mass = leftover as f32;
+            kin_out = 0.5 * leftover * gr.vel.length_squared() as f64;
+            heat_out = c_heat.map_or(0.0, |c| leftover * c * (gr.temp_k as f64 - t_ref));
             out.remainder.push(gr);
         }
+        // Energy in minus energy still on particles: the measured loss at the crossing. This also
+        // books the remainder's re-representation (a column's leftover rides out at the LAST
+        // grain's velocity and temperature), so the ledger identity "in = remainder + audit" holds
+        // exactly rather than only for the binned share.
+        out.binned_kinetic_j += kin_in - kin_out;
+        out.binned_heat_j += heat_in - heat_out;
     }
     Ok(out)
 }
@@ -334,6 +380,100 @@ mod tests {
             r.remainder[0].mass,
             rho
         );
+    }
+
+    /// **Energy is measured at the crossing, never silently zeroed.** The voxel world has no
+    /// thermal state to receive it (the deferred sink, docs/46 row 17), so the honest contract is
+    /// a ledger: energy in = energy out on the remainder + energy measured as `binned_kinetic_j`
+    /// and `binned_heat_j`, to within f32 accumulation. Both parts are checked against
+    /// independently computed expectations, not against the rung's own arithmetic.
+    #[test]
+    fn the_crossing_measures_the_binned_kinetic_energy_and_carried_heat() {
+        let mats = mats();
+        let gravel = materials::index_of(&mats, "gravel");
+        let mut w = floor_world(&mats);
+        let g = 9.81;
+        let rho = mats[gravel].density;
+        let c = mats[gravel].specific_heat().expect("gravel thermal data is sourced");
+        let t_ref = crate::matter::REF_TEMP_K as f64;
+
+        // Column A: two whole-quantum grains drifting at 2 m/s (below v_q ≈ 4.4 m/s), 50 K above
+        // ambient. Both bin entirely: ALL their kinetic energy and heat cross with no remainder.
+        // Column B: one 1.6-quantum grain at 1 m/s, 40 K above ambient. One quantum bins; the
+        // 0.6-quantum remainder keeps its velocity and temperature, so only the binned 1.0·ρ of
+        // mass loses its share.
+        let grains = vec![
+            FieldGrain {
+                pos: at(&w, 8, 4, 8),
+                vel: Vec3::new(2.0, 0.0, 0.0),
+                mass: rho,
+                material: gravel,
+                temp_k: 350.0,
+            },
+            FieldGrain {
+                pos: at(&w, 8, 5, 8),
+                vel: Vec3::new(2.0, 0.0, 0.0),
+                mass: rho,
+                material: gravel,
+                temp_k: 350.0,
+            },
+            FieldGrain {
+                pos: at(&w, 9, 4, 8),
+                vel: Vec3::new(0.0, 0.0, 1.0),
+                mass: 1.6 * rho,
+                material: gravel,
+                temp_k: 340.0,
+            },
+        ];
+        let energy_of = |gr: &FieldGrain| {
+            let kin = 0.5 * gr.mass as f64 * gr.vel.length_squared() as f64;
+            let heat = gr.mass as f64 * c * (gr.temp_k as f64 - t_ref);
+            (kin, heat)
+        };
+        let (kin_in, heat_in) = grains
+            .iter()
+            .map(|gr| energy_of(gr))
+            .fold((0.0, 0.0), |(k, h), (dk, dh)| (k + dk, h + dh));
+
+        let r = recohere_settled(&mut w, &mats, &grains, g, &quiet_gauge(g), &[])
+            .expect("a settled field must re-cohere");
+        assert_eq!(r.voxels, 3, "two quanta from column A, one from column B");
+
+        // Independent expectations. Column A: 2 · ½ρ·2² kinetic, 2 · ρ·c·50 heat. Column B binned
+        // exactly one quantum of its 1.6: ½·1.0ρ·1² kinetic, 1.0ρ·c·40 heat.
+        let kin_expected = 2.0 * 0.5 * rho as f64 * 4.0 + 0.5 * rho as f64 * 1.0;
+        let heat_expected = 2.0 * rho as f64 * c * 50.0 + rho as f64 * c * 40.0;
+        assert!(
+            (r.binned_kinetic_j - kin_expected).abs() <= kin_expected * 1e-5,
+            "the binned kinetic energy is measured: expected {kin_expected:.3e} J, audit says {:.3e} J",
+            r.binned_kinetic_j
+        );
+        assert!(
+            (r.binned_heat_j - heat_expected).abs() <= heat_expected * 1e-5,
+            "the binned heat is measured: expected {heat_expected:.3e} J, audit says {:.3e} J",
+            r.binned_heat_j
+        );
+
+        // The ledger identity: energy before the crossing = energy still on particles + energy
+        // measured at the crossing, within f32 accumulation. Nothing vanishes unmeasured.
+        let (kin_rem, heat_rem) = r
+            .remainder
+            .iter()
+            .map(|gr| energy_of(gr))
+            .fold((0.0, 0.0), |(k, h), (dk, dh)| (k + dk, h + dh));
+        let kin_out = kin_rem + r.binned_kinetic_j;
+        let heat_out = heat_rem + r.binned_heat_j;
+        assert!(
+            (kin_out - kin_in).abs() <= kin_in * 1e-5,
+            "kinetic energy is conserved across the crossing: in {kin_in:.3e} J, out {kin_out:.3e} J"
+        );
+        assert!(
+            (heat_out - heat_in).abs() <= heat_in * 1e-5,
+            "heat is conserved across the crossing: in {heat_in:.3e} J, out {heat_out:.3e} J"
+        );
+        // And the remainder still owns its share as a live particle: temperature kept, not audited.
+        assert_eq!(r.remainder.len(), 1);
+        assert!((r.remainder[0].temp_k - 340.0).abs() < 1e-3, "the remainder keeps its own heat");
     }
 
     /// **A still-moving region is refused, and refusal changes nothing.** One grain above the
