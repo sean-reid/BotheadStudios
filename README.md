@@ -9,12 +9,14 @@ a self-contained project with its own README, build, and docs.
 
 An OSS **browser game engine with real Newtonian physics at its core**. Matter is simulated as
 aggregates of particles with mass and density; material behavior *emerges* from density (rock vs.
-dirt vs. grass), terrain is destructible all the way down, and the world's own aggregate mass
-produces real self-gravity (`F = ma`). Stack: Rust → WASM, a custom `wgpu` WebGPU renderer, and
-Rapier rigid bodies, with a thin TypeScript host.
+dirt vs. grass), worlds are destructible, and the world's own aggregate mass
+produces real self-gravity (`F = ma`). Stack: Rust → WASM, a custom `wgpu` WebGPU renderer,
+hand-written WGSL compute for the physics, and a thin TypeScript host.
 
-**Status:** pre-alpha — Phase 0 (scaffold + first pixel) complete, `v0.1.0`. See the project's
-[README](integrity-engine/README.md), [roadmap/JOURNAL](integrity-engine/JOURNAL.md), and
+**Status:** pre-1.0, under heavy development. The flagship scene is Birth of the Moon: a GPU SPH
+giant impact with a sourced Tillotson equation of state that accretes a proto-lunar disk in the
+browser, live at [integrity.bothead.net](https://integrity.bothead.net). See the project's
+[README](integrity-engine/README.md), [JOURNAL](integrity-engine/JOURNAL.md), and
 [CHANGELOG](integrity-engine/CHANGELOG.md).
 
 ## License
