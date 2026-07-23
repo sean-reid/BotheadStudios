@@ -200,7 +200,7 @@ fn declared_body_radius(d: &crate::terra::world_def::BodyDef) -> f64 {
     d.radius_m.unwrap_or(0.0)
 }
 
-/// **The live resolution-crossing check** (issue #1, the step PR #80 named): the first orbiting body
+/// **The live resolution-crossing check** (the wiring the SPH assembly primitive exists for): the first orbiting body
 /// (index >= 2 in the [Sun, planet, moons…] layout) whose separation from the planet (index 1) is inside
 /// `accretion::resolution_distance` (the point where tidal stress makes "two point masses" a lie), plus
 /// its body-centric (offset, relative velocity) in f64 SI. That pair is exactly what
@@ -920,7 +920,7 @@ mod app {
         sph_snapshot: Vec<crate::gpu_sph::SphParticle>,
         /// The GPU impact's setup/step phase (relax on GPU → assemble collision → dynamics). See `advance`.
         sph_phase: SphPhase,
-        /// **A LIVE de-orbit the SPH machine owns** (issue #1): `Some(i)` once `bodies[i]` crossed
+        /// **A LIVE de-orbit the SPH machine owns** (the live de-orbit hand-off): `Some(i)` once `bodies[i]` crossed
         /// `accretion::resolution_distance` and was handed to the SPH. `Assembling` then places the
         /// collision on the body's REAL (offset, velocity) via `assemble_from_relaxed_at`, instead of
         /// birth's imposed canonical approach; the CPU detect/materialization path skips the body,
@@ -2157,7 +2157,7 @@ mod app {
             self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
         }
 
-        /// Enter the SPH machine for a LIVE de-orbit (issue #1, the step PR #80 named): `bodies[i]`
+        /// Enter the SPH machine for a LIVE de-orbit: `bodies[i]`
         /// crossed `accretion::resolution_distance`, so its collision must be resolved as matter, through
         /// the SAME machine as the birth impact, not the CPU `Aggregate` path. Mirrors the relax start of
         /// [`Self::start_gpu_impact`], with the one difference that IS the point: the bodies keep flying
@@ -2507,14 +2507,14 @@ mod app {
             self.spin_angle += dt * self.spin_l.length()
                 / crate::tides::moment_of_inertia(self.bodies[1].mass, EARTH_RADIUS_M);
 
-            // **A body crossing its resolution distance stops being a point mass** (issue #1): tides
+            // **A body crossing its resolution distance stops being a point mass**: tides
             // make "two point masses" a lie there, so the engine hands the drop to the SPH machine
             // (the same machine as the birth impact) instead of the CPU debris path. Checked right
             // after integration because one fast-forward substep (~123 s at 118,000x) can carry a
             // dropped moon from outside the threshold to below contact; the guards below then keep
             // this substep's swept detection and parking pass off a body the SPH is about to own.
             // (`advance` starts the relax as soon as this substep returns.) The retired CPU birth
-            // path (`start_birth`) keeps its own Aggregate route until issue #2 retires it.
+            // path (`start_birth`) keeps its own Aggregate route until the CPU debris path is retired.
             if !self.sph_active && self.sph_live_drop.is_none() && !self.birth_mode {
                 let eligible: Vec<bool> = (0..self.bodies.len())
                     .map(|i| self.body_meta.get(i).map_or(true, |m| !m.materialized))
@@ -4695,7 +4695,7 @@ mod tests {
     use crate::{body, gravity, materials, mesher, world};
 
     /// **A live body crossing its resolution distance is the engine's cue to resolve it as matter**
-    /// (issue #1, the step PR #80 named): the check must report the FIRST orbiting body inside
+    /// (the cue to resolve it as matter): the check must report the FIRST orbiting body inside
     /// `accretion::resolution_distance` of the planet, together with the exact body-centric
     /// (offset, relative velocity) pair: the same f64 SI numbers `assemble_from_relaxed_at` will
     /// receive. Body-centric, never heliocentric (f32 collapses at 1.5e11 m).
