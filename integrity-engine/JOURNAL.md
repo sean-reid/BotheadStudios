@@ -3,6 +3,14 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: wasm size baseline recorded
+
+**What.** Recorded the release wasm baseline and made it a release-checklist step (docs/03), with a
+CI log line per PR. **Why.** The dev wasm had grown to 3.4 MB against a last-noted 1.3 MB with no
+baseline in between, so growth was unattributable. **Verified.** Measured on this date: release
+`engine_bg.wasm` 811,915 bytes raw, 322,386 bytes gzip -9 (the wire cost); dev build 3,402,186
+bytes raw for reference.
+
 ## 2026-07-23: pan input survives a real hand
 
 **What.** Three input fixes, one theme: every pan gesture reaches the one pan path each scene
