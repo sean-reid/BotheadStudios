@@ -79,6 +79,25 @@ pub struct SphParams {
 }
 
 impl SphEos {
+    /// The GPU (f32) mirror of an engine-side condensed-matter EOS (`eos::Tillotson`) — how a particalized
+    /// particle's OWN material (docs/58 #4) reaches the shader. The padding tail stays zero.
+    pub fn from_tillotson(t: &crate::eos::Tillotson) -> Self {
+        SphEos {
+            rho0: t.rho0 as f32,
+            a: t.a as f32,
+            b: t.b as f32,
+            cap_a: t.cap_a as f32,
+            cap_b: t.cap_b as f32,
+            e0: t.e0 as f32,
+            e_iv: t.e_iv as f32,
+            e_cv: t.e_cv as f32,
+            alpha: t.alpha as f32,
+            beta: t.beta as f32,
+            _p0: 0.0,
+            _p1: 0.0,
+        }
+    }
+
     pub fn basalt() -> Self {
         SphEos { rho0: 2700.0, a: 0.5, b: 1.5, cap_a: 2.67e10, cap_b: 2.67e10, e0: 4.87e8, e_iv: 4.72e6, e_cv: 1.82e7, alpha: 5.0, beta: 5.0, _p0: 0.0, _p1: 0.0 }
     }
@@ -88,6 +107,10 @@ impl SphEos {
 }
 pub const MAT_BASALT: u32 = 0;
 pub const MAT_IRON: u32 = 1;
+/// The GPU EOS table holds up to this many DISTINCT materials — the shader indexes `eos[particle.mat]`, and a
+/// body's layers are rock/metal/ice, so a handful. The EOS array used to be a fixed pair (`[basalt, iron]`);
+/// an N-body impact of differentiated worlds (docs/58) needs the table to grow. Generous headroom.
+pub const MAX_MATERIALS: usize = 16;
 
 /// Camera uniform for `sph_render.wgsl` (96 bytes): the view-projection matrix + the Earth display origin +
 /// (DISPLAY_SCALE, billboard half-size) so the instanced particle shader does the Earth-relative→clip map.
@@ -594,6 +617,64 @@ fn push_body(out: &mut Vec<SphParticle>, b: &crate::hydrostatic::HydroBody, prov
     }
 }
 
+/// **Builds the SPH particle set + the shared material EOS table for a collision of ANY NUMBER of bodies**
+/// (docs/58 #4/#5/#7 — N-body, not just target+impactor; "only two is not particularly robust", Robin). Each
+/// body is particalized ([`crate::hydrostatic::HydroBody::particalize`]) then appended with its own SOURCE
+/// index as `prov`; materials are deduped ACROSS ALL bodies into one ≤[`MAX_MATERIALS`]-entry table the shader
+/// indexes with `eos[particle.mat]`. So a three-moon impact and a two-body impact are the same path.
+#[derive(Default)]
+pub struct SphAssembly {
+    pub particles: Vec<SphParticle>,
+    pub eos: Vec<SphEos>,
+}
+
+impl SphAssembly {
+    /// Append body `prov`'s particalized matter, translated by `offset` and moving at bulk `vel`. The EOS
+    /// table grows only when this body introduces a material not already present.
+    pub fn add_body(
+        &mut self,
+        body: &crate::hydrostatic::HydroBody,
+        prov: u32,
+        offset: glam::DVec3,
+        vel: glam::DVec3,
+    ) {
+        for i in 0..body.pos.len() {
+            let t = match &body.eos[i] {
+                crate::eos::Eos::Tillotson(t) => *t,
+                // A body is condensed matter; a stray gas parcel is unexpected here — fall back, don't panic.
+                crate::eos::Eos::IdealGas { .. } => crate::eos::Tillotson::basalt(),
+            };
+            let mat = self.material_index(SphEos::from_tillotson(&t));
+            let q = body.pos[i] + offset;
+            self.particles.push(SphParticle {
+                pos: [q.x as f32, q.y as f32, q.z as f32],
+                h: body.h[i] as f32,
+                vel: [vel.x as f32, vel.y as f32, vel.z as f32],
+                u: body.u[i] as f32,
+                mass: body.mass[i] as f32,
+                mat,
+                rho: body.rho.get(i).copied().unwrap_or(t.rho0) as f32,
+                prov,
+            });
+        }
+    }
+
+    /// The index of a material in the shared table, inserting it if new. Deduped by reference density (a
+    /// material's identity). Capped at `MAX_MATERIALS`; beyond that a new material folds onto the last slot —
+    /// a flagged ceiling, never an overflow (a body has far fewer distinct materials than the cap).
+    fn material_index(&mut self, se: SphEos) -> u32 {
+        if let Some(k) = self.eos.iter().position(|e| e.rho0 == se.rho0) {
+            return k as u32;
+        }
+        if self.eos.len() < MAX_MATERIALS {
+            self.eos.push(se);
+            (self.eos.len() - 1) as u32
+        } else {
+            (MAX_MATERIALS - 1) as u32
+        }
+    }
+}
+
 /// GPU-resident SPH particle system + the `sph_step.wgsl` pipelines. Owns the physics buffer (which is ALSO
 /// the render vertex buffer — zero-copy instanced draw) and the grid/force scratch.
 pub struct GpuSph {
@@ -633,7 +714,7 @@ impl GpuSph {
         });
         let eos_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sph-eos"),
-            size: (2 * std::mem::size_of::<SphEos>()) as u64,
+            size: (MAX_MATERIALS * std::mem::size_of::<SphEos>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -690,9 +771,10 @@ impl GpuSph {
         }
     }
 
-    /// Upload a particle set (≤ capacity) + the two EOS materials, and set the physics params. `cell_size` is
-    /// the max smoothing length (set here from the particles so the 27-cell grid scan stays exact).
-    pub fn upload(&mut self, queue: &wgpu::Queue, particles: &[SphParticle], eos: &[SphEos; 2], softening: f32) {
+    /// Upload a particle set (≤ capacity) + the material EOS TABLE (≤ [`MAX_MATERIALS`]; each particle's `mat`
+    /// indexes it), and set the physics params. `cell_size` is the max smoothing length (set here from the
+    /// particles so the 27-cell grid scan stays exact). Was fixed at two materials — `[basalt, iron]`.
+    pub fn upload(&mut self, queue: &wgpu::Queue, particles: &[SphParticle], eos: &[SphEos], softening: f32) {
         // Clamp-to-capacity + write-at-0 + set-count IS the shared container's `replace` (docs/50).
         self.store.replace(queue, particles);
         let n = self.store.count() as usize;
@@ -700,6 +782,7 @@ impl GpuSph {
         self.params.n = n as u32;
         self.params.softening = softening;
         self.params.cell_size = cell_size;
+        let eos = &eos[..eos.len().min(MAX_MATERIALS)]; // the table is buffer-capped; a `mat` never exceeds it
         queue.write_buffer(&self.eos_buf, 0, bytemuck::cast_slice(eos));
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
     }
@@ -1036,5 +1119,39 @@ mod impact_geometry_tests {
         // Impactor carries EXACTLY the requested live offset and relative velocity — no synthesized approach.
         assert!((mc - ec - offset).length() < 0.02 * r_e, "impactor on the live offset ({:.3e} off)", (mc - ec - offset).length());
         assert!((mv - ev - rel_vel).length() < 1.0, "impactor carries the live relative velocity");
+    }
+
+    /// **An N-body, N-material assembly — one path for any number of bodies (docs/58 #4/#5/#7, Robin's
+    /// N-body note).** Particalize Earth + Moon into ONE SPH field: the EOS table holds each distinct
+    /// material once (deduped across both bodies), every particle's `mat` indexes it, and the two bodies keep
+    /// distinct source provenances. Proves the field is no longer the fixed `[basalt, iron]` pair of two.
+    #[test]
+    fn sph_assembly_builds_an_n_material_field_across_bodies() {
+        let earth = crate::hydrostatic::HydroBody::particalize(&crate::planet::earth(), 1500);
+        let moon = crate::hydrostatic::HydroBody::particalize(&crate::planet::moon(), 300);
+        let mut asm = SphAssembly::default();
+        asm.add_body(&earth, 0, DVec3::ZERO, DVec3::ZERO);
+        asm.add_body(&moon, 1, DVec3::new(4.0e7, 0.0, 0.0), DVec3::ZERO);
+
+        // Distinct materials across BOTH bodies (iron / peridotite / basalt) → deduped to ≥3, > the old 2.
+        assert!(
+            (3..=MAX_MATERIALS).contains(&asm.eos.len()),
+            "an N-material EOS table, deduped across bodies (got {})",
+            asm.eos.len()
+        );
+        // Every particle's `mat` is a valid index into that table.
+        assert!(asm.particles.iter().all(|p| (p.mat as usize) < asm.eos.len()), "every mat is a valid index");
+        // Both source bodies are present with distinct provenance.
+        assert!(
+            asm.particles.iter().any(|p| p.prov == 0) && asm.particles.iter().any(|p| p.prov == 1),
+            "both bodies present with distinct source provenance"
+        );
+        // The iron-core particles index the iron EOS entry (ρ₀ 7850), not a defaulted material.
+        let iron = asm.eos.iter().position(|e| (e.rho0 - 7850.0).abs() < 50.0).expect("iron is in the table");
+        assert!(asm.particles.iter().any(|p| p.mat as usize == iron), "core particles index the iron EOS");
+        // Mass is conserved to the two real bodies.
+        let m: f64 = asm.particles.iter().map(|p| p.mass as f64).sum();
+        let real = crate::planet::earth().total_mass() + crate::planet::moon().total_mass();
+        assert!((m - real).abs() / real < 0.03, "N-body mass conserved (got {m:.3e} vs {real:.3e})");
     }
 }
