@@ -3560,14 +3560,6 @@ mod app {
         /// DECLARED atmosphere's mass (a world never declares τ, and never declares surface pressure —
         /// both fall out of the air's own weight), at the one canonical exposure. A world with no
         /// atmosphere yields zeros here and renders with a hard terminator, correctly.
-        /// Hand Terra the real star catalogue (`sky/stars.bin`) — the same asset the space band loads.
-        pub fn load_star_catalog(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
-            let stars = crate::sky::parse_catalog(bytes).map_err(|e| JsValue::from_str(&e))?;
-            log::info!("sky: {} catalogued stars", stars.len());
-            self.stars = Some(StarField::new(&self.device, self.config.format, &stars));
-            Ok(())
-        }
-
         fn air(&self) -> Air {
             [
                 self.atm_tau[0] as f32,
@@ -3933,6 +3925,16 @@ mod app {
 
     #[wasm_bindgen]
     impl Terra {
+        /// Hand Terra the real star catalogue (`sky/stars.bin`) — the same asset the space band loads.
+        /// EXPORTED here (a `#[wasm_bindgen]` impl) so JS can actually call it: it previously sat in a
+        /// plain `impl Terra`, so `terra.load_star_catalog` was not a function and Terra's sky was empty.
+        pub fn load_star_catalog(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
+            let stars = crate::sky::parse_catalog(bytes).map_err(|e| JsValue::from_str(&e))?;
+            log::info!("sky: {} catalogued stars", stars.len());
+            self.stars = Some(StarField::new(&self.device, self.config.format, &stars));
+            Ok(())
+        }
+
         pub async fn create(canvas: HtmlCanvasElement) -> Result<Terra, JsValue> {
             console_error_panic_hook::set_once();
             let _ = console_log::init_with_level(log::Level::Info);
