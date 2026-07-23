@@ -9,6 +9,8 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-22
+
 - **A de-orbited moon now enters the SPH machine at its resolution distance.** When the engine detects
   an orbiting body crossing `accretion::resolution_distance` of its planet (the new native-tested
   `live_resolution_crossing` check, run right after each N-body substep), it starts the same GPU relax
