@@ -9,6 +9,17 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The live moon-drop wiring reads the generic body (docs/58).** `live_resolution_crossing` takes the
+  planet's index, resolved from the role the scene declared (`planet_idx`), instead of assuming the
+  planet sits at `bodies[1]`; the `Approaching` separation check and the `Assembling` body-centric
+  geometry read the same role-resolved planet, and the crossing test now covers a permuted body order
+  reporting identical geometry. The `Assembling` arm derives the target's spin rate with the moment of
+  inertia emergent from the body's own layered matter (`spin_inertia()`), replacing the uniform-sphere
+  `2/5 M R^2` with the hardcoded Earth radius, so the spin handed to the SPH reproduces the declared
+  day length. The solid-sphere constant's one remaining use is the CPU debris materialization, which
+  retires with the `Aggregate`. The live handoff still names `earth`/`moon` by definition id: per-body
+  matter carries composition, not the id `ImpactDef` resolves definitions by (recorded at the site).
+
 ## [0.10.0] — 2026-07-22
 
 - **A de-orbited moon now enters the SPH machine at its resolution distance.** When the engine detects
