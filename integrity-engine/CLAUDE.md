@@ -127,12 +127,17 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    from a scene to whoever is reading the repo. `web/rig/share_button.mjs` asserts the button exists AND
    that a real PNG lands, on every scene.
 
-1. **Work directly in the main checkout on a feature branch** — `~/workspace/BotheadStudios`. Do NOT
-   create git worktrees. (This reversed on 2026-07-19: worktrees existed to isolate parallel agents, and
-   this is a single-developer project that is not doing multi-agent work. They cost a duplicated
-   `node_modules` per tree, a shared stash stack that different sessions can pop out from under each
-   other, and branches that quietly diverge in directories nobody is looking at.) Branch, commit, push,
-   PR — never commit to `main` directly.
+1. **The main checkout belongs to the human** (`~/workspace/BotheadStudios`). Persistent or parked
+   worktrees stay banned, and the 2026-07-19 reasons were real: a duplicated `node_modules` per tree,
+   a shared stash stack that different sessions can pop out from under each other, and branches that
+   quietly diverge in directories nobody is looking at. Transient, tool-managed worktrees for parallel
+   agent work ARE permitted, because each of those costs is avoided by construction when the bounds
+   hold, and the bounds are the rule: one task per worktree; the worktree is removed when its task
+   ends; no stash use in a worktree, ever; every branch a worktree produces becomes a PR and dies at
+   merge. (The 2026-07-19 rationale also rested on "this is a single-developer project that is not
+   doing multi-agent work"; that premise has expired. Two contributors and their agents now work this
+   repo, which is exactly the isolation worktrees existed for. What went wrong before was parking
+   them, not the isolation.) Branch, commit, push, PR; never commit to `main` directly.
    **Keep the branch list at `main` alone** (Robin, 2026-07-20, stated twice). One feature branch at a
    time; merge it, delete it (`gh pr merge N --squash --admin --delete-branch`), and `git fetch --prune`.
    Do NOT leave branches parked: this is a single-developer repo and there is nobody else's in-flight
