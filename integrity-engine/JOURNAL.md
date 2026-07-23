@@ -3,6 +3,32 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the orbit camera pans, in the focused body's frame
+
+**What.** The space band's camera can now translate its look target off the focused body.
+`render::Camera` carries a `pan` offset plus `pan_by_pixels` (the screen-plane translation, with a
+DERIVED scale: one frustum height at the focal plane per viewport height of drag, so the world
+tracks the pointer one-for-one at every zoom); `OrbitDemo::pan_view` exposes it to the page, and
+the focus setters (`focus_earth`, `focus_moon`, `cycle_focus`) snap the offset back to zero. The
+offset lives in the frame that rides the focused body: the orbit renderer re-centres the world on
+the focus each frame, so a pan composed against Earth follows Earth around the Sun. The shared
+gesture module (`camera-input.ts`) gained an OPTIONAL `onPan` handler, bound to shift + left-drag
+and middle-drag; scenes that supply none (ground, terra) keep the previous grammar untouched.
+
+**Why.** The space scenes offered rotate, zoom and body focus, but the target was always a body's
+centre, so there was no way to frame the debris disk between Earth and a forming moonlet, or an
+impact site off-centre. Law IV bound: this is representation only, a camera target, and it moves
+no matter.
+
+**Verified.** Two native tests pin the maths (`a_full_viewport_drag_pans_exactly_one_frustum_height`,
+`pan_moves_in_the_screen_plane_and_reverses_cleanly`); full suite 364/364 green; wasm32 check
+clean. Watched headed on the Mac (mac_shot pattern, stars blocked so the bodies are unambiguous,
+positions measured from decoded PNGs): a shift-drag put Earth off-centre at (730, 244) with the
+Moon in frame; over the next 4 s at time ×14,750 Earth held that screen position within one pixel
+while the Moon advanced ~66 px along its orbit and the Sun showed no parallax (it is 1 AU behind
+the target plane; an inertial-space target would have let Earth race off-screen at ~700 px/s).
+The Earth focus button snapped the framing back to centre.
+
 ## 2026-07-23: the descent camera holds precision from orbit to the ground
 
 **What.** Terra renders under one camera-relative-eye convention (docs/59 order-of-work item 2:
