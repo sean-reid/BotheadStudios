@@ -703,6 +703,20 @@ impl Ground {
     }
 
     pub fn particle_count(&self) -> usize { self.sim.particle_count() }
+    /// The declared solid bodies, probed for the HUD and the verification rigs:
+    /// `[parcels, intact_bonds, com_y, ground_under_com]` for the first body, empty when none is
+    /// declared. The HUD showing the same numbers the physics runs on is what lets a rig assert
+    /// "the ball rests ON the ground" instead of eyeballing pixels.
+    pub fn body_probe(&self) -> Vec<f32> {
+        let Some(b) = self.sim.cohesive_bodies().first() else { return Vec::new() };
+        let c = b.agg.com();
+        vec![
+            b.agg.particles.len() as f32,
+            b.agg.active_bonds() as f32,
+            c.y as f32,
+            self.sim.world.ground_height(c.x as f32, c.z as f32),
+        ]
+    }
     pub fn created_total(&self) -> usize { self.sim.created_total() }
     pub fn world_name(&self) -> String { self.sim.name().to_string() }
     pub fn surface_material(&self) -> String { self.sim.surface_material().to_string() }
@@ -770,6 +784,32 @@ impl Ground {
         // Meteors in flight are matter too, drawn through the SAME instanced path as the grains —
         // they are not a special effect layered on top.
         let mut inst = inst;
+        // The declared solid bodies - the docs/23 ball - are cohesive matter drawn through this same
+        // path: each lattice particle is an instance in its material's own albedo, glowing by the same
+        // incandescence law when an impact heats it. No ball-specific renderer exists.
+        for b in self.sim.cohesive_bodies() {
+            let color = self
+                .mats
+                .get(b.agg.material)
+                .map(|m| m.albedo)
+                .unwrap_or([0.5, 0.5, 0.5]);
+            for (p, t) in b.agg.particles.iter().zip(b.agg.temps.iter()) {
+                inst.push(GpuParticle {
+                    offset: [p.pos.x as f32, p.pos.y as f32, p.pos.z as f32],
+                    u: 0.0,
+                    vel: [p.vel.x as f32, p.vel.y as f32, p.vel.z as f32],
+                    resting: 0.0,
+                    color,
+                    material: b.agg.material as f32,
+                    emission: crate::emission::incandescence(*t),
+                    rho: 0.0,
+                    radius: b.part_half as f32,
+                    _p0: 0.0,
+                    _p1: 0.0,
+                    _p2: 0.0,
+                });
+            }
+        }
         for m in self.sim.meteors() {
             inst.push(GpuParticle {
                 offset: m.pos.to_array(),
@@ -785,6 +825,9 @@ impl Ground {
                 _p0: 0.0, _p1: 0.0, _p2: 0.0,
             });
         }
+        // The instance buffer is sized for `max_particles`; bodies and meteors ride in the same buffer,
+        // so cap the total or a full debris field would write past the allocation.
+        inst.truncate(self.max_particles);
         if !inst.is_empty() {
             self.queue.write_buffer(&self.particle_instances, 0, bytemuck::cast_slice(&inst));
         }
