@@ -1,4 +1,4 @@
-// Ground-zero site materialization (docs/59), macOS host — the mac_shot pattern: HEADED Chromium
+// Ground-zero site materialization (docs/59), macOS host - the mac_shot pattern: HEADED Chromium
 // gets the real Apple Metal WebGPU adapter with zero flags (headless gets none).
 //
 // Drives the OUT-AND-BACK camera arc across the view-necessity threshold on groundzero.html and

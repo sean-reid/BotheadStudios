@@ -144,7 +144,7 @@ async function main(): Promise<void> {
       demo.load_world(worldJson);
       report("info", `loaded system world: ${world.name ?? "?"}`);
       // docs/59: a world that also declares a ground block (Ground Zero) arms the declared
-      // site — the engine's camera-driven materialization trigger watches it from then on,
+      // site - the engine's camera-driven materialization trigger watches it from then on,
       // and its state renders as an honest HUD line below.
       if ((world as { ground?: unknown }).ground) {
         try {
@@ -560,8 +560,8 @@ async function main(): Promise<void> {
       if (demo.earth_day_hours() > 0) {
         physics.push(`Earth day <b>${demo.earth_day_hours().toFixed(1)} h</b>`);
       }
-      // docs/59: the declared site's honest state — armed / materialized with its conservation
-      // audit / refused with the stated reason / folded — plus the live trigger numbers.
+      // docs/59: the declared site's honest state - armed / materialized with its conservation
+      // audit / refused with the stated reason / folded - plus the live trigger numbers.
       const siteLine = demo.site_status();
       if (siteLine) physics.push(siteLine);
       // GPU SPH impact (docs/33 stage 5): live disk provenance from the read-back particle field.

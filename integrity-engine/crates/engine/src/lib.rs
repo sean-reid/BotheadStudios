@@ -1013,7 +1013,7 @@ mod app {
         /// The declared ground-zero site (from the ground world definition), armed once the host
         /// loads it. `None` = no site declared; the trigger never fires.
         site_spec: Option<crate::site::SiteSpec>,
-        /// The bidirectional trigger — the camera's mirror of the moon-drop's
+        /// The bidirectional trigger - the camera's mirror of the moon-drop's
         /// resolution-distance crossing (one materialization pattern, docs/59).
         site_trigger: crate::site::SiteTrigger,
         site: Option<crate::site::MaterializedSite>,
@@ -2020,7 +2020,7 @@ mod app {
             Ok(())
         }
 
-        /// docs/59 — arm the declared site: load a `"ground"` world (the SAME file the ground
+        /// docs/59 - arm the declared site: load a `"ground"` world (the SAME file the ground
         /// scene runs) and derive the trigger's spec from it and the one shared body. Until this
         /// is called no site exists and the trigger never fires.
         pub fn load_site_world(&mut self, world_json: &str) -> Result<(), JsValue> {
@@ -2051,7 +2051,7 @@ mod app {
             format!("{} · camera {:.0} km / threshold {:.0} km", self.site_status, d / 1.0e3, at / 1.0e3)
         }
 
-        /// docs/59 — the per-frame site check: the camera's mirror of the moon-drop's
+        /// docs/59 - the per-frame site check: the camera's mirror of the moon-drop's
         /// resolution-distance crossing (`live_resolution_crossing`), so the engine has ONE
         /// materialization pattern. Derives the view-necessity threshold from the coarse quantum
         /// (measured from the live field when one exists, the declared celestial statement
@@ -2369,7 +2369,7 @@ mod app {
         /// the physics with an oversized step — time slows before truth breaks.
         pub fn advance(&mut self, real_dt: f64) {
             let real_dt = real_dt.clamp(0.0, 0.25); // tab-sleep / hiccup guard
-            // docs/59 — the declared site's camera trigger runs every frame, whichever machine
+            // docs/59 - the declared site's camera trigger runs every frame, whichever machine
             // owns the physics below (the SPH phases early-return out of this function).
             self.update_site(real_dt);
             // docs/42 — ADAPTIVE GPU-load control: keep each frame's encoded work inside a wall-clock budget so
@@ -2904,9 +2904,9 @@ mod app {
             let pretty_fade = crate::accretion::surface_weight(coherence, 0.55);
             self.render_blend = 1.0 - pretty_fade as f64; // particles take over as the surface loses meaning
 
-            // docs/59 — the materialized site: rebuild its instances in the lagged render frame
+            // docs/59 - the materialized site: rebuild its instances in the lagged render frame
             // (site-local particles mapped through the rotating tangent frame onto Earth-relative
-            // metres — the site rides the crust like the shell grains and the crater) and push
+            // metres - the site rides the crust like the shell grains and the crater) and push
             // its camera slot; drawn later in the pass through the ONE billboard pipeline. The
             // radial anchor is the DRAWN surface (body radius plus the raster's local elevation),
             // so the site sits on the planet the viewer actually sees; procedural-patch relief vs
@@ -3459,7 +3459,7 @@ mod app {
                         }
                     }
                 }
-                // docs/59 — the materialized site's fine matter (the declared ball and its
+                // docs/59 - the materialized site's fine matter (the declared ball and its
                 // ground patch), instanced through the SAME billboard pipeline: one particle
                 // representation, wherever fine matter comes from.
                 if site_count > 0 {

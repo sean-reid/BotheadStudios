@@ -16,9 +16,9 @@
 //! # The threshold, derived (never a declared constant)
 //!
 //! A coarse SPH particle of mass `m` at in-situ density `rho` answers for a cube of matter
-//! `s = (m/rho)^(1/3)` on a side — its share of the body, the representation's own quantum. Seen
+//! `s = (m/rho)^(1/3)` on a side - its share of the body, the representation's own quantum. Seen
 //! from distance `d` that quantum subtends `s/d` radians. The camera's angular budget is
-//! `ResolutionController::angular_resolution` (docs/49, THE one declared fidelity dial — a viewing
+//! `ResolutionController::angular_resolution` (docs/49, THE one declared fidelity dial - a viewing
 //! tolerance, not a physical quantity; no second dial is introduced here). The coarse
 //! representation stops being able to serve the view when its quantum subtends more than the
 //! budget:
@@ -31,7 +31,7 @@
 //! the crossing is exactly where the grain the camera is owed becomes finer than the grain the
 //! coarse field carries. For the shipped Earth statement (total mass over the same 2400-particle
 //! celestial resolution the space band spends, at the outermost layer's in-situ density) the
-//! threshold lands at ~9.5e8 m — inside the space band's own camera envelope, so the out-and-back
+//! threshold lands at ~9.5e8 m - inside the space band's own camera envelope, so the out-and-back
 //! demo arc (fork issue: the camera path is out-AND-back) crosses it in both directions.
 //!
 //! When a LIVE celestial SPH field exists, the quantum is MEASURED from the field's own particles
@@ -42,7 +42,7 @@
 //!
 //! [`SiteTrigger`] is a two-state machine fed the camera distance every frame. Below the threshold and
 //! coarse: it demands Materialize. Above the threshold and resolved: it demands Deresolve. A
-//! demand STANDS until the caller confirms it executed — a refused materialization (mid-event
+//! demand STANDS until the caller confirms it executed - a refused materialization (mid-event
 //! field) or a refused fold (site not settled) leaves the demand in place and the refusal on
 //! screen, honestly, rather than disarming the trigger.
 //!
@@ -54,18 +54,18 @@
 //! # What materializes today, and what is refused for later (flagged IOUs, Law V)
 //!
 //! - The declared ball plus a terrain patch of the site's own strata (the body's
-//!   `surface_strata` at the declared lat/lon — one Earth, no private column) split one rung
+//!   `surface_strata` at the declared lat/lon - one Earth, no private column) split one rung
 //!   through `refine::refine_patch` and released under its stated density bound. The patch is
 //!   PARTICLE-form matter; meshed, standable ground at the site is docs/59 item 4.
 //! - The patch budget is a declared compute statement (docs/59 names this IOU): a bowl of
 //!   ground under the site, fine region 2.2 parent-spacings across (the geometry the rung's own
-//!   tests verify), guard shell one interaction reach beyond, one rung of 13 — sized so the
+//!   tests verify), guard shell one interaction reach beyond, one rung of 13 - sized so the
 //!   one-shot relax stays around a second of compute, far inside the 2400-particle celestial
 //!   statement it rides.
 //! - The relax could not RELEASE this site's patch today: ground relief at the parents' own
 //!   resolution stalls the shifting at a measured ~5e-2 plateau (an order over the bound;
 //!   `refine::tests::a_relief_surface_stalls_into_a_prompt_stated_refusal`). The site then
-//!   carries the EXACT split with the residual stated ([`SiteRelease::Unreleased`]) — legal
+//!   carries the EXACT split with the residual stated ([`SiteRelease::Unreleased`]) - legal
 //!   only because the patch enters no dynamics yet; the release gate stands between the site
 //!   and any future stepping. The named deferred computation is a fringe-corrected density
 //!   estimate in the rung.
@@ -73,18 +73,18 @@
 //!   materialize; it needs the next rung down, exactly as recohere's sub-quantum remainder stays
 //!   particles. Stated, not smoothed over.
 //! - The ball materializes at its DECLARED initial position; the site's local dynamics (its fall,
-//!   its rest, an impact's effect on it) are the deferred computation — the fine patch does not
+//!   its rest, an impact's effect on it) are the deferred computation - the fine patch does not
 //!   enter any dynamics this milestone.
 //! - The ball's children are split EXACTLY but not relaxed, and the status says so: an isolated
 //!   sub-resolution body has no uniform coarse environment to relax against (relaxing its 13
-//!   children toward its own kernel smear in vacuum was measured divergent — the target decays
+//!   children toward its own kernel smear in vacuum was measured divergent - the target decays
 //!   to nothing as the children chase it), and the relax exists to protect entry into stiff
 //!   dynamics, which the site does not do yet. The split alone conserves by construction and is
 //!   audited like everything else.
 //! - Energy hand-down from a live celestial field lands as the smallest honest version: a
 //!   QUIESCENT field's specific internal energy is sampled at the site (mass-weighted over the
 //!   particles whose support covers it) and carried into the patch; a MID-EVENT field refuses
-//!   with the measured speeds stated ([`SiteRefusal::MidEvent`]) — the full mid-event hand-down
+//!   with the measured speeds stated ([`SiteRefusal::MidEvent`]) - the full mid-event hand-down
 //!   (velocities, gradients, the pi-scaling gate against the live crater) is the next issue's
 //!   work. Quiescence is the docs/61 law reused (`recohere::quiescent_speed`) at the coarse
 //!   field's own quantum: motion that cannot buy a one-quantum rise is sub-resolution for the
@@ -98,7 +98,7 @@ use crate::terra::world_def::{GroundSurface, World};
 use glam::{DVec3, Vec3};
 use std::fmt;
 
-/// The celestial resolution statement the site's coarse quantum is derived from — the SAME
+/// The celestial resolution statement the site's coarse quantum is derived from - the SAME
 /// 2400-particle budget `start_gpu_impact` and the live-drop hand-off spend on a planet, so "one
 /// coarse particle" means the same thing to the trigger as to the field it predicts. A compute
 /// statement, not physics (resolution is the engine's call; docs/44).
@@ -115,12 +115,12 @@ pub const SITE_PATCH_BUDGET: usize = CELESTIAL_STATEMENT;
 const FINE_RADIUS_DX: f64 = 2.2;
 
 /// The coarse guard shell extends one full interaction reach beyond the fine region: 2h = 4 dx
-/// (the engine's h = 2 dx convention), so every guard the relax consults actually exists —
+/// (the engine's h = 2 dx convention), so every guard the relax consults actually exists -
 /// an unguarded truncation is a refused configuration
 /// (`refine::tests::an_unguarded_truncation_refuses_with_a_finite_stated_error`).
 const GUARD_RADIUS_DX: f64 = FINE_RADIUS_DX + 4.0;
 
-/// The edge of the cube of matter ONE particle answers for: `(m/rho)^(1/3)` — mass and in-situ
+/// The edge of the cube of matter ONE particle answers for: `(m/rho)^(1/3)` - mass and in-situ
 /// density are the particle's own, so the quantum moves with the field, never with a constant.
 pub fn coarse_particle_extent_m(mass_kg: f64, density_kg_m3: f64) -> f64 {
     if mass_kg <= 0.0 || density_kg_m3 <= 0.0 {
@@ -148,7 +148,7 @@ pub enum SiteCrossing {
     /// The camera descended inside the threshold while the site is coarse: materialize it.
     Materialize,
     /// The camera ascended outside the threshold while the site is resolved: fold it back down
-    /// (through the docs/61 settling criterion — an unsettled site honestly stays).
+    /// (through the docs/61 settling criterion - an unsettled site honestly stays).
     Deresolve,
 }
 
@@ -168,7 +168,7 @@ impl SiteTrigger {
     }
 
     /// The per-frame check: given the camera's current distance to the site and the derived
-    /// threshold, what (if anything) must happen? Pure — call as often as the camera moves.
+    /// threshold, what (if anything) must happen? Pure - call as often as the camera moves.
     pub fn observe(&self, distance_m: f64, resolve_at_m: f64) -> Option<SiteCrossing> {
         match (self.resolved, distance_m <= resolve_at_m) {
             (false, true) => Some(SiteCrossing::Materialize),
@@ -203,16 +203,16 @@ pub struct SiteSpec {
     /// The declared surface with its strata RESOLVED from the named body at the site.
     pub surface: GroundSurface,
     pub ball: Option<SiteBall>,
-    /// The world's declared grain scale (m) — sizes the rung when no ball declares finer matter.
+    /// The world's declared grain scale (m) - sizes the rung when no ball declares finer matter.
     pub grain_m: f64,
     /// Surface gravity (m/s^2), emergent from the body (g = GM/R^2).
     pub g_ms2: f64,
-    /// The body's declared surface temperature (K) — the definition-path thermal state.
+    /// The body's declared surface temperature (K) - the definition-path thermal state.
     pub surface_t_k: f64,
     pub body_radius_m: f64,
     /// One coarse celestial particle's mass under [`CELESTIAL_STATEMENT`].
     pub coarse_mass_kg: f64,
-    /// The body's outermost layer's in-situ density — the density a coarse particle summarizing
+    /// The body's outermost layer's in-situ density - the density a coarse particle summarizing
     /// the site carries.
     pub coarse_density: f64,
 }
@@ -252,14 +252,14 @@ impl SiteSpec {
         })
     }
 
-    /// The declared-statement coarse quantum at this site — the answer while no live field exists
+    /// The declared-statement coarse quantum at this site - the answer while no live field exists
     /// to measure one.
     pub fn declared_coarse_extent_m(&self) -> f64 {
         coarse_particle_extent_m(self.coarse_mass_kg, self.coarse_density)
     }
 }
 
-/// The measured coarse quantum of a LIVE field: the largest matter share any particle carries —
+/// The measured coarse quantum of a LIVE field: the largest matter share any particle carries -
 /// the widest thing one particle answers for, biased toward resolving early (docs/44 §5).
 pub fn measured_coarse_extent_m(field: &[SphParticle]) -> f64 {
     field
@@ -272,21 +272,21 @@ pub fn measured_coarse_extent_m(field: &[SphParticle]) -> f64 {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HandDown {
     /// No live celestial field: the definition answers (u = c * T at the body's declared surface
-    /// temperature, per material — the same u = c*T law `HydroBody::particalize` uses).
+    /// temperature, per material - the same u = c*T law `HydroBody::particalize` uses).
     Declared,
     /// A quiescent live field was sampled at the site: this specific internal energy carries
     /// down, and the measured speeds that justified the sample are kept for the ledger.
     Sampled { u_j_kg: f64, peak_speed_ms: f64, quiescent_speed_ms: f64 },
 }
 
-/// Why the site said no. Every refusal renders to the HUD with its reason — a hidden
+/// Why the site said no. Every refusal renders to the HUD with its reason - a hidden
 /// smoothing-over at a representation crossing would be a fudge (Law V).
 #[derive(Clone, Debug, PartialEq)]
 pub enum SiteRefusal {
     /// The live celestial field is mid-event at the site: sampling one instant of it would freeze
     /// a shock into the ground. The full mid-event hand-down is the flagged next step.
     MidEvent { peak_speed_ms: f64, quiescent_speed_ms: f64 },
-    /// A live field exists but no particle's support covers the site — the coarse field holds no
+    /// A live field exists but no particle's support covers the site - the coarse field holds no
     /// matter there to hand down (an excavated site), and the definition would be stale.
     Uncovered,
     /// A site material has no sourced specific heat: its thermal state cannot be honestly set
@@ -312,7 +312,7 @@ impl fmt::Display for SiteRefusal {
             ),
             SiteRefusal::Uncovered => write!(
                 f,
-                "site hand-down refused: no live particle's support covers the site — the coarse \
+                "site hand-down refused: no live particle's support covers the site - the coarse \
                  field holds no matter here to hand down"
             ),
             SiteRefusal::UnsourcedHeat { material } => write!(
@@ -374,8 +374,8 @@ pub fn sample_hand_down(
 }
 
 /// How the terrain patch left the rung: released under the stated density bound, or split-only
-/// with the relax's measured plateau REPORTED (a relief surface stalls the shifting — the
-/// refine-level test documents it — and the release only gates entry into dynamics, which the
+/// with the relax's measured plateau REPORTED (a relief surface stalls the shifting - the
+/// refine-level test documents it - and the release only gates entry into dynamics, which the
 /// site defers; the residual is fidelity stated, never conservation lost).
 #[derive(Clone, Copy, Debug)]
 pub enum SiteRelease {
@@ -400,10 +400,10 @@ pub struct MaterializedSite {
     /// Children of the declared ball occupy the LAST `ball_children` entries (the ball splits
     /// after the terrain patch: an exact conserving split, unrelaxed and stated as such).
     pub ball_children: usize,
-    /// Total declared mass the parents carried in (kg) — what the fold must give back.
+    /// Total declared mass the parents carried in (kg) - what the fold must give back.
     pub declared_mass_kg: f64,
     pub hand_down: HandDown,
-    /// Radius (m) of the site's own footprint about the origin — the contamination-check region.
+    /// Radius (m) of the site's own footprint about the origin - the contamination-check region.
     pub extent_m: f64,
 }
 
@@ -438,7 +438,7 @@ pub fn materialize_site(
         Ok((idx, mats[idx].density as f64, c))
     };
     // Thermal state per material: the definition's u = c * T (the same law `particalize` uses),
-    // unless a quiescent live field handed one down — the site then carries the FIELD's state,
+    // unless a quiescent live field handed one down - the site then carries the FIELD's state,
     // because the coarse particle covering it is the current truth about this ground.
     let u_of = |c: f64| -> f32 {
         match hand {
@@ -497,12 +497,12 @@ pub fn materialize_site(
         None => 0.0,
     };
 
-    // STAGE 1 — the terrain patch: a BOWL of ground under ground zero. Coarse parents (equal
+    // STAGE 1 - the terrain patch: a BOWL of ground under ground zero. Coarse parents (equal
     // mass, one rung) fill a half-ball of the local strata; the inner [`FINE_RADIUS_DX`] sphere
     // split-relax-releases against the coarse field while the shell out to [`GUARD_RADIUS_DX`]
-    // is held as the buffer band — the exact configuration the rung's tests verify, with the
+    // is held as the buffer band - the exact configuration the rung's tests verify, with the
     // one real free surface (the vacuum above the ground) open. The ball is NOT in this field:
-    // at celestial coarseness the ball is sub-quantum — the coarse field never contained it;
+    // at celestial coarseness the ball is sub-quantum - the coarse field never contained it;
     // only the definition does.
     //
     // The lattice spacing derives from the material just under the skin at the ball column
@@ -556,7 +556,7 @@ pub fn materialize_site(
         radius: (FINE_RADIUS_DX * dx_col) as f32,
     };
     // The full rung first. When the relax STALLS (a relief surface reaches its force-balanced
-    // plateau — `refine::tests::a_relief_surface_stalls_into_a_prompt_stated_refusal`), the site
+    // plateau - `refine::tests::a_relief_surface_stalls_into_a_prompt_stated_refusal`), the site
     // falls back to the EXACT conserving split with the unreleased residual REPORTED
     // ([`SiteRelease::Unreleased`]): the release is the gate a patch must pass before entering
     // stiff dynamics, which this site does not do yet (module doc), so what is lost is fidelity
@@ -585,10 +585,10 @@ pub fn materialize_site(
         };
     let terrain = (particles, fine_start);
 
-    // STAGE 2 — the declared ball: the exact conserving split, UNRELAXED, and stated as such
+    // STAGE 2 - the declared ball: the exact conserving split, UNRELAXED, and stated as such
     // (module doc): an isolated sub-resolution body has no uniform coarse environment to relax
-    // against — relaxing its children toward its own kernel smear in vacuum was measured
-    // divergent — and the site's fine patch enters no dynamics this milestone, which is what
+    // against - relaxing its children toward its own kernel smear in vacuum was measured
+    // divergent - and the site's fine patch enters no dynamics this milestone, which is what
     // the relax exists to protect. The split alone is conservation by construction, audited.
     let (mut particles, fine_start) = terrain;
     let mut ball_children = 0usize;
@@ -639,7 +639,7 @@ pub fn materialize_site(
     })
 }
 
-/// The stratum index at voxel height `y_v` in a column whose ground top is `top_v` — the SAME
+/// The stratum index at voxel height `y_v` in a column whose ground top is `top_v` - the SAME
 /// column law as `world::generate_from` (skin follows the top; deeper band bottoms are level
 /// planes walked down from the valley floor), mirrored here because the space band has no voxel
 /// store to ask. Pinned against the generated world by
@@ -669,7 +669,7 @@ fn stratum_at(surface: &GroundSurface, top_v: f64, y_v: f64) -> usize {
     n - 1
 }
 
-/// The site field's own peak speed (m/s) — what the caller feeds the settle gauge each step.
+/// The site field's own peak speed (m/s) - what the caller feeds the settle gauge each step.
 pub fn site_peak_speed(site: &MaterializedSite) -> f32 {
     site.particles
         .iter()
@@ -677,7 +677,7 @@ pub fn site_peak_speed(site: &MaterializedSite) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// **Fold the site back into the world definition's summary** — the ascending crossing, gated by
+/// **Fold the site back into the world definition's summary** - the ascending crossing, gated by
 /// the docs/61 criterion: the ONE settle gauge must show a sustained quiet t_q, or the site
 /// honestly stays resolved. On success the caller drops the particles; the report carries the
 /// measured totals so the crossing is audited, not assumed.
@@ -733,7 +733,7 @@ mod tests {
             (d * theta - s).abs() <= s * 1.0e-12,
             "at the threshold the quantum subtends exactly the budget"
         );
-        // 9.5e5 m over the 1 mrad budget: ~9.5e8 m — inside the space band's camera envelope.
+        // 9.5e5 m over the 1 mrad budget: ~9.5e8 m - inside the space band's camera envelope.
         assert!((8.0e8..1.2e9).contains(&d), "threshold ~9.5e8 m, got {d:.3e}");
 
         // One rung finer (mass / 13) resolves closer by 13^(1/3).
@@ -788,13 +788,13 @@ mod tests {
         assert!(!t.is_resolved());
         assert_eq!(t.observe(1.2e9, at), None, "folded and outside: armed, silent");
 
-        // Re-armed: the second descent fires again — the out-and-back arc.
+        // Re-armed: the second descent fires again - the out-and-back arc.
         assert_eq!(t.observe(0.9e9, at), Some(SiteCrossing::Materialize));
     }
 
     /// **The materialized site conserves through the refine audit.** The shipped ground world's
     /// ball and patch, built from the definition alone, split-relax-released with the ledger
-    /// checked — mass, momentum, kinetic and internal energy to f32 rounding, angular momentum
+    /// checked - mass, momentum, kinetic and internal energy to f32 rounding, angular momentum
     /// within the relax's own stated bound, density released under the stated bound, and the
     /// budget respected.
     #[test]
@@ -838,7 +838,7 @@ mod tests {
             "the ball's children cluster at the site, not scattered"
         );
 
-        // The patch children come from the site's own strata — every material is one the strata
+        // The patch children come from the site's own strata - every material is one the strata
         // declare, and at this land site the top parents are the body's own crust (basalt),
         // because the 1 m grass skin is sub-quantum at this rung (module doc).
         let strata_idx: Vec<u32> = spec
@@ -880,7 +880,7 @@ mod tests {
         let am_drift = (l.after_relax.angular_momentum - l.after_split.angular_momentum).length();
         assert!(am_drift <= l.relax_am_bound * (1.0 + 1.0e-6) + 1.0e-9);
         // The release state is HONEST either way: released under the bound, or the exact split
-        // with the stalled residual stated (this site's relief stalls the relax today — the
+        // with the stalled residual stated (this site's relief stalls the relax today - the
         // refine-level test pins that behaviour; if the rung improves, Released is fine too).
         let release_line = match site.release {
             SiteRelease::Released(r) => {
@@ -929,7 +929,7 @@ mod tests {
         let site = materialize_site(&spec, &HandDown::Declared, &mats)
             .expect("the declared site must materialize");
 
-        // Every patch child sits in the material the generated world holds at its depth — the
+        // Every patch child sits in the material the generated world holds at its depth - the
         // parent's centre depth decides identity, so compare against the band the centre is in,
         // skipping children within one child-extent of a band boundary (rounding differs there).
         let patch = &site.particles[site.fine_start..site.particles.len() - site.ball_children];
@@ -995,7 +995,7 @@ mod tests {
             other => panic!("a quiet field must sample, got {other:?}"),
         }
 
-        // Mid-event: bulk motion removed, residual 6 km/s over v_q — refused, reason stated.
+        // Mid-event: bulk motion removed, residual 6 km/s over v_q - refused, reason stated.
         let hot = vec![mk([6000.0, 0.0, 0.0], 2.0e5), mk([-6000.0, 0.0, 0.0], 2.0e5)];
         match sample_hand_down(&hot, site, g) {
             Err(r @ SiteRefusal::MidEvent { .. }) => {
@@ -1036,7 +1036,7 @@ mod tests {
         let site = materialize_site(&spec, &HandDown::Declared, &mats).expect("materializes");
         let g = spec.g_ms2 as f32;
 
-        // Fresh gauge: no sustained quiet yet — the fold refuses, honestly.
+        // Fresh gauge: no sustained quiet yet - the fold refuses, honestly.
         let mut gauge = SettleGauge::new();
         match fold_site(&site, &gauge, g) {
             Err(r @ SiteRefusal::NotSettled { .. }) => {

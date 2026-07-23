@@ -117,7 +117,7 @@ pub const SPLIT_CHILD_H_OVER_H: f32 = 0.7915;
 /// before the patch may enter the dynamics. In the interior (target ~ rho0) that is the plain
 /// relative error; at a FREE SURFACE, where the coarse field's own kernel decays toward vacuum,
 /// the denominator floors at the matter's declared density so the criterion stays meaningful
-/// (a plain relative error diverges there — the first consumer's slab geometry measured it).
+/// (a plain relative error diverges there - the first consumer's slab geometry measured it).
 /// A bound, not an iteration count: shifting continues exactly until the worst child is inside
 /// it. Half a percent is an order below the raw split blip the native tests measure (7.5e-2 on
 /// a uniform basalt field, 9.5e-2 across a basalt/iron interface) and is the stated density
@@ -148,7 +148,7 @@ const RELAX_MAX_ITERS: usize = 5000;
 /// force-balanced fixed point short of the bound (measured on relief surfaces:
 /// `a_relief_surface_stalls_into_a_prompt_stated_refusal`) and grinding on only delays the same
 /// refusal. Solver guards like [`RELAX_ZETA`]: they may change how fast an answer arrives, never
-/// which patches release — the thresholds are set an order below the slowest window of the
+/// which patches release - the thresholds are set an order below the slowest window of the
 /// slowest RELEASING run in the suite (the basalt/iron interface, whose flattest 200-iteration
 /// stretch still improves a few percent), while a true plateau improves by ~nothing.
 const RELAX_STALL_WINDOW: usize = 200;
@@ -461,7 +461,7 @@ pub fn refine_patch(field: &[SphParticle], region: &Region) -> Result<Refined, R
         // The target is a FIELD: the coarse density interpolated at each child's current site.
         // The error is denominated by max(target, the particle's own in-situ density): identical
         // to a plain relative error in the interior (target ~ rho0 there), and BOUNDED at a free
-        // surface, where the coarse field's own kernel decays toward zero — a child at that
+        // surface, where the coarse field's own kernel decays toward zero - a child at that
         // fringe otherwise divides by a vanishing target and the criterion reads infinite
         // (measured by `relax_releases_a_free_floating_slab`, the first consumer's geometry).
         // No new constant: the floor is the density the particle itself declares its matter has.
@@ -988,10 +988,10 @@ mod tests {
     }
 
     /// **A patch with a FREE SURFACE releases too.** The first production consumer (the docs/59
-    /// site) splits a ground slab whose top is vacuum — no guard band exists above it, because
+    /// site) splits a ground slab whose top is vacuum - no guard band exists above it, because
     /// there IS no matter above it. The rung's release criterion must be meaningful there: a
     /// child near the surface sits where the coarse field's own kernel decays toward zero, and
-    /// an error RELATIVE TO THAT TARGET alone diverges (measured: `achieved: inf` — a child
+    /// an error RELATIVE TO THAT TARGET alone diverges (measured: `achieved: inf` - a child
     /// shifted past the fringe divides by a vanishing target). The criterion is therefore
     /// denominated by `max(target, the particle's own in-situ density)`: identical in the
     /// interior (where target ~ rho0), bounded at the fringe, no new constant.
@@ -1035,7 +1035,7 @@ mod tests {
     }
 
     /// **An UNGUARDED truncation refuses with a finite, stated error.** Splitting a whole finite
-    /// parent set (no guards on any side) is not a legal refinement configuration — the
+    /// parent set (no guards on any side) is not a legal refinement configuration - the
     /// buffer-shell discipline exists precisely because a fine patch needs coarse matter to
     /// relax against. With the error denominated by the target alone this configuration
     /// diverged to a meaningless infinity (fringe children chase a target that decays to
@@ -1074,7 +1074,7 @@ mod tests {
                 assert!(achieved < 1.0, "fringe errors stay bounded by the matter's own density");
             }
             Ok(r) => {
-                // If the flow ever converges here that is fine too — but it must be under the
+                // If the flow ever converges here that is fine too - but it must be under the
                 // bound, not a silent release.
                 assert!(r.relax.released_max_density_error <= RELEASE_DENSITY_ERROR);
             }
@@ -1083,7 +1083,7 @@ mod tests {
     }
 
     /// **A RELIEF surface stalls, and the stall is a fast, stated refusal.** Columns whose tops
-    /// carry per-column vertical offsets (ground relief at the parents' own resolution — the
+    /// carry per-column vertical offsets (ground relief at the parents' own resolution - the
     /// docs/59 site's real geometry) reach a force-balanced fixed point of the shifting at
     /// ~5e-2, an order above the release bound: near a rough free surface the target (read at
     /// the child's h) and the children's own sum (at theirs) disagree by a smoothing-scale
@@ -1123,7 +1123,7 @@ mod tests {
                 );
             }
             Ok(r) => {
-                // If a better relax ever releases relief, that closes the IOU — but only under
+                // If a better relax ever releases relief, that closes the IOU - but only under
                 // the bound, never silently.
                 assert!(r.relax.released_max_density_error <= RELEASE_DENSITY_ERROR);
             }
