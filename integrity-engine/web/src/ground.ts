@@ -73,6 +73,14 @@ async function main() {
   // of metres of eye height), so it crosses the patch in a few seconds rather than crawling or teleporting.
   const WALK_STEP = 0.8;
   let yaw = 0.6, pitch = -0.25, zoom = 1.0;
+  // THE pan path (one per scene): the eye translates laterally in the view plane, under the same
+  // movement law as walking (the matter shell still keeps it out of the ground). Deltas arrive in
+  // CSS pixels; the engine scales in its own device-pixel grid, so convert by the canvas's dpr.
+  // Every pan gesture (shift-drag, middle-drag, shift+scroll, horizontal scroll) lands here.
+  const pan = (dxPx: number, dyPx: number) => {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    g.pan_view(dxPx * dpr, dyPx * dpr);
+  };
   const cam = attachCameraInput(
     canvas,
     (dyaw, dpitch) => {
@@ -80,22 +88,20 @@ async function main() {
       pitch = Math.max(-1.4, Math.min(0.4, pitch + dpitch));
       g.set_orbit(yaw, pitch, zoom);
     },
-    {
-      // PAN (shift-drag or middle-drag): the same gesture as every other scene, expressed in this
-      // free-fly rig: the eye translates laterally in the view plane, under the same movement law
-      // as walking (the matter shell still keeps it out of the ground). Deltas arrive in CSS
-      // pixels; the engine scales in its own device-pixel grid, so convert by the canvas's dpr.
-      onPan: (dx, dy) => {
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
-        g.pan_view(dx * dpr, dy * dpr);
-      },
-    },
+    { onPan: pan },
   );
-  // Wheel dollies the camera along its look direction — the same free movement as dragging forward,
-  // just faster. No zoom clamp to get stuck against.
+  // Wheel: bare vertical scroll dollies the camera along its look direction, the same free
+  // movement as dragging forward, just faster; no zoom clamp to get stuck against. Shift+scroll
+  // and the horizontal wheel axis are trackpad pan: they feed the SAME pan path as the drag,
+  // with the sign of a grab (the world follows the fingers).
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
-    g.walk(-Math.sign(e.deltaY) * WALK_STEP * 6);
+    if (e.shiftKey) {
+      pan(-e.deltaX, -e.deltaY);
+      return;
+    }
+    if (e.deltaX !== 0) pan(-e.deltaX, 0);
+    if (e.deltaY !== 0) g.walk(-Math.sign(e.deltaY) * WALK_STEP * 6);
   }, { passive: false });
   g.set_orbit(yaw, pitch, zoom);
 
@@ -181,7 +187,7 @@ async function main() {
         timeScale: 1,
         fps,
         metersPerPixel: 0,
-        controls: `${CAMERA_HINT} · shift-drag or middle-drag to pan · wheel zoom · <b>M</b> or the button drops a meteor`,
+        controls: `${CAMERA_HINT} · shift-drag, middle-drag or shift+scroll to pan · wheel zoom · <b>M</b> or the button drops a meteor`,
       });
     }
     requestAnimationFrame(frame);

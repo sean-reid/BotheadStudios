@@ -381,6 +381,17 @@ async function main(): Promise<void> {
     // This band's camera is anchored to the focus BODY (it frames Earth, or the Moon), so "forward" is a
     // dolly toward what you are looking at rather than free flight. Same gesture, same meaning — move
     // toward what is in front of you — expressed in the rig this scene actually has.
+    // THE pan path (one per scene): slide the look target off the focused body, so the
+    // debris disk or an off-centre framing can be composed. The offset lives in the engine,
+    // in the focused body's frame, so the framing rides the body's orbital motion; the
+    // Earth/Luna focus buttons snap it back. Deltas arrive in CSS pixels; the engine pans in
+    // its own device-pixel grid, so scale by the same dpr the canvas is sized with. Every pan
+    // gesture (shift-drag, middle-drag, shift+scroll, horizontal scroll) lands here.
+    const pan = (dxPx: number, dyPx: number) => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      demo.pan_view(dxPx * dpr, dyPx * dpr);
+      userInteracted = true;
+    };
     const camInput = attachCameraInput(
       canvas,
       (dyaw, dpitch) => {
@@ -388,18 +399,7 @@ async function main(): Promise<void> {
         cam.pitch = Math.max(-1.4, Math.min(1.4, cam.pitch + dpitch));
         userInteracted = true;
       },
-      {
-        // PAN (shift-drag or middle-drag): slide the look target off the focused body, so the
-        // debris disk or an off-centre framing can be composed. The offset lives in the engine,
-        // in the focused body's frame, so the framing rides the body's orbital motion; the
-        // Earth/Luna focus buttons snap it back. Deltas arrive in CSS pixels; the engine pans in
-        // its own device-pixel grid, so scale by the same dpr the canvas is sized with.
-        onPan: (dx, dy) => {
-          const dpr = Math.min(window.devicePixelRatio || 1, 2);
-          demo.pan_view(dx * dpr, dy * dpr);
-          userInteracted = true;
-        },
-      },
+      { onPan: pan },
     );
 
     // Multi-touch pinch-zoom stays with the scene (it is not part of the shared look/move grammar).
@@ -426,10 +426,20 @@ async function main(): Promise<void> {
       "wheel",
       (e) => {
         e.preventDefault();
-        cam.zoom *= Math.exp(e.deltaY * 0.001);
-        cam.zoom = Math.max(0.05, Math.min(6, cam.zoom));
-        followMoon = false; // manual zoom takes the camera over
-        userInteracted = true;
+        // Shift+scroll and the horizontal wheel axis are trackpad pan: the SAME pan path as the
+        // drag, with the sign of a grab (the world follows the fingers). Bare vertical scroll
+        // stays zoom.
+        if (e.shiftKey) {
+          pan(-e.deltaX, -e.deltaY);
+          return;
+        }
+        if (e.deltaX !== 0) pan(-e.deltaX, 0);
+        if (e.deltaY !== 0) {
+          cam.zoom *= Math.exp(e.deltaY * 0.001);
+          cam.zoom = Math.max(0.05, Math.min(6, cam.zoom));
+          followMoon = false; // manual zoom takes the camera over
+          userInteracted = true;
+        }
       },
       { passive: false },
     );
@@ -553,7 +563,7 @@ async function main(): Promise<void> {
         timeScale: demo.time_scale_value(),
         fps,
         metersPerPixel: demo.meters_per_pixel(),
-        controls: `${CAMERA_HINT} · shift-drag or middle-drag to pan · pinch / wheel zoom · buttons ↖`,
+        controls: `${CAMERA_HINT} · shift-drag, middle-drag or shift+scroll to pan · pinch / wheel zoom · buttons ↖`,
         events,
       });
     };
