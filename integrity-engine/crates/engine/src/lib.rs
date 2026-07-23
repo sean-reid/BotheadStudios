@@ -1035,6 +1035,20 @@ mod app {
         /// derived view-necessity threshold (both metres, updated every `advance`).
         site_dist_m: f64,
         site_resolve_at_m: f64,
+        // --- docs/59 "The hand-down, made concrete": the mid-event boundary hand-down. ---
+        /// Counts coarse-field readbacks, so the guard band re-samples once per COARSE step
+        /// (each new snapshot), never redundantly per render frame.
+        sph_snapshot_gen: u64,
+        /// The snapshot generation the guard band last re-sampled.
+        site_sampled_gen: u64,
+        /// The event window the audit ledger books: boundary state at open, latest, and peak,
+        /// so what arrived at the site is a measured delta on the HUD.
+        site_window: crate::site::EventWindow,
+        /// The pi-scaling prediction, frozen from the MEASURED contact state (rim metres,
+        /// contact speed m/s) the moment the impact direction freezes. `None` until contact.
+        pi_prediction: Option<(f64, f64)>,
+        /// The latest pi-gate readout (measured rim vs prediction, or the stated refusal).
+        pi_line: String,
     }
 
     /// Earth rendered as a shell of particles (the honest low-res look, docs/15): a smooth sphere is a
@@ -1362,6 +1376,11 @@ mod app {
                 site_cam,
                 site_dist_m: 0.0,
                 site_resolve_at_m: 0.0,
+                sph_snapshot_gen: 0,
+                site_sampled_gen: 0,
+                site_window: crate::site::EventWindow::default(),
+                pi_prediction: None,
+                pi_line: String::new(),
             })
         }
 
@@ -2023,20 +2042,65 @@ mod app {
         /// docs/59 - arm the declared site: load a `"ground"` world (the SAME file the ground
         /// scene runs) and derive the trigger's spec from it and the one shared body. Until this
         /// is called no site exists and the trigger never fires.
+        ///
+        /// A DECLARED site then PRE-RESOLVES right here, at load, before any event exists
+        /// (docs/59 "The hand-down, made concrete", decision 1): no code hands off state
+        /// mid-shock, so refinement happens ahead of where the shock will arrive, and a site
+        /// that wants to witness an event exists before it. The descent trigger stays armed as
+        /// the general path - and the only path when this pre-resolve refuses (a mid-event
+        /// load refuses with the measured speeds, exactly like a mid-event descent).
         pub fn load_site_world(&mut self, world_json: &str) -> Result<(), JsValue> {
             let w = crate::terra::world_def::World::parse(world_json)
                 .map_err(|e| JsValue::from_str(&e))?;
             let spec = crate::site::SiteSpec::from_ground_world(&w)
                 .map_err(|e| JsValue::from_str(&e))?;
-            self.site_status = format!(
-                "site armed at ({:.0}, {:.0}): descend inside the view threshold to materialize",
-                spec.lat_deg, spec.lon_deg
-            );
-            self.site_spec = Some(spec);
             self.site_trigger = crate::site::SiteTrigger::new();
             self.site = None;
             self.site_buf = None;
             self.site_refused = false;
+            self.site_window.reset();
+            self.site_sampled_gen = self.sph_snapshot_gen;
+            self.pi_prediction = None;
+            self.pi_line.clear();
+            // The hand-down at load: the definition answers when no live field exists; a live
+            // field is sampled through the one law (quiescent samples, mid-event refuses).
+            let live = self.sph_active
+                && matches!(self.sph_phase, SphPhase::Dynamics)
+                && !self.sph_snapshot.is_empty();
+            let hand = if live {
+                let site_dir = crate::geo::dir_from_lat_lon(spec.lat_deg, spec.lon_deg);
+                let r_p = spec.body_radius_m;
+                match crate::site::sample_hand_down(&self.sph_snapshot, site_dir * r_p, spec.g_ms2)
+                {
+                    Ok(h) => Some(h),
+                    Err(r) => {
+                        self.site_status = format!(
+                            "site armed at ({:.0}, {:.0}); pre-resolve refused: {r}",
+                            spec.lat_deg, spec.lon_deg
+                        );
+                        self.site_spec = Some(spec);
+                        return Ok(());
+                    }
+                }
+            } else {
+                Some(crate::site::HandDown::Declared)
+            };
+            match crate::site::materialize_site(&spec, &hand.expect("set above"), &self.mats) {
+                Ok(site) => {
+                    self.site_trigger.confirm(crate::site::SiteCrossing::Materialize);
+                    self.site_gauge.reset();
+                    self.site_status =
+                        format!("{} · pre-resolved at load, before any event", site_audit_line(&site));
+                    self.site = Some(site);
+                }
+                Err(r) => {
+                    self.site_status = format!(
+                        "site armed at ({:.0}, {:.0}); pre-resolve refused: {r}",
+                        spec.lat_deg, spec.lon_deg
+                    );
+                }
+            }
+            self.site_spec = Some(spec);
             Ok(())
         }
 
@@ -2048,7 +2112,22 @@ mod app {
                 return String::new();
             }
             let (d, at) = (self.site_dist_m, self.site_resolve_at_m);
-            format!("{} · camera {:.0} km / threshold {:.0} km", self.site_status, d / 1.0e3, at / 1.0e3)
+            let mut s = format!(
+                "{} · camera {:.0} km / threshold {:.0} km",
+                self.site_status,
+                d / 1.0e3,
+                at / 1.0e3
+            );
+            // The event window's book and the pi-gate readout ride the same honest line.
+            if self.site_window.is_open() {
+                s.push_str(" · ");
+                s.push_str(&self.site_window.hud_line());
+            }
+            if !self.pi_line.is_empty() {
+                s.push_str(" · ");
+                s.push_str(&self.pi_line);
+            }
+            s
         }
 
         /// docs/59 - the per-frame site check: the camera's mirror of the moon-drop's
@@ -2091,8 +2170,60 @@ mod app {
             self.site_dist_m = dist;
             self.site_resolve_at_m = resolve_at;
 
-            if let Some(site) = self.site.as_ref() {
-                // Feed the docs/61 gauge the site's own peak speed (static this milestone; the
+            if let Some(site) = self.site.as_mut() {
+                // docs/59 decision 2 - the mid-event boundary hand-down: while a live event
+                // runs, the guard band re-samples the coarse field once per COARSE step (each
+                // new readback), so the guards ARE the coarse field at the boundary and the
+                // impact's energy arrives at the site as real boundary state, booked by the
+                // event window. Ownership stays single: guards mirror state, never matter.
+                // (The tangent frame co-rotates with the crust while the coarse field does
+                // not spin; the omega-cross-r difference, under ~0.5 km/s, is sub-resolution
+                // against the coarse quantum's own quiescent speed of several km/s.)
+                if live && self.site_sampled_gen != self.sph_snapshot_gen {
+                    self.site_sampled_gen = self.sph_snapshot_gen;
+                    let (up, north, east) =
+                        crate::geo::tangent_frame(spec.lat_deg, spec.lon_deg);
+                    let frame = crate::site::SiteFrame {
+                        origin_rel_m: site_dir * r_p,
+                        east: spin_rot * east,
+                        up: spin_rot * up,
+                        north: spin_rot * north,
+                    };
+                    let state =
+                        crate::site::resample_guards(site, &self.sph_snapshot, &frame);
+                    self.site_window.book(state);
+                    // The pi-scaling cross-check (docs/59): once contact froze the impact
+                    // direction and the measured-state prediction, read the crater off the
+                    // coarse field at the field's own quantum and gate it - or carry the
+                    // stated refusal when the quantum cannot hold a verdict.
+                    if let (Some(dir), Some((rim_pred, speed))) =
+                        (self.gpu_impact_site, self.pi_prediction)
+                    {
+                        self.pi_line = match crate::refine::measure_crater_rim(
+                            &self.sph_snapshot,
+                            dir,
+                            r_p,
+                            extent,
+                        ) {
+                            Ok(m) => format!(
+                                "pi gate ({}): rim {:.0} km measured at the {:.0} km quantum \
+                                 vs {:.0} km predicted from the {:.1} km/s contact: {}",
+                                crate::refine::HARD_ROCK.name,
+                                m.rim_radius_m / 1.0e3,
+                                extent / 1.0e3,
+                                rim_pred / 1.0e3,
+                                speed / 1.0e3,
+                                crate::refine::pi_scaling_gate(m.rim_radius_m, rim_pred, r_p)
+                            ),
+                            Err(r) => {
+                                format!("pi gate ({}): {r}", crate::refine::HARD_ROCK.name)
+                            }
+                        };
+                    }
+                }
+                let site = self.site.as_ref().expect("checked above");
+                // Feed the docs/61 gauge the site's own peak speed (the boundary now carries
+                // the field's speeds mid-event, so a hot site honestly refuses to fold; the
                 // gauge is the law, not a shortcut past it).
                 self.site_gauge.observe(
                     crate::site::site_peak_speed(site),
@@ -2254,6 +2385,10 @@ mod app {
             self.sph_live_drop = None; // this is the DECLARED path: the geometry is the canonical approach
             self.gpu_impact_site = None; // no crater until Theia makes contact (docs/42 Phase 2)
             self.gpu_crater_frac = 0.0;
+            self.site_window.reset(); // a new event opens its own boundary window (docs/59)
+            self.site_sampled_gen = self.sph_snapshot_gen;
+            self.pi_prediction = None;
+            self.pi_line.clear();
             self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
             self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
@@ -2317,6 +2452,10 @@ mod app {
             self.sph_live_drop = Some(i);
             self.gpu_impact_site = None;
             self.gpu_crater_frac = 0.0;
+            self.site_window.reset(); // a new event opens its own boundary window (docs/59)
+            self.site_sampled_gen = self.sph_snapshot_gen;
+            self.pi_prediction = None;
+            self.pi_line.clear();
             self.sph_substeps = 6;
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
             self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
@@ -2568,6 +2707,9 @@ mod app {
                             self.queue.submit(std::iter::once(enc.finish()));
                             if let Some(snap) = sph.take_readback() {
                                 self.sph_snapshot = snap;
+                                // One coarse step the CPU can see: the guard-band resample
+                                // and the pi-gate read key off this (docs/59).
+                                self.sph_snapshot_gen += 1;
                             }
                             sph.begin_readback(&self.device, &self.queue);
                         }
@@ -3050,15 +3192,44 @@ mod app {
             // the shell grains, so the `hidden` test carves the crust exactly where Theia struck.
             if self.sph_active && !self.sph_snapshot.is_empty() {
                 let (mut ec, mut me, mut tc, mut mt) = (glam::DVec3::ZERO, 0.0f64, glam::DVec3::ZERO, 0.0f64);
+                let (mut ev, mut tv) = (glam::DVec3::ZERO, glam::DVec3::ZERO);
                 for p in &self.sph_snapshot {
                     let pos = glam::DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+                    let vel = glam::DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
                     let m = p.mass as f64;
-                    if p.prov == 0 { ec += pos * m; me += m; } else { tc += pos * m; mt += m; }
+                    if p.prov == 0 { ec += pos * m; me += m; ev += vel * m; } else { tc += pos * m; mt += m; tv += vel * m; }
                 }
                 if me > 0.0 && mt > 0.0 {
                     let (ec, tc) = (ec / me, tc / mt);
                     if self.gpu_impact_site.is_none() && (tc - ec).length() < 1.3e7 {
                         self.gpu_impact_site = (tc - ec).try_normalize(); // contact ≈ r_e + r_t (sub-scale)
+                        // Freeze the pi-scaling prediction from the MEASURED contact state
+                        // (docs/59): the barycentric closing speed the field actually carries,
+                        // the impactor's measured particle mass over its declared radius, and
+                        // the site body's own outer-layer density and surface gravity. Only a
+                        // world with a declared site runs the cross-check (the gate reads the
+                        // site HUD).
+                        if let Some(spec) = self.site_spec.as_ref() {
+                            let speed = (tv / mt - ev / me).length();
+                            let a = self.impactor_radius;
+                            if speed > 0.0 && a > 0.0 {
+                                let s = crate::refine::ImpactSpec {
+                                    impactor_radius_m: a,
+                                    impactor_density: mt
+                                        / (4.0 / 3.0 * std::f64::consts::PI * a.powi(3)),
+                                    speed_ms: speed,
+                                    target_density: spec.coarse_density,
+                                    gravity: spec.g_ms2,
+                                };
+                                self.pi_prediction = Some((
+                                    crate::refine::rim_radius_gravity_m(
+                                        &s,
+                                        &crate::refine::HARD_ROCK,
+                                    ),
+                                    speed,
+                                ));
+                            }
+                        }
                     }
                     if self.gpu_impact_site.is_some() {
                         self.gpu_crater_frac = (self.gpu_crater_frac + 0.03).min(1.0);
