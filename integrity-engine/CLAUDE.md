@@ -138,12 +138,16 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    doing multi-agent work"; that premise has expired. Two contributors and their agents now work this
    repo, which is exactly the isolation worktrees existed for. What went wrong before was parking
    them, not the isolation.) Branch, commit, push, PR; never commit to `main` directly.
-   **Keep the branch list at `main` alone** (Robin, 2026-07-20, stated twice). One feature branch at a
-   time; merge it, delete it (`gh pr merge N --squash --admin --delete-branch`), and `git fetch --prune`.
-   Do NOT leave branches parked: this is a single-developer repo and there is nobody else's in-flight
-   work to preserve. Work worth keeping but not merging (measurements, evidence, a salvaged tool) becomes
-   an **annotated tag** `archive/<name>` whose message records WHY — same commits, `git show
-   archive/<name>`, zero branch clutter. Five such branches were retired this way on 2026-07-20.
+   **Keep the branch list at `main` alone as the steady state** (Robin, 2026-07-20, stated twice), now
+   read for two people plus their agents: feature branches are short-lived, one per in-flight task,
+   merged and deleted (`gh pr merge N --squash --delete-branch`), then `git fetch --prune`. Do NOT
+   leave branches parked; the other person's in-flight work lives in their open PRs, where it is
+   visible and reviewable, not in parked branches. Standing exception: the mirror branch of the open
+   upstream collision-unify PR (`worktree-collision-unify-sph-moondrop`) stays while that PR is open,
+   then dies like any other. Work worth keeping but not merging (measurements, evidence, a salvaged
+   tool) becomes an **annotated tag** `archive/<name>` whose message records WHY: same commits,
+   `git show archive/<name>`, zero branch clutter. Five such branches were retired this way on
+   2026-07-20.
 2. **NEVER run `cargo fmt`** — the crate isn't rustfmt-conformant; it reformats the whole tree. Edit by
    hand. (`CONTRIBUTING.md` says otherwise for outside contributors; the working rule is do-not-run.)
 3. **Test:** `bash scripts/test.sh --fast [filter]` (inner loop) · full `bash scripts/test.sh` before any
