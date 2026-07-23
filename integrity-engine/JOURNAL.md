@@ -3,6 +3,68 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-22 — collision unification groundwork: the moon-drop is a giant impact, and the EOS moves to the catalogue
+
+**Context — where "one collision path" actually stands.** The goal is one collision-resolution path on the
+GPU at every scale (Theia and a de-orbiting Moon are the same mechanic, Robin's law), retiring the CPU
+`Aggregate`. Measuring the code corrected two stale notes: **collision DETECTION is already unified** —
+`OrbitDemo::step_substep` calls `interaction::detect_swept` and its own swept-CCD loops are gone (landed
+in #75; docs/57 finding #3's "STILL OPEN" was stale). What remains is **resolution**: the moon-drop still
+materialises a CPU `Aggregate` debris cloud at surface contact (`build_impact_debris_scaled`, the O(N²)
+Barnes-Hut bottleneck), while the birth scene resolves deformable SPH bodies on the GPU at the tidal
+distance. Two answers to "a body hit Earth."
+
+**Keystone proven (native TDD).** A Moon striking Earth is a *giant impact*, not a surface crater — the
+same `gpu_sph` assembly builds it with nothing swapped but the two bodies. `a_moon_drop_builds_and_strikes_through_the_same_assembly`:
+an `ImpactDef` naming the real Earth and Moon builds two bodies of the right size/proportion, the assembled
+geometry strikes, and the reduced-mass impact energy is **~28× the Moon's gravitational binding** — the
+`ResolveBodies` regime (docs/46 §1), so routing the moon-drop onto SPH is correct physics, and the CPU
+`Aggregate` is what gets retired. **Flagged IOU pinned as a test:** SPH mass is seeded from Tillotson
+*reference* densities, not the compressed PREM densities, so the initial SPH Earth is ~64% of real mass
+(compression must emerge during relax).
+
+**Tillotson EOS parameters moved to `data/materials.json` (Robin's directive; closes the follow-up flagged
+at `eos.rs:109`).** The condensed-matter EOS parameters lived as constants in `eos.rs`; they now live in a
+`tillotson` block in the catalogue, and `eos::Tillotson` reads them via `materials::tillotson_block` (a
+cached `catalogue()`). A world is a world is a world — one place to improve a material improves every
+scene. Each block carries its own `status` (`verified`/`partial`/`provisional`) and `source`, so the
+provenance moved *with* the numbers and is queryable, not buried in a comment: basalt verified (Benz &
+Asphaug 1999), iron's compressed branch verified (Wissing & Hobbs 2020) with a provisional vapor branch,
+granite and peridotite (a dunite analog) provisional.
+
+**Sourcing then caught a real bug** ("go fetch it", Robin). The provisional peridotite set was a
+mistranscribed Marinova 2011 olivine fit — `B` was 10× too stiff (4.9e11 vs 49 GPa) and `E0` 10× too low
+(5.5e7 vs 550 MJ/kg), which is exactly the "differentiated body puffed up" symptom `eos.rs` had flagged.
+Corrected to the genuine Marinova set. Also added the sourced **water ice** (Benz & Asphaug 1999, verbatim,
+`verified`) and **water** (SWIFT/Melosh planetary-SPH set, cross-checked). The eos tests now iterate the
+catalogue, so **every** Tillotson material — including the new sets — is validated against the same
+bulk-modulus / sound-speed / monotone-compression / vapor-continuity invariants automatically. A material
+given a block becomes available through `Tillotson::for_material`. (Open: the primary Melosh 1989 book was
+not readable online, so granite and the iron vapor branch stay `provisional`/`partial`; the olivine set is
+single-source via the Stewart-group pyKO code. Peridotite is not yet used in body-building — basalt is the
+mantle there — so this is a correctness fix ahead of the layered-Earth SPH work, with no scene changed.)
+
+**Verified.** Values byte-identical to the former constants ⇒ no physics change: full suite **328/328 (+2
+new tests)**, including the slow giant-impact integration tests (`theia`, `birth_scene`,
+`dropped_moon_impact`) that exercise the EOS hardest. A new pin test (`tillotson_parameters_are_read_from_the_material_catalogue`)
+guards against a silent JSON typo. fmt untouched (hand-edited).
+
+**Geometry fork SETTLED** (Robin: *"use the real live trajectory, but inside the engine, never in scene
+definition"*). Birth and a de-orbiting Moon are different scenarios, not one question with two answers: birth
+is a *declared experiment* whose canonical approach (`v_esc 1.15`, grazing `b`, proto-Earth spin) must be
+IMPOSED — free-fall from rest gives the wrong one — while a Moon already in orbit has a real N-body
+trajectory whose live `(offset, relative-velocity, spin)` *is* the geometry; re-synthesizing it would
+overwrite measured state (Law VII) and inject proto-Earth's spin into a modern Earth (Law V). Resolved with
+ONE engine primitive `gpu_sph::assemble_from_relaxed_at(particles, target_spin, impactor_offset,
+impactor_vel, impactor_spin)`; `assemble_from_relaxed_with(def)` now computes the *canonical* geometry from
+the world file and delegates (birth **byte-identical** — the slow `theia`/`birth_scene`/`provenance` tests
+confirm). The geometry is the ENGINE's to compute from the bodies it holds; no scene declares it. A native
+test pins the live-placement path.
+
+**Next.** Wire the moon-drop: when the engine detects an orbiting body crossing its `resolution_distance`,
+enter the SphPhase machine and call `assemble_from_relaxed_at` with the live `(offset, vel, spin)` from
+`self.bodies`, then delete `moon_debris: Aggregate` + `build_impact_debris_scaled` (ledger rows 1/3/10).
+
 ## 2026-07-21 — the ground scene was an abstraction; the physics corrections, and the real target (ledger row 16)
 
 **Robin's review, and it was right on every count.** The ground scene I shipped was *"a cube of ground

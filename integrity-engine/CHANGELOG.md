@@ -9,6 +9,20 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Tillotson EOS parameters moved to the material catalogue (docs/04).** The condensed-matter equation
+  of state (`eos::Tillotson`) now reads its parameters from a `tillotson` block in `data/materials.json`
+  instead of constants baked in code — so a world is a world is a world: improving a material improves
+  every scene. Each block carries its own `status` (`verified`/`partial`/`provisional`) and `source`, so
+  provenance moved *with* the numbers and is queryable, not buried in a comment. Byte-identical values →
+  no physics change (full suite green, incl. the giant-impact integration tests). Migrated: granite,
+  basalt (verified), peridotite (dunite analog), iron (compressed branch verified). Any material given a
+  block becomes available automatically via `Tillotson::for_material`.
+- **Sourced the provisional EOS sets — and caught a 10× bug.** Peridotite's Tillotson parameters were a
+  mistranscribed Marinova 2011 olivine fit (`B` 10× too stiff, `E0` 10× too low — the "puffed up" symptom
+  flagged in `eos.rs`); corrected to the genuine set. Added sourced **water ice** (Benz & Asphaug 1999,
+  verified) and **water** (SWIFT/Melosh, provisional). The eos physics tests now iterate the catalogue, so
+  every Tillotson material is validated automatically.
+
 - **New scene: `/ground.html` (docs/55)** — a regolith ground world rendered from
   `/worlds/ground/world.json`. Every world number is in the file (size, relief, strata, camera, gravity,
   grain size); the scene supplies a camera rig, a "Drop meteor" button and three passes. Procedural
