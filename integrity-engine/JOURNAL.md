@@ -3,6 +3,37 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-22: the moon-drop routes into the SPH machine at resolution distance (issue #1)
+
+**What.** The live de-orbit now goes through the `SphPhase` machine instead of the CPU `Aggregate`
+path. A new pure helper `live_resolution_crossing(bodies, planet_radius, eligible, tidal_fraction)`
+(lib.rs, outside the wasm-only `mod app`, so it is natively tested) reports the first orbiting body
+inside `accretion::resolution_distance` of the planet plus its body-centric (offset, relative
+velocity) in f64 SI. `step_substep` runs it right after integration; on a crossing,
+`start_live_drop_sph` names the real bodies (`earth` + `moon`; every system-world moon is an
+instance of Luna), starts the same GPU relax as `start_gpu_impact` without touching the trajectory,
+and records `sph_live_drop = Some(i)`. The `Assembling` arm then calls
+`gpu_sph::assemble_from_relaxed_at` with the live (offset, rel_vel) read from `self.bodies` at
+assembly time and Earth's spin as `spin_l.z / (0.4 M R^2)`; the declared birth path keeps
+`assemble_from_relaxed_with` unchanged. The CPU swept-detect, materialization and parking passes
+skip a handed-off body: its collision belongs to the particle physics now.
+
+**Why.** The next step named in PR #80: one collision-resolution path at every scale. Birth imposes
+a canonical approach because it must; a body already in orbit HAS a trajectory, and re-synthesizing
+it would overwrite measured state. The check runs post-integration because at 118,000x one substep
+(~123 s) can carry a dropped moon from outside the threshold (Earth-Luna resolve at ~8,600 km,
+contact 8,108 km) to below contact; detection after the step plus the guards keeps the CPU path
+from materializing debris for a body the SPH is about to own. The impactor's own spin is handed
+over as 0.0: a flagged Law V IOU, deferring per-body spin angular momentum carried in the N-body
+state. The retired CPU `start_birth` keeps its Aggregate route until issue #2 retires it.
+
+**Verified.** New native test `a_body_crossing_its_resolution_distance_is_reported_with_its_live_geometry`
+(written failing first): fires on the body inside the threshold, not the one outside, with bit-exact
+body-centric geometry, and skips ineligible bodies. Full suite 331/331 green, including
+`a_dropped_moon_impact_leaves_most_debris_gravitationally_bound` (the CPU physics stays pinned until
+issue #2) and the geometry contract `assemble_at_honours_a_given_live_geometry`. Native and
+wasm32-unknown-unknown builds clean, no new warnings. fmt untouched (hand-edited).
+
 ## 2026-07-22 — collision unification groundwork: the moon-drop is a giant impact, and the EOS moves to the catalogue
 
 **Context — where "one collision path" actually stands.** The goal is one collision-resolution path on the

@@ -9,6 +9,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **A de-orbited moon now enters the SPH machine at its resolution distance.** When the engine detects
+  an orbiting body crossing `accretion::resolution_distance` of its planet (the new native-tested
+  `live_resolution_crossing` check, run right after each N-body substep), it starts the same GPU relax
+  as the birth impact and `Assembling` places the collision with `assemble_from_relaxed_at` on the LIVE
+  body-centric (offset, relative velocity) read from `self.bodies` at assembly time, never the birth
+  scene's synthesized canonical approach. Earth's spin is handed over as `spin_l.z / (0.4 M R^2)`; the
+  impactor's spin is 0.0, a flagged Law V IOU (the engine keeps no per-body spin state). The CPU
+  `Aggregate` debris path is untouched and still pinned by its tests; retiring it is issue #2.
+
 - **Tillotson EOS parameters moved to the material catalogue (docs/04).** The condensed-matter equation
   of state (`eos::Tillotson`) now reads its parameters from a `tillotson` block in `data/materials.json`
   instead of constants baked in code — so a world is a world is a world: improving a material improves
