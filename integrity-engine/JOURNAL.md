@@ -94,6 +94,43 @@ a +z-only path could never produce), and `build_far_apart_n_particalizes_and_sep
 green;
 `cargo check --target wasm32-unknown-unknown -p engine` clean. fmt untouched (hand-edited).
 
+## 2026-07-23: one deposition door, and the meteor destroys the ball on its own
+
+**What.** The docs/23 north-star sentence runs. Impact deposition in the ground world is ONE
+operator, `Simulation::deposit_event` (docs/60): an event's energy and momentum reach terrain
+voxels, cohesive-body parcels and debris grains in one walk, split by geometry and coupling alone,
+w = V·exp(−d/λ)/d² with λ the crater radius the event's own energy opens in the matter at the site
+(E/σ, the same accounting every impact already uses), each share delivered through the operator
+that owns its container (`matter::impact`, `Aggregate::deposit_impact`, `deposit_impulse` +
+`deposit_shock_heat`). Detection only picks the site: body contacts stay with the swept collision
+owner, and a ground landing is now bisected to where the trajectory crosses the shared ground
+height instead of the post-step sample (which at 500 m/s was metres underground and coupled the
+event to the wrong matter). Inside an aggregate, each parcel's fate is `damage::classify` on the
+energy density deposited in it against its material's catalogued thresholds; past Intact it holds
+no tensile bond. The ground scene's aim ray now returns the first MATTER it meets, terrain or
+parcel, so the crosshair rides the ball (gold) and a meteor aimed at it hits it; the page's HUD
+panel is un-hidden (it was being filled and never shown); the drop is 1,200 kg of iron at 17 km/s,
+an asteroid's real arrival speed.
+
+**Why.** A meteor that met the ball fed ONLY the ball; one that met the ground fed ONLY voxels;
+debris got nothing. Three answers to "the impact's energy arrives" is the docs/46 pattern and
+exactly the per-object special-casing docs/16 forbids, and it blocked the docs/23 demo: the ball
+could never die of the impact reaching it, only of a scripted branch we refuse to write. The split
+had to be physical, so it is geometry (where the matter is) and coupling (spreading + absorption
+over the crater scale); the missing shock shadowing/impedance computation is a flagged IOU in
+docs/60, named in domain terms.
+
+**Verified.** Native, red-first: `a_sufficient_meteor_shatters_the_ball_and_its_hottest_parcels_glow`
+(bonds collapse under half, rms spread doubles, peak parcel temperature emits through
+`emission::incandescence`, and the same event craters the ground beneath) and
+`an_insufficient_meteor_displaces_the_ball_and_it_survives` (momentum arrives, nine tenths of the
+bonds hold, nothing glows); `one_impact_event_reaches_the_terrain_and_the_ball_through_one_door`
+and `an_impact_event_heats_debris_grains_already_in_flight` pin the walk itself. Full suite
+346/346 green; `cargo check --target wasm32-unknown-unknown` clean. Rig-watched on the Mac
+(`web/rig/ground_ball_shatter.mjs`, headed Chromium on Metal): crosshair gold on the ball, drop,
+HUD bond count 212 to 0, shots show the struck parcels glowing gold-orange and scattering into the
+new crater. fmt untouched (hand-edited).
+
 ## 2026-07-23: the live drop particalizes each body's own matter
 
 **What.** The definition-id stopgap at the live SPH hand-off is dissolved into `particalize`
@@ -175,7 +212,6 @@ error GREW with N (6.4e-2 at 24k, 2.2e-1 on a uniform box) and differed run to r
 and bit-stable. Full native suite 338/338 green; wasm32-unknown-unknown check clean;
 `tools/gpu-bh-verify` still compiles untouched in behaviour (its Vulkan box cannot be reached from this
 Mac, noted in docs/37). fmt untouched (hand-edited).
->>>>>>> 556cd4c (docs: record the metal tree crossover and the com climb coherence finding (docs/37))
 
 ## 2026-07-22: orbital debris self-gravity dispatches to the GPU above a measured knee
 
