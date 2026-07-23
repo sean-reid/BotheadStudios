@@ -36,6 +36,26 @@ because **we are our own first customers** and pin exact engine versions in our 
   debris on an Apple M4 Max: acceleration pass 15.2 ms to 7.0 ms, full `step_block` frame 117 ms to
   78 ms; the exact sum also removes the tree's multipole error, so fidelity rises with the speed.
 
+- **The ball is matter (docs/23 step 1).** A ground world can declare solid `bodies` (material,
+  radius, position); each is built as `Aggregate::cohesive`, a bonded lattice of real particles at
+  the material's own density, with bond stiffness from its real elastic modulus (k = E*L, capped for
+  explicit stability, flagged), damping derived from its restitution, and the named planet's emergent
+  surface gravity. The body falls, rests on the terrain through the same
+  `granular::terrain_contact_resolve` every grain and the camera shell use, and renders through the
+  scene's one instanced particle path. A thrown meteor meets it through the one impact door:
+  `interaction::detect_swept` forecasts the contact and the door's reduced-mass energy and momentum
+  deposit into the body's parcels (`Aggregate::deposit_impact`), so its matter heats and recoils with
+  no ball-specific branch. The shipped ground world places a 2 m iron ball at the initial crosshair
+  point; the HUD and `run-definition` report its parcels, bonds, and height over the ground beneath
+  it.
+
+- **The camera-shell sweep no longer freezes the free-fly walk.** The swept resolve re-lerped each
+  sample against its own mutated endpoint, which contracted every no-contact move toward last
+  frame's eye by n!/n^n; any move longer than the shell left the camera frozen (wheel dolly and
+  hold-to-walk were both dead in the ground scene, only mouse-look worked). The sweep now samples
+  the fixed segment and carries the accumulated contact correction
+  (`granular::sweep_shell_resolve`), with native regression tests.
+
 - **The live moon-drop wiring reads the generic body (docs/58).** `live_resolution_crossing` takes the
   planet's index, resolved from the role the scene declared (`planet_idx`), instead of assuming the
   planet sits at `bodies[1]`; the `Approaching` separation check and the `Assembling` body-centric
