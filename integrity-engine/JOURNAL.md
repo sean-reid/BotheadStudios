@@ -3,6 +3,43 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the drop arms for the launch window, not the instant
+
+**What.** The launch-window intercept (`crates/engine/src/intercept.rs`), pure and natively
+tested: given the current N-body state, the body to drop, the planet's declared spin (day
+length and accumulated spin angle) and the declared site (lat/lon), it computes where a
+from-rest fall released at time t hits by INTEGRATING THE SCENE'S OWN LAW (`orbit::verlet_step`
+plus the swept first-contact forecast - no analytic stand-in; the Sun's tide and the planet's
+recoil bend a multi-day "radial" fall by real degrees), then solves for the next release time
+at which the site rotates under the impact azimuth, returning the window, time-to-window, fall
+duration, the solver residual and the polar plane offset timing cannot change. Wiring: on a
+world that declares a ground site, `drop_moon` ARMS this window instead of releasing; the
+countdown runs in sim seconds inside `step_substep` and the release fires itself at the nearest
+substep boundary (a stated ±dt/2 quantization); the HUD carries "DROP ARMED · window in T-...".
+A world without a site keeps the instant drop, and Reset disarms.
+
+**Why.** Drop Moon rarely hit the declared site: the ball rides a rotating Earth and the fall
+takes days of sim time, so ground zero is a moving target - correct physics, bad demo control.
+The honest fix is the one any real mission uses: never move the ball, never bend the
+trajectory; choose the release time from data the engine already holds deterministically.
+
+**Verified.** 394 native tests green (391 baseline plus 3). The closing test replays the WIRED
+release at the Ground Zero world's own 118,000x substep (~123 s), countdown quantization
+included: the contact lands 0.086 degrees of spin-axis azimuth from the site (about 10 km of
+arc at the site ring; solver's own residual 0.0003 degrees), against a stated 1-degree
+tolerance; the 44.1-degree polar offset between the fall's equatorial impact ring and the
+declared 45N site is geometry the release time cannot move, reported by the solver rather than
+bent away. A site carried half a turn about the spin axis waits 44,538 s longer - about half a
+sidereal day - for its window, with fall durations equal to 33 s over 4.836 days and the
+inertial impact azimuth drifting only 6.1 degrees (the Moon's own orbital drift over the wait):
+a later window, never a bent trajectory. Headed on the Mac (mac_shot pattern, port 7099,
+`web/rig/groundzero_window.mjs` on /groundzero.html): Drop arms with the HUD reading "DROP
+ARMED · window in T-23h 31m sim · then a 4d 18h fall to ground zero" while Luna stays on its
+orbit; at the world's own rate the release fires itself (countdown clears with no second
+input), the fall runs to contact, and the materialized site's event window books the arrival
+(boundary: 477 guards, 0 uncovered, arrived KE +3.67e12 J / IE +7.17e14 J, peak 304 m/s) with
+the pi-gate line alongside; zero console errors; screenshots viewed.
+
 ## 2026-07-23: the event reaches ground zero as boundary state, booked
 
 **What.** The hand-down design's three decisions, implemented. (1) The Ground Zero world's

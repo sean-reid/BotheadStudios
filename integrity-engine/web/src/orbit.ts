@@ -359,10 +359,17 @@ async function main(): Promise<void> {
       // used to produce debris.
       const moonWord = numMoons === 1 ? "Moon" : "Moons";
       mkBtn(`Brake ${moonWord} ½×`, () => demo.brake_moon());
-      mkBtn(`Drop ${moonWord}`, () => {
+      // On a world that declares a ground site, the engine ARMS this drop for the launch window
+      // (the release fires itself when the site rotates under the impact point; the HUD carries
+      // the countdown). A world without a site keeps the instant drop. Same button either way.
+      const dropBtn = mkBtn(`Drop ${moonWord}`, () => {
         demo.drop_moon();
         followMoon = true; // ride the descent down
       });
+      if ((world as { ground?: unknown } | null)?.ground) {
+        dropBtn.title =
+          "Arms for the launch window: releases automatically when the site rotates under the impact point";
+      }
     }
     if (birthScene) {
       // Geologic time (docs/27): retire the particle cloud, evolve the settled moonlets by the
@@ -607,6 +614,16 @@ async function main(): Promise<void> {
         events.push(tLine);
       } else if (birthScene && countdown >= 0) {
         events.push(`<b style="color:#ff8a8a; font-size:16px">IMPACT IN T−${countdown.toFixed(1)} s</b>`);
+      }
+      // The launch window (worlds that declare a site): Drop ARMS and the release fires itself
+      // when the site rotates under the fall's impact point. SIM time - the window is a sim event.
+      const windowS = demo.drop_window_s();
+      if (windowS >= 0) {
+        const fallS = Math.max(0, demo.drop_window_impact_s() - windowS);
+        events.push(
+          `<b style="color:#8ad6ff">DROP ARMED</b> · window in <b>T−${fmtSim(windowS)}</b> sim · ` +
+            `then a ${fmtSim(fallS)} fall to ground zero`,
+        );
       }
       // Scene-specific physics lines (bodies distance/speed, orbit/impact state, Earth's day).
       const physics: string[] = [
