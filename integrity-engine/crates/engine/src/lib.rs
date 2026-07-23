@@ -916,6 +916,9 @@ mod app {
         sph_active: bool,
         sph_dt: f32, // fixed integration timestep (chosen at build; WebGPU forbids the adaptive read-back)
         sph_soft: f64, // gravitational softening (for the energy diagnostic's PE term)
+        /// The material EOS TABLE the current SPH collision indexes (`SphParticle.mat` → `sph_eos[mat]`),
+        /// built once from the bodies' matter (docs/58 #7). Was a fixed `[basalt, iron]` pair; now N materials.
+        sph_eos: Vec<crate::gpu_sph::SphEos>,
         /// docs/42 browser-parity — SCHEDULED shock-dt: WebGPU forbids the per-step adaptive read-back, so the
         /// dt is stepped by SIM TIME instead — the small shock dt (`sph_dt`) resolves the collision, then after
         /// `SPH_SHOCK_WINDOW_S` we switch to the larger `sph_dt_aftermath` for the slow disk evolution (restores
@@ -1273,6 +1276,7 @@ mod app {
                 sph_dt_aftermath: 0.0,
                 sph_substeps: 6,
                 sph_snapshot: Vec::new(),
+                sph_eos: Vec::new(),
                 sph_phase: SphPhase::Dynamics,
                 sph_live_drop: None,
                 render_blend: 0.0, // pretty by default (docs/42)
@@ -2141,12 +2145,24 @@ mod app {
             // measured cure for the dispersal was proper relaxation, docs/35). `advance` runs the relax steps,
             // reads back, assembles the collision, then steps the dynamics. N is higher than the old CPU-relax
             // path could afford (GPU relax + stepping is cheap).
-            let eos = [crate::gpu_sph::SphEos::basalt(), crate::gpu_sph::SphEos::iron()];
-            let (particles, softening, relax_dt) = crate::gpu_sph::build_far_apart_from(&self.impact_def, 2400, 400);
+            // Build the bodies from their MATTER (docs/58 #7 — the ONE collision engine): particalize each
+            // and relax on the GPU. Equal particle mass across the bodies (the target sets it), so neither
+            // body's resolution biases the shared dynamics. The material EOS TABLE is kept for the assemble +
+            // dynamics uploads — the particles carry their own material as `mat`, no more [basalt, iron] pair.
+            let t_def = self.impact_def.target.definition();
+            let i_def = self.impact_def.impactor.definition();
+            let n_target = 2400usize;
+            let m_i = t_def.total_mass() / n_target as f64;
+            let n_impactor = (i_def.total_mass() / m_i).round().max(50.0) as usize;
+            let (particles, eos, softening, relax_dt) = crate::gpu_sph::build_far_apart_n(
+                &[(&t_def, n_target), (&i_def, n_impactor)],
+                self.impact_def.relax_separation,
+            );
+            self.sph_eos = eos;
             self.sph_soft = softening as f64;
             let cap = particles.len() as u32;
             let mut sph = crate::gpu_sph::GpuSph::new(&self.device, cap);
-            sph.upload(&self.queue, &particles, &eos, softening);
+            sph.upload(&self.queue, &particles, &self.sph_eos, softening);
             sph.set_dt(&self.queue, relax_dt, 0.94); // damped relaxation toward hydrostatic equilibrium
             sph.set_av(&self.queue, 0.0, 0.0); // no artificial viscosity during relax (matches the CPU relax)
             self.gpu_sph = Some(sph);
@@ -2234,14 +2250,15 @@ mod app {
             // The GPU kernel resolves the N-material matter onto its two EOS slots (basalt-like vs
             // iron-like, by reference density, in `push_body`), a flagged resolution limit of the
             // in-browser stepper; the per-particle mass, geotherm and smoothing lengths stay the
-            // matter's own.
-            let eos = [crate::gpu_sph::SphEos::basalt(), crate::gpu_sph::SphEos::iron()];
+            // matter's own. The pair is kept in `sph_eos` so the `Assembling` re-upload carries the
+            // same table the particles' `mat` indices point into.
+            self.sph_eos = vec![crate::gpu_sph::SphEos::basalt(), crate::gpu_sph::SphEos::iron()];
             let (particles, softening, relax_dt) =
                 crate::gpu_sph::far_apart_pair(&target, &impactor, far);
             self.sph_soft = softening as f64;
             let cap = particles.len() as u32;
             let mut sph = crate::gpu_sph::GpuSph::new(&self.device, cap);
-            sph.upload(&self.queue, &particles, &eos, softening);
+            sph.upload(&self.queue, &particles, &self.sph_eos, softening);
             sph.set_dt(&self.queue, relax_dt, 0.94); // damped relaxation toward hydrostatic equilibrium
             sph.set_av(&self.queue, 0.0, 0.0); // no artificial viscosity during relax
             self.gpu_sph = Some(sph);
@@ -2417,8 +2434,11 @@ mod app {
                             // Two honest geometry sources, one primitive (`assemble_from_relaxed_at`):
                             // a LIVE de-orbit hands over the trajectory the N-body actually integrated,
                             // read at assembly time; the declared birth impact keeps its imposed
-                            // canonical approach (free-fall from rest gives the wrong one).
-                            let (particles, eos, softening, dt) = match self.sph_live_drop {
+                            // canonical approach (free-fall from rest gives the wrong one). Either way
+                            // the reposition changes no materials: each particle carries its own `mat`
+                            // into `self.sph_eos`, the table kept from the relax staging, so the legacy
+                            // pair the 2-body assembly returns is ignored.
+                            let (particles, _eos, softening, dt) = match self.sph_live_drop {
                                 Some(i) => {
                                     // Body-centric f64 SI, never heliocentric (f32 collapses at 1.5e11 m).
                                     // The target is the body the scene declared as its PLANET, by role.
@@ -2450,7 +2470,7 @@ mod app {
                             self.sph_sim_t = 0.0;
                             self.sph_snapshot.clear();
                             if let Some(sph) = self.gpu_sph.as_mut() {
-                                sph.upload(&self.queue, &particles, &eos, softening);
+                                sph.upload(&self.queue, &particles, &self.sph_eos, softening);
                                 sph.set_dt(&self.queue, dt, 1.0);
                                 sph.set_av(&self.queue, 1.0, 2.0); // restore shock-capture AV for the impact
                             }

@@ -9,6 +9,16 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The declared birth impact builds through the generic engine (docs/58 item 7).**
+  `start_gpu_impact` no longer builds its bodies through the Earth/Theia-shaped
+  `build_far_apart_from` with the fixed `[basalt, iron]` pair: it particalizes each body from its
+  declared matter via `build_far_apart_n` (equal particle mass across the bodies, the target
+  setting it) and keeps the shared N-material EOS table in the new `sph_eos` field for the
+  assemble and dynamics uploads, so every particle carries its own catalogue material as `mat`.
+  The `Assembling` re-upload now reads that kept table on both the declared and the live path
+  (the live relax staging stores its two-slot pair there unchanged for now); the legacy pair the
+  two-body assembly returns is ignored. The disk geometry is unchanged, only the build.
+
 - **The GPU SPH gains N-material upload and N-body assembly (docs/58 items 4/5/7).**
   `GpuSph::upload` now takes a material EOS table (`&[SphEos]`, up to `MAX_MATERIALS` = 16 entries,
   the buffer sized to match) instead of the fixed `[basalt, iron]` pair, and `SphEos::from_tillotson`
