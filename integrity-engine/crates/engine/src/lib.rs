@@ -200,6 +200,40 @@ fn declared_body_radius(d: &crate::terra::world_def::BodyDef) -> f64 {
     d.radius_m.unwrap_or(0.0)
 }
 
+/// **The live resolution-crossing check** (issue #1, the step PR #80 named): the first orbiting body
+/// (index >= 2 in the [Sun, planet, moons…] layout) whose separation from the planet (index 1) is inside
+/// `accretion::resolution_distance` (the point where tidal stress makes "two point masses" a lie), plus
+/// its body-centric (offset, relative velocity) in f64 SI. That pair is exactly what
+/// `gpu_sph::assemble_from_relaxed_at` takes: TARGET-relative, never heliocentric (f32 collapses at
+/// 1.5e11 m). `eligible[i] == false` skips a body (already materialized, or already handed to the SPH).
+///
+/// Pure and kept OUT of the wasm-only `mod app` so it is natively tested, like the body-spec rules above.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn live_resolution_crossing(
+    bodies: &[crate::orbit::Body],
+    planet_radius_m: f64,
+    eligible: &[bool],
+    tidal_fraction: f64,
+) -> Option<(usize, glam::DVec3, glam::DVec3)> {
+    let planet = bodies.get(1)?;
+    for i in 2..bodies.len() {
+        if !eligible.get(i).copied().unwrap_or(true) {
+            continue;
+        }
+        let resolve_at = crate::accretion::resolution_distance(
+            planet.mass,
+            planet_radius_m,
+            bodies[i].mass,
+            tidal_fraction,
+        );
+        let offset = bodies[i].pos - planet.pos;
+        if offset.length() <= resolve_at {
+            return Some((i, offset, bodies[i].vel - planet.vel));
+        }
+    }
+    None
+}
+
 #[cfg(target_arch = "wasm32")]
 mod app {
     use crate::mesher::{self, Mesh, Vertex};
@@ -4533,6 +4567,61 @@ mod app {
 #[cfg(test)]
 mod tests {
     use crate::{body, gravity, materials, mesher, world};
+
+    /// **A live body crossing its resolution distance is the engine's cue to resolve it as matter**
+    /// (issue #1, the step PR #80 named): the check must report the FIRST orbiting body inside
+    /// `accretion::resolution_distance` of the planet, together with the exact body-centric
+    /// (offset, relative velocity) pair: the same f64 SI numbers `assemble_from_relaxed_at` will
+    /// receive. Body-centric, never heliocentric (f32 collapses at 1.5e11 m).
+    #[test]
+    fn a_body_crossing_its_resolution_distance_is_reported_with_its_live_geometry() {
+        use crate::orbit::Body;
+        use glam::DVec3;
+        const M_EARTH: f64 = 5.972e24;
+        const R_EARTH: f64 = 6.371e6;
+        const M_MOON: f64 = 7.342e22;
+        let f = crate::accretion::RESOLVE_TIDAL_FRACTION;
+        let resolve_at = crate::accretion::resolution_distance(M_EARTH, R_EARTH, M_MOON, f);
+        let sun = Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: 1.989e30 };
+        let earth = Body {
+            pos: DVec3::new(1.496e11, 0.0, 0.0),
+            vel: DVec3::new(0.0, 29_780.0, 0.0),
+            mass: M_EARTH,
+        };
+        // One moon just OUTSIDE the threshold, one just INSIDE: the crossing is at index 3 only.
+        let outside = Body {
+            pos: earth.pos + DVec3::new(0.0, 1.05 * resolve_at, 0.0),
+            vel: earth.vel + DVec3::new(-1022.0, 0.0, 0.0),
+            mass: M_MOON,
+        };
+        let inside = Body {
+            pos: earth.pos + DVec3::new(0.95 * resolve_at, 0.0, 0.0),
+            vel: earth.vel + DVec3::new(0.0, -3000.0, 0.0),
+            mass: M_MOON,
+        };
+        let bodies = [sun, earth, outside, inside];
+
+        let (i, offset, rel_vel) =
+            crate::live_resolution_crossing(&bodies, R_EARTH, &[true; 4], f)
+                .expect("a body inside the resolution distance must be reported");
+        assert_eq!(i, 3, "the body OUTSIDE the threshold must not fire; the one INSIDE must");
+        // EXACT equality: the pair is handed straight to the SPH assembly, so nothing may drift here.
+        assert_eq!(offset, bodies[3].pos - bodies[1].pos, "body-centric offset, bit-exact");
+        assert_eq!(rel_vel, bodies[3].vel - bodies[1].vel, "body-centric velocity, bit-exact");
+
+        // Nobody inside ⇒ no crossing (the point-mass representation is still honest).
+        assert!(
+            crate::live_resolution_crossing(&bodies[..3], R_EARTH, &[true; 3], f).is_none(),
+            "a body above the threshold is still a body"
+        );
+        // An ineligible body (already materialized, or already handed to the SPH) is skipped.
+        let mut eligible = [true; 4];
+        eligible[3] = false;
+        assert!(
+            crate::live_resolution_crossing(&bodies, R_EARTH, &eligible, f).is_none(),
+            "an ineligible body must not be reported twice"
+        );
+    }
 
     #[test]
     fn metres_per_pixel_matches_frustum_geometry() {
