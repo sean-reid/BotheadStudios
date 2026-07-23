@@ -37,10 +37,12 @@ export interface CameraInputOptions {
   /** Invert the vertical axis. */
   invertY?: boolean;
   /**
-   * PAN — **shift + left-drag, or middle-drag** translates the view target. Optional because only a
-   * scene whose camera has a movable look target (the orbit band) can honour it; scenes that supply
-   * no handler keep the plain grammar, where shift + left-button means move backward. While a pan
-   * drag is active the movement keys are not engaged, so the two meanings never fire together.
+   * PAN: **shift + left-drag, or middle-drag** translates the view sideways, one gesture in every
+   * scene, mapped to each camera's own semantics: the orbit band slides its look target off the
+   * focused body; the free-fly scenes translate laterally in the view plane through the same mover
+   * as their strafe keys. A scene that supplies no handler keeps the plain grammar, where
+   * shift + left-button means move backward. While a pan drag is active the movement keys are not
+   * engaged, so the two meanings never fire together.
    */
   onPan?: PanHandler;
 }

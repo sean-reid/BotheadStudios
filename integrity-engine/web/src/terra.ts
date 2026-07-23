@@ -129,16 +129,30 @@ async function main(): Promise<void> {
     const moveHint = ["forward", "left", "back", "right"].map((a) => keyFor(a as Action)).join("");
     const altHint = [keyFor("up"), keyFor("down")].filter(Boolean).join("/");
     const controlsHint =
-      `${moveHint ? `${moveHint} fly · ` : ""}${altHint ? `${altHint} alt · ` : ""}wheel zoom · ${CAMERA_HINT}`;
+      `${moveHint ? `${moveHint} fly · ` : ""}${altHint ? `${altHint} alt · ` : ""}wheel zoom · ` +
+      `${CAMERA_HINT} · shift-drag or middle-drag to pan`;
 
     // THE shared camera controls (camera-input.ts): right-drag / alt-drag looks, left-or-ctrl walks
     // forward, +shift reverses. Terra's own `drag_look` and `move_tangent` do the work; the gesture
     // grammar is identical to every other scene.
-    const cam = attachCameraInput(canvas, (dyaw, dpitch) => {
-      // `drag_look` takes pixel deltas; the module reports radians, so convert back through its own
-      // sensitivity rather than inventing a second constant.
-      terra.drag_look(-dyaw / 0.005, -dpitch / 0.005);
-    });
+    const cam = attachCameraInput(
+      canvas,
+      (dyaw, dpitch) => {
+        // `drag_look` takes pixel deltas; the module reports radians, so convert back through its own
+        // sensitivity rather than inventing a second constant.
+        terra.drag_look(-dyaw / 0.005, -dpitch / 0.005);
+      },
+      {
+        // PAN (shift-drag or middle-drag): the same gesture as every other scene, expressed in this
+        // camera's rig: the viewpoint slides across the surface through the same mover as the
+        // strafe keys (`pan_tangent` → `move_tangent`). Deltas arrive in CSS pixels; the engine
+        // scales in its own device-pixel grid, so convert by the canvas's dpr.
+        onPan: (dx, dy) => {
+          const dpr = Math.min(window.devicePixelRatio || 1, 2);
+          terra.pan_tangent(dx * dpr, dy * dpr);
+        },
+      },
+    );
     canvas.addEventListener(
       "wheel",
       (e) => {

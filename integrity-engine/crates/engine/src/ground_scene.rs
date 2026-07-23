@@ -301,6 +301,10 @@ fn build_particle_pipeline(
 /// up seeing under the skin.
 const NEAR_CLIP: f32 = 0.2;
 
+/// Vertical field of view (60°). One constant, used by the projection AND by the pan gesture's
+/// pixel-to-metres scale, so the two can never disagree about how much world a pixel spans.
+const FOV_Y: f32 = std::f32::consts::FRAC_PI_3;
+
 /// The ground scene: a world defined by data, rendered and made destructible.
 #[wasm_bindgen]
 pub struct Ground {
@@ -682,6 +686,31 @@ impl Ground {
         self.cam_eye += self.look_dir() * forward_m;
     }
 
+    /// Pan: translate the eye laterally in the view plane by a pointer delta in DEVICE pixels,
+    /// the same gesture the orbit band honours, expressed in this scene's free-fly rig. The eye
+    /// moves under the SAME law as `walk` (free movement; the matter shell in `eye_and_target`
+    /// keeps it out of the ground), only along the screen axes instead of the look axis.
+    ///
+    /// The scale is exact, not a feel dial: at the first matter the look ray meets (distance `d`),
+    /// one pixel of the `FOV_Y` frustum spans `2·d·tan(FOV_Y/2)/h` metres, so the terrain under
+    /// the pointer tracks it one-for-one, map-style (dragging right carries the eye left). Looking
+    /// at pure sky there is no aimed matter; the eye's height over the ground beneath it is the
+    /// nearest surface and stands in as the focal distance.
+    pub fn pan_view(&mut self, dx_px: f32, dy_px: f32) {
+        let (eye, _) = self.eye_and_target();
+        let d = self
+            .aim_first_matter()
+            .map(|(hit, _)| (hit - eye).length())
+            .unwrap_or_else(|| (eye.y - self.ground_at(eye.x, eye.z)).max(self.eye_height_m));
+        let per_px = 2.0 * d * (0.5 * FOV_Y).tan() / self.config.height.max(1) as f32;
+        let fwd = self.look_dir();
+        // Pitch is clamped short of the poles wherever it is set, so forward is never parallel to
+        // world up; the fallback only guards the degenerate zero-vector case.
+        let right = fwd.cross(Vec3::Y).normalize_or(Vec3::X);
+        let up = right.cross(fwd);
+        self.cam_eye += (right * -dx_px + up * dy_px) * per_px;
+    }
+
     /// The aim point projected to NORMALISED screen coordinates (`[x, y, on_body]`, 0..1, origin
     /// top-left) for the HUD crosshair - the first matter the camera's look ray meets, which is where
     /// a meteor will land. `on_body` is 1 when that matter is a solid body's parcel rather than the
@@ -1041,7 +1070,7 @@ impl Ground {
     fn view_proj(&self) -> (Mat4, Vec3) {
         let (eye, target) = self.eye_and_target();
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let proj = Mat4::perspective_rh(60f32.to_radians(), aspect, NEAR_CLIP, 4_000.0);
+        let proj = Mat4::perspective_rh(FOV_Y, aspect, NEAR_CLIP, 4_000.0);
         let view = Mat4::look_at_rh(eye, target, Vec3::Y);
         (proj * view, eye)
     }

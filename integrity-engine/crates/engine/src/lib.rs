@@ -3978,6 +3978,18 @@ mod app {
             self.fly.drag(dx, dy);
         }
 
+        /// Pan: slide across the surface by a pointer delta in DEVICE pixels, the same gesture the
+        /// orbit band honours, expressed in this camera's rig. The SAME mover as the strafe keys
+        /// (`FlyCamera::move_tangent`), fed metres instead of key intents: one pixel of the
+        /// `FOV_Y` frustum spans `2·alt·tan(FOV_Y/2)/h` metres of ground under a downward view, so
+        /// the globe tracks the pointer one-for-one, map-style (dragging right carries the
+        /// viewpoint west; screen y grows downward, and dragging down carries it north).
+        pub fn pan_tangent(&mut self, dx_px: f64, dy_px: f64) {
+            let m_per_px = 2.0 * self.fly.alt_m * (0.5 * crate::terra::fly_camera::FOV_Y).tan()
+                / self.config.height.max(1) as f64;
+            self.fly.move_tangent(dy_px * m_per_px, -dx_px * m_per_px, self.planet_radius);
+        }
+
         pub fn altitude_m(&self) -> f64 {
             self.fly.alt_m
         }

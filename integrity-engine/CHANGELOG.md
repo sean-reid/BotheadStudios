@@ -9,6 +9,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **One pan gesture across every scene.** Shift-drag or middle-drag now pans in the free-fly
+  scenes too, mapped to each camera's own semantics: Ground translates the eye laterally in the
+  view plane under the same free-movement law as walking (`Ground::pan_view`; the camera's matter
+  shell still keeps it out of the terrain), and Terra slides across the surface through the same
+  mover as its strafe keys (`Terra::pan_tangent` feeding `FlyCamera::move_tangent`). Both scales
+  are derived from the scene's own view geometry, one frustum height of world per viewport height
+  of drag at the aimed distance (Ground) or the current altitude (Terra), so the ground under the
+  pointer tracks it one-for-one, map-style. Controls hints on both pages name the gesture.
 - **The space scenes gained pan.** Shift-drag or middle-drag translates the look target off the
   focused body (`OrbitDemo::pan_view`). The offset is held in the frame that rides the focus body,
   so the framing follows the body's orbital motion instead of smearing against inertial space, and
