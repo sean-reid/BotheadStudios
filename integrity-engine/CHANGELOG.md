@@ -9,6 +9,8 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-23
+
 - **One pan gesture across every scene.** Shift-drag or middle-drag now pans in the free-fly
   scenes too, mapped to each camera's own semantics: Ground translates the eye laterally in the
   view plane under the same free-movement law as walking (`Ground::pan_view`; the camera's matter
