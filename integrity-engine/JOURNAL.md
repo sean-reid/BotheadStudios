@@ -3,6 +3,21 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: release v0.11.0
+
+**What.** Cut v0.11.0 per the docs/03 checklist. The `[Unreleased]` changelog items moved into a
+dated 0.11.0 section; the coordinated version files moved together (`crates/engine/Cargo.toml`,
+`web/package.json`, `Cargo.lock`); the release commit carries the `v0.11.0` tag. The milestone's
+headline: the orbital scene has one collision resolution (the CPU Aggregate debris path is
+deleted), debris self-gravity and the Barnes-Hut tree dispatch run on the GPU above their measured
+knees, and the ground scene's ball is declared matter through the one deposition door.
+
+**Why.** A completed milestone gets a `0.MINOR.0` with every version-bearing file moving in the
+same commit, so a game can pin the exact engine version and know what it holds (docs/03).
+
+**Verified.** Full native suite green before the release commit: `bash scripts/test.sh`, 379
+passed, 0 failed, 22 ignored, exit 0. Compatibility note per docs/03: wgpu stays at 24.
+
 ## 2026-07-23: the ground-zero demo is a world definition
 
 **What.** The docs/23 demo now exists as data the engine executes, not as a scene struct.
