@@ -22,6 +22,15 @@ because **we are our own first customers** and pin exact engine versions in our 
   point mass, or the un-migrated default scene) is no longer eligible for the SPH hand-off and stays
   a point mass on the CPU contact path, rather than being rebuilt from a named definition.
 
+- **The conformance ledger names its consumers, and the charter states the merge rule.** Every row
+  in docs/46's ledger now carries a consumers column: the scenes and modules that actually
+  instantiate the physics in question, each claim a grep result, with **none** written where the
+  honest answer is none (`AirField`, the voxel-to-field demotion trigger, `MAX_EJECT`, body/debris
+  coupling, the two rigid-body reps). A verified law with zero consumers stays open no matter how
+  green its tests are. The new docs/46 §7 makes that the bar for merging: new physics lands either
+  wired into at least one scene or carrying a flagged IOU naming the milestone that wires it;
+  "built and verified" counts as inventory, not done.
+
 - **Orbital debris self-gravity dispatches to the GPU above a measured knee.** The verified
   `cs_gravity_direct` direct sum (`gpu_gravity`, checked against the CPU brute-force sum) is wired
   into the live path instead of sitting dispatched-to by nothing: `Aggregate` carries an optional
