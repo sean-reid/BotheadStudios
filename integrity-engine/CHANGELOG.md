@@ -53,6 +53,24 @@ because **we are our own first customers** and pin exact engine versions in our 
   for any number of bodies. The declared birth path is unchanged: it passes its `[basalt, iron]`
   pair as a two-entry slice.
 
+- **Impacts deposit into the awake set through one door, and a meteor destroys the ball on its
+  own (docs/23 steps 1 and 2, docs/60).** A ground impact event, wherever detection found it (a
+  body contact forecast on the swept segment, a landing bisected to where the trajectory crosses
+  the shared ground height, or an impact declared in a world file), now goes through ONE
+  deposition operator, `Simulation::deposit_event`: terrain voxels, every cohesive body's parcels
+  and every debris grain in range receive shares of the energy and momentum from one walk with one
+  kernel (spherical spreading attenuated over the crater radius E/σ gives at the site), delivered
+  through the operator that owns each container. No per-object branch decides who is hit; the
+  isotropic kernel's missing shock shadowing and impedance split is a flagged IOU in docs/60.
+  Inside an aggregate, each parcel's fate is now `damage::classify` on its deposited energy
+  density against its own catalogued thresholds: a parcel past Intact holds no tensile bond, so a
+  sufficient meteor shatters the iron ball (bonds fracture, parcels scatter, the hottest parcels
+  melt and glow through the shared incandescence curve) while an insufficient one merely displaces
+  it, with no line of code that says destroy. The ground scene's crosshair now reports the first
+  MATTER the look ray meets (gold on a body's parcels, red on the terrain), so aiming at the ball
+  means hitting the ball; the drop button throws the same 1,200 kg of iron at 17 km/s, a real
+  asteroid arrival speed; and the ground page finally un-hides the sim HUD it was already filling.
+
 - **The live drop particalizes each body's own matter; the definition-id stopgap is gone (docs/58).**
   `start_live_drop_sph` no longer overwrites `impact_def` with `earth`/`moon` id strings: at the live
   hand-off both colliding bodies are built by `HydroBody::particalize` from the layered matter the
@@ -91,7 +109,6 @@ because **we are our own first customers** and pin exact engine versions in our 
   kernel remains for the Vulkan verifier. `GpuHost` now requests the WebGPU baseline limits instead of
   the stricter downlevel set, since the tree binds seven storage buffers and the browser scenes already
   get eight.
->>>>>>> 556cd4c (docs: record the metal tree crossover and the com climb coherence finding (docs/37))
 
 - **Orbital debris self-gravity dispatches to the GPU above a measured knee.** The verified
   `cs_gravity_direct` direct sum (`gpu_gravity`, checked against the CPU brute-force sum) is wired

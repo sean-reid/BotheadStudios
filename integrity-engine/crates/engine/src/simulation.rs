@@ -562,7 +562,7 @@ impl Simulation {
         None
     }
 
-    /// **The one deposition door for the awake set** (docs/23 step 2, docs/16, docs/59). An impact
+    /// **The one deposition door for the awake set** (docs/23 step 2, docs/16, docs/60). An impact
     /// event - a meteor arriving, a declared impact, wherever detection found it - deposits its
     /// energy and momentum into ALL matter in range in ONE walk: terrain voxels, every cohesive
     /// body's parcels, and every debris grain. No recipient is named; the split is geometry and
