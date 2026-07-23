@@ -9,6 +9,15 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Pan input works for real hands and trackpads.** Shift plus left-drag now pans no matter
+  whether shift or the button lands first: a left-drag upgrades to a pan the moment the modifier
+  is seen, and in a scene with a pan handler that chord never means reverse walk (reverse stays
+  on shift+ctrl). Shift+scroll and the horizontal wheel axis now feed the SAME pan path as the
+  drag in all three scenes (Ground, Terra, the space band), with bare vertical scroll keeping its
+  walk/zoom meaning, so a trackpad can pan without a middle button. The full-viewport status
+  overlay on every scene page is now pointer-transparent, so a showing message no longer eats
+  camera input.
+
 ## [0.11.0] — 2026-07-23
 
 - **One pan gesture across every scene.** Shift-drag or middle-drag now pans in the free-fly

@@ -3,6 +3,35 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: pan input survives a real hand
+
+**What.** Three input fixes, one theme: every pan gesture reaches the one pan path each scene
+already owns. (1) `camera-input.ts` no longer decides pan-vs-walk only at the pointerdown
+instant: a left-drag anchored on the canvas upgrades to a pan the moment shift is seen, and in a
+scene that supplies a pan handler shift+left-button always means pan, never reverse walk
+(reverse stays on shift+ctrl, the keyboard side of the grammar). (2) The full-viewport `#status`
+overlay on every scene page is now pointer-transparent; it used to swallow all canvas input
+whenever any message was showing (2.5 s after every meteor drop, for one). (3) Shift+scroll and
+the horizontal wheel axis now pan in Ground, Terra and the space band, feeding the SAME handler
+as the drag with the sign of a grab (the world follows the fingers); bare vertical scroll keeps
+its walk/zoom meaning. No engine change: `pan_view` / `pan_tangent` were already there.
+
+**Why.** A rig could pan; a human could not. The rig pressed shift, then the button, atomically.
+A real hand lands the two within milliseconds in either order, and when the button won the race
+the gesture fell into the shift+left = reverse-walk meaning: the camera flew backward and the
+drag did nothing, which reads as "pan is dead". The same two physical inputs must not mean two
+things decided by a millisecond race. And a MacBook trackpad has no middle button, so scroll
+needed a pan chord of its own.
+
+**Verified.** Headed on the Mac (mac_shot pattern): shift-then-button drag pans (as before);
+button-then-shift drag NOW pans where it previously walked the camera backward off the patch;
+middle-drag still pans; plain left-hold still walks forward; right-drag still looks. Shift+wheel
+on Ground translates the eye in the view plane at constant 2 m eye height; on Terra it moves
+lat 20.00 to -1.72 at constant alt 8000 km through `pan_tangent` (translation, not zoom); bare
+wheel still dollies Ground and takes Terra from alt 8000 km to 4497 km at constant lat/lon.
+Pointerdown targets confirmed: with a status message showing, events landed on `#status` before
+the fix and on the canvas after.
+
 ## 2026-07-23: release v0.11.0
 
 **What.** Cut v0.11.0 per the docs/03 checklist. The `[Unreleased]` changelog items moved into a
