@@ -4546,8 +4546,27 @@ mod app {
             let aspect = self.config.width as f64 / self.config.height.max(1) as f64;
             let ground_disp = self.ground_disp_at(self.fly.lat, self.fly.lon);
             let view = self.fly.view(r_disp, DISPLAY_SCALE, aspect, ground_disp);
-            let view_proj = view.vp_abs;
+            // THE CAMERA-RELATIVE-EYE CONVENTION (terra::fly_camera module doc): every draw in this
+            // scene uses `vp_rel` (eye at the origin). The eye leaves f64 only as a model translation
+            // of −eye (static meshes) or already subtracted per-vertex (the cap); never as an
+            // absolute f32 position, which cannot hold the final metres at planet radius.
+            let view_proj = view.vp_rel;
             let eye = view.eye;
+            // Static meshes are world-absolute; this f64-built translation makes their draw
+            // camera-relative. Residual: ~2 f32 ULPs at planet radius, sub-pixel at the ≥15 km
+            // distances where the coarse globe is visible (see the fly_camera precision tests).
+            let rel_model = glam::DMat4::from_translation(-eye).as_mat4();
+            // Triplanar texture anchor: the relief textures must stay glued to the SURFACE while
+            // positions are camera-relative, so the shader re-adds the eye folded modulo the texture
+            // tile period (8 m; globe.wgsl GLOBE_TEX_SCALE). Folded in f64, it is tiny in f32; the
+            // full eye would just re-lose the precision the subtraction bought.
+            let tile_p = 8.0 * DISPLAY_SCALE;
+            let anchor = glam::DVec3::new(
+                eye.x.rem_euclid(tile_p),
+                eye.y.rem_euclid(tile_p),
+                eye.z.rem_euclid(tile_p),
+            )
+            .as_vec3();
             // The REAL direction to the Sun for right now (orbit::solar_direction_earth_fixed). What stood
             // here was `DVec3::new(1.0, 0.45, 0.6)` — a fixed vector whose comment called it "a pleasant ¾
             // lighting" while claiming the terminator was emergent. It was not: the globe was already
@@ -4558,32 +4577,30 @@ mod app {
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
 
             // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we descend.
-            // `cap_fade`: 0 above ~40 km, 1 below ~15 km (smoothstep). Only build when it will show and a surface
-            // is loaded.
+            // The fade/lift rules live in `terra::ground_cap` (natively tested). At full fade the cap covers
+            // the whole view out past the horizon, so the coarse globe is not drawn at all; that removal is
+            // what keeps the final metres free of the cap-vs-globe depth fight.
             let alt_m = self.fly.alt_m;
-            let cap_fade = {
-                let (hi, lo) = (40_000.0, 15_000.0);
-                let t = ((alt_m - lo) / (hi - lo)).clamp(0.0, 1.0);
-                (1.0 - t * t * (3.0 - 2.0 * t)) as f32
-            };
+            let cap_fade = crate::terra::ground_cap::cap_fade(alt_m) as f32;
+            let draw_globe = cap_fade < 1.0;
             if cap_fade > 0.0 && self.globe_mesh.is_some() {
-                self.build_cap(&view, sun_light, cap_fade);
+                self.build_cap(&view, sun_light, cap_fade, anchor);
             }
 
             let air = self.air();
             if self.globe_mesh.is_some() {
-                // docs/43 Phase 3 — the displaced globe: one draw. Identity model (the mesh is already in
-                // display units, Earth-centred at the origin); white tint (the mesh carries the per-vertex biome
-                // colour); emissive.xyz = camera eye (display units), .w = atmosphere strength (the globe.wgsl
-                // Rayleigh limb). The per-vertex Rayleigh ground veil is a Phase-5 refinement.
+                // docs/43 Phase 3: the displaced globe: one draw. Camera-relative model (the mesh is in
+                // display units, Earth-centred; `rel_model` moves the eye to the origin); white tint (the
+                // mesh carries the per-vertex biome colour); emissive.xyz = the triplanar texture anchor
+                // (the eye folded modulo the tile; see above), .w unused.
                 write_space_uniform(
                     &self.queue,
                     &self.globe_uni,
                     view_proj,
-                    Mat4::IDENTITY,
+                    rel_model,
                     sun_light,
                     [1.0, 1.0, 1.0, 1.0],
-                    [eye.x as f32, eye.y as f32, eye.z as f32, 1.0],
+                    [anchor.x, anchor.y, anchor.z, 1.0],
                     air,
                     // Terra draws whichever body the world names, so the glow is that body's.
                     glow_of(&crate::planet::body(&self.body_id)),
@@ -4619,7 +4636,8 @@ mod app {
                     };
                     let m = &self.mats[mat_idx];
                     let pos = dir * (r_disp + elev_m * DISPLAY_SCALE * EXAG);
-                    let spos = pos.as_vec3();
+                    // Camera-relative translation (the convention above): subtracted in f64, cast small.
+                    let spos = (pos - eye).as_vec3();
                     // Rayleigh atmosphere (docs/26): blue veil (added light) + two-way transmittance on the ground.
                     let v_dir = (eye - pos).normalize_or_zero();
                     let mu_v = dir.dot(v_dir);
@@ -4679,7 +4697,9 @@ mod app {
                         &mut pass,
                         view_proj,
                         Mat4::from_rotation_y(-gmst as f32),
-                        eye.as_vec3(),
+                        // Camera-relative: `view_proj` has the eye at the origin, so the billboards
+                        // hang around the origin too; same sky, none of the absolute-eye rounding.
+                        Vec3::ZERO,
                         // Terra does not carry a heliocentric position, so the observer is taken as Sol.
                         // The error is Earth's 1 AU baseline: at most 1 arcsecond of parallax for the
                         // nearest star, against a ~4 arcminute pixel — a thousandth of a pixel. FLAGGED,
@@ -4694,10 +4714,15 @@ mod app {
                     );
                 }
                 if let Some(globe) = &self.globe_mesh {
-                    pass.set_pipeline(&self.globe_pipeline);
-                    draw(&mut pass, &self.globe_uni, globe);
-                    // docs/43 Phase 5 — the fine ground cap over the globe (alpha-blended cross-fade). Drawn only
-                    // when it was built this frame (cap_fade > 0); it covers the foreground out past the horizon.
+                    // At full cap fade the globe is SKIPPED: the cap covers the view out past the
+                    // horizon, and near the ground the depth buffer cannot separate two copies of the
+                    // same surface (see ground_cap::CAP_FULL_ALT_M).
+                    if draw_globe {
+                        pass.set_pipeline(&self.globe_pipeline);
+                        draw(&mut pass, &self.globe_uni, globe);
+                    }
+                    // docs/43 Phase 5: the fine ground cap (alpha-blended cross-fade). Drawn only when it
+                    // was built this frame (cap_fade > 0); it covers the foreground out past the horizon.
                     if cap_fade > 0.0 {
                         pass.set_pipeline(&self.cap_pipeline);
                         draw(&mut pass, &self.cap_uni, &self.cap_gpu);
@@ -4773,7 +4798,7 @@ mod app {
         /// the index topology is fixed). It samples the SAME surface as the globe (real elevation × the world's
         /// declared exaggeration, biome albedo) at high resolution, curving to a true horizon, emitted relative to
         /// the eye for ground-scale precision. `cap_fade` is the cross-fade alpha, carried in tint.a.
-        fn build_cap(&mut self, view: &crate::terra::fly_camera::View, sun_light: Vec3, cap_fade: f32) {
+        fn build_cap(&mut self, view: &crate::terra::fly_camera::View, sun_light: Vec3, cap_fade: f32, anchor: Vec3) {
             let r_disp = self.planet_radius * DISPLAY_SCALE;
             let exag = self.relief_exag;
             let ds = DISPLAY_SCALE;
@@ -4786,11 +4811,11 @@ mod app {
             // (at 2 m a horizon-sized cap is ~34 m/cell while the eye resolves ~2 mm), but the fix has to
             // add a finer LOD tier, not shrink the only one. See `surface_detail` and docs/08's tiers.
             let cap_angle = (1.3 * view.horizon / r_disp).clamp(1e-4, 0.6);
-            // A few metres toward the camera so the fine cap wins the depth fight with the coarse globe.
-            // NOTE: at very low altitude this constant exceeds the eye height and puts the cap ABOVE the
-            // camera (at 2 m up, a 20 m lift leaves the eye underneath it, seeing its underside). Scaling
-            // it to the eye height is correct but was reverted with the cap-sizing change it came with.
-            let lift = 20.0 * ds;
+            // The radial lift that wins the depth fight against the coarse globe while both are drawn.
+            // Altitude-scaled (rule + tests in terra::ground_cap): full 20 m through the fade band, and
+            // shrinking with the descent below it so it can never reach a camera standing 2 m up; the
+            // old fixed 20 m put the cap above the eye there, showing its underside.
+            let lift = crate::terra::ground_cap::cap_lift_disp(self.fly.alt_m, ds);
             let water_idx = materials::index_of(&self.mats, "water");
             let water_alb = self.mats[water_idx].albedo;
 
@@ -4826,8 +4851,10 @@ mod app {
             }
             self.queue.write_buffer(&self.cap_gpu.vertex_buf, 0, bytemuck::cast_slice(&verts));
             self.cap_verts = verts;
-            // Camera-relative draw: identity model, eye at the ORIGIN (emissive.xyz = 0 → globe.wgsl's view = the
-            // direction from the surface back to the eye). tint.a = the cross-fade alpha.
+            // Camera-relative draw: identity model (positions were emitted relative to the eye in f64),
+            // eye at the ORIGIN of `vp_rel`. emissive.xyz = the same triplanar anchor as the globe, so
+            // the relief textures stay glued to the surface; and match across the cross-fade; instead
+            // of swimming with the eye. tint.a = the cross-fade alpha.
             write_space_uniform(
                 &self.queue,
                 &self.cap_uni,
@@ -4835,7 +4862,7 @@ mod app {
                 Mat4::IDENTITY,
                 sun_light,
                 [1.0, 1.0, 1.0, cap_fade],
-                [0.0, 0.0, 0.0, 1.0],
+                [anchor.x, anchor.y, anchor.z, 1.0],
                 self.air(),
                 NO_GLOW,
             );
