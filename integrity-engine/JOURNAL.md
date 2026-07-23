@@ -3,6 +3,18 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-22: v0.10.0 cut, ending a 13-day unreleased run
+
+**What.** Release cut: everything since v0.9.0 (2026-07-09) moves out of [Unreleased] into a dated
+0.10.0 section; engine crate and web host versions bumped together per docs/03.
+
+**Why.** The versioning policy exists because we pin engine versions in our own games, and it had
+lapsed: two weeks of GPU SPH, worlds-as-data, the law burn-down, and the live moon-drop hand-off sat
+in one undated block. A release makes the line citable again.
+
+**Verified.** Full native suite green after the bump. wgpu remains at 24 (the load-bearing external
+dependency docs/03 says each release must note).
+
 ## 2026-07-22: the moon-drop routes into the SPH machine at resolution distance
 
 **What.** The live de-orbit now goes through the `SphPhase` machine instead of the CPU `Aggregate`
