@@ -151,7 +151,7 @@ pub struct Simulation {
     meteors: Vec<Meteor>,
     /// The declared solid bodies, as cohesive matter (docs/23 step 1).
     bodies: Vec<CohesiveBody>,
-    /// How long the impact aftermath has been continuously quiet (docs/59) — the trigger for the
+    /// How long the impact aftermath has been continuously quiet (docs/61) — the trigger for the
     /// batch downward rung that folds any remaining settled particles back into the world.
     settle: crate::recohere::SettleGauge,
     /// Voxels the batch rung has returned to the world since construction (matter accounting).
@@ -288,14 +288,14 @@ impl Simulation {
         resolved
     }
 
-    /// **The impact site re-coheres into meshed ground** (docs/59): the production trigger for the
+    /// **The impact site re-coheres into meshed ground** (docs/61): the production trigger for the
     /// batch downward rung. Once the aftermath is quiet at the rung's own physical criterion —
     /// nothing in flight and every remaining grain below the quiescent speed for one cell dynamical
     /// time — whatever the per-grain settle path left behind is offered back to the voxel world in
     /// one conserving pass, and `take_dirty()` drives the remesh that renders the result as ground.
     /// The per-grain path usually empties the field first on this CPU container; this is the
     /// REGION-level guarantee, and the trigger the particle-ball remnants of other containers wire
-    /// into next (the flagged docs/59 IOU).
+    /// into next (the flagged docs/61 IOU).
     fn recohere_when_settled(&mut self, dt: f32) {
         if self.matter.particles.is_empty() || !self.meteors.is_empty() {
             // Nothing left to demote, or more matter inbound: a fresh disturbance re-arms the gauge.
@@ -827,7 +827,7 @@ impl Simulation {
         self.resolved_total
     }
 
-    /// Voxels the batch downward rung (docs/59) has returned to the world — the matter-accounting
+    /// Voxels the batch downward rung (docs/61) has returned to the world — the matter-accounting
     /// counterpart of `created_total`, so "the grains became ground" is measurable, not assumed.
     pub fn recohered_voxels(&self) -> usize {
         self.recohered_voxels
@@ -940,7 +940,7 @@ mod tests {
         assert!(tops.windows(2).any(|p| p[0] != p[1]), "the default world has real relief");
     }
 
-    /// **The impact site re-coheres into meshed ground** (docs/59). After a thrown meteor's
+    /// **The impact site re-coheres into meshed ground** (docs/61). After a thrown meteor's
     /// aftermath settles — quiet at the rung's own physical criterion, not merely "the test waited
     /// a while" — NO bare particles remain: every grain either deposited through the per-grain
     /// settle path or was folded back by the batch rung, so the remnant is ground the mesher can

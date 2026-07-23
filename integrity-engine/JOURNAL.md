@@ -102,6 +102,42 @@ definition's two-slot approximation.
 accretes a ~1.08 lunar-mass Moon (disk 1.73 lunar masses, 43 percent Earth) with no dispersal
 under the real-mass init. Here: full native suite 348/348 green,
 `cargo check --target wasm32-unknown-unknown -p engine` clean. fmt untouched (hand-edited).
+## 2026-07-23: the settled impact site re-coheres into meshed ground
+
+**What.** The de-resolution ladder gains its batch downward rung and a production trigger
+(docs/61). New `crate::recohere`: a SETTLED region of a particle field bins back into the voxel
+`World`, and the existing surface-nets mesher renders the result as walkable ground. The settle
+criterion is physical, not a frame count: quiescent speed `sqrt(2gΔ)` — below it a grain's
+kinetic energy cannot buy a one-cell rise, so its motion is sub-resolution at the binning scale —
+held continuously for one cell dynamical time `sqrt(2Δ/g)`, integrated in seconds by
+`recohere::SettleGauge` (the docs/57 #4 lesson applied forward: the step size must not decide
+when matter stops being matter). Conservation is the contract: grain mass accumulates per column
+and material in f64, whole voxel quanta `ρ·Δ³` deposit through the ONE grain→voxel law
+(`deposit_resting_grain`'s body, extracted as the shared free function `matter::deposit_grain`),
+and the sub-quantum remainder stays particles — matter is never deleted to lower a count, and
+gravel comes back as gravel. A still-moving region is refused before any write. Production
+consumer: `Simulation::step` → `recohere_when_settled` — once no meteors are in flight and the
+whole remaining field has been quiet for one dynamical time, the aftermath folds back into the
+world and the dirty flag drives the remesh. The SPH remnant (the observed bare-particle-ball gap,
+in a path under active upstream rework) and the shattered cohesive body are docs/61's flagged
+wiring IOUs.
+
+**Why.** After an impact settles, the remnant stayed a bare particle field forever: every
+downward mechanism existed and was verified (docs/46 row 6), but nothing ever decided "this
+region's excitement has passed" for a field at once. docs/44 §6 already named the honest trigger
+— demote on quiescence, a kinetic-energy bound, never "when motion stops" and never disinterest —
+so this increment is that trigger plus the conserving batch bin, not new physics.
+
+**Verified.** Red-first natively: a settled synthetic gravel mound (including a deliberately
+sub-quantum grain) folds with mass conserved to f32 accumulation error, material preserved and
+the remainder surviving as a particle; a still-moving region is refused with the world untouched;
+the criterion settles identically at 0.1 s and 0.001 s steps and a mid-window jolt resets the
+sustained clock; the `MatterSim` adapter pins that 4 × 0.4-quantum grains yield exactly one voxel
+plus a 0.6-quantum particle (the per-grain one-grain-one-voxel law would have conjured 2.4 quanta
+of rock); end to end, a thrown meteor's settled aftermath leaves zero bare particles. Full suite
+353/353 green; `cargo check --target wasm32-unknown-unknown -p engine` clean; ground scene
+rig-watched on a Mac (meteor dropped, aftermath settled, ejecta and crater render as meshed
+ground, no frozen grain field).
 
 ## 2026-07-23: the GPU SPH goes N-material and N-body
 

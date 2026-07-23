@@ -96,7 +96,7 @@ pub struct MatterSim {
 
 /// **The ONE grain→voxel deposition law**, as a free function so every downward rung shares it:
 /// [`MatterSim::deposit_resting_grain`] (the per-grain settle path, CPU and GPU readback) and
-/// [`crate::recohere::recohere_settled`] (the batch settled-region rung, docs/59) both come through
+/// [`crate::recohere::recohere_settled`] (the batch settled-region rung, docs/61) both come through
 /// here, so the two rungs cannot disagree about where matter may return (Law II).
 ///
 /// Deposits one voxel of `material` into the air-start of the column under `pos` (centered coords):
@@ -1047,7 +1047,7 @@ impl MatterSim {
         deposited
     }
 
-    /// **The batch downward rung over THIS field** (docs/59): once a caller's [`SettleGauge`] shows
+    /// **The batch downward rung over THIS field** (docs/61): once a caller's [`SettleGauge`] shows
     /// the whole region quiet at the physical criterion, every remaining particle is offered back to
     /// the world in one conserving pass — the region-level guarantee that a settled impact site ends
     /// as ground, not as a bare particle field. Adapts the particles to
@@ -1320,7 +1320,7 @@ mod tests {
         assert_eq!(w.surface_top_voxel(4, 4), Some(5), "air-start rose after the deposit");
     }
 
-    /// **The batch downward rung over a `MatterSim` field** (docs/59): sub-quantum grains — masses
+    /// **The batch downward rung over a `MatterSim` field** (docs/61): sub-quantum grains — masses
     /// the per-grain one-grain-one-voxel path could never bin without CREATING matter — fold
     /// through the adapter conserving mass exactly: whole quanta become voxels, the remainder
     /// survives as a particle, and the world is marked dirty so the surface remeshes.

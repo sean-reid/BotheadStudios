@@ -1,5 +1,5 @@
 //! **Re-coherence — the batch downward rung from a settled particle field to standable ground**
-//! (docs/59).
+//! (docs/61).
 //!
 //! docs/44 §6 names demotion-on-quiescence as the cheap half of resolution-by-necessity, and the
 //! docs/46 ledger (row 6) records that the de-resolution ladder's downward rungs sat without a batch
@@ -100,7 +100,7 @@ impl SettleGauge {
 
 /// One particle of a field, in the [`World`]'s centered coordinates — the scene-agnostic shape any
 /// container can adapt to (the CPU `matter::Particle` today; an SPH readback or an `Aggregate` wreck
-/// are the flagged next consumers, docs/59).
+/// are the flagged next consumers, docs/61).
 #[derive(Clone, Copy, Debug)]
 pub struct FieldGrain {
     pub pos: Vec3,
