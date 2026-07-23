@@ -3,6 +3,59 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the upward rung exists: split, relax, release, conserved (and unwired by design)
+
+**What.** `crate::refine`, docs/59 order-of-work item 3: the coarse celestial SPH field can now
+initialize a fine local patch, conserving mass, momentum, angular momentum, kinetic and internal
+energy across the bridge. One-shot icosahedral splitting (12 vertex children plus the mandatory
+retained center child; velocity and specific internal energy inherited; the center child absorbs
+the f64 mass remainder so the 13 masses sum exactly to the parent's), then relax-then-release:
+child positions shift, damped, against the density the engine's own symmetrized-h sum reads in
+the ORIGINAL coarse field, clock frozen, coarse exterior held as a fixed guard band, and the
+patch releases only when every child's relative density error is inside the stated 5e-3 bound
+(an iteration cap exists solely as a divergence guard; hitting it is a stated refusal, never a
+silent release). Interface discipline per zoom-in practice, as refusals with reasons on screen:
+one rung per interface (a split whose children would touch matter more than one rung coarser is
+refused until the shell is refined first), and a coarse particle inside the fine region is
+contamination that invalidates the refinement; `contamination_check` is the standing per-step
+form the future wiring runs. The caller-facing ledger audits all five quantities before, after
+split and after relax, with the relax's angular-momentum drift bounded by its own accumulated
+`sum m |dx| |v|`. The Holsapple-Housen pi-scaling gate (gravity regime; v2.2.1 hard-rock
+K1 0.012 mu 0.55 and regolith K1 0.14 mu 0.4 rows, vintage named in the constants) ships
+alongside, ready for the future end-to-end crater test.
+
+The two stencil constants were RE-DERIVED for the engine's one cubic-spline kernel
+(`atmosphere::sph_w`, full support inside r < h) instead of copying the literature values, per
+docs/59's own instruction: least squares of the integrated squared density error between parent
+kernel and 13-child stencil, 141^3 grid quadrature cross-checked at 201^3. The unconstrained
+problem is degenerate (zero separation reproduces the parent exactly and refines nothing); the
+interior stationary point is separation 0.3051 h with child smoothing 0.7915 h, residual 0.70%
+L2 (peak 0.38% of the parent's central density). The literature pair (0.4 h, 0.9 h in the
+2h-support convention, i.e. 0.2 h here) measures 4.9% L2 on this kernel: seven times worse,
+which is why the re-derivation was not optional.
+
+**Why.** docs/59: the zoom from the celestial energy event to local ground zero must hand the
+state DOWN, not invent it (Law IV: the camera changes representation, never existence; Law V: no
+analytic effect standing in for the field). This module deliberately lands with ZERO production
+consumers: the camera-driven materialization trigger's home depends on collision routing
+decisions that are still open upstream (docs/58 item 7, docs/59 open questions), so wiring now
+would race a moving seam. Per the docs/46 rule that a verified law with no consumers stays an
+open ledger row, row 17 carries the flagged IOU and names the M4 zoom materialization milestone
+as the wiring owner.
+
+**Verified.** Seven native tests, written red first against stubs, all green: exact conservation
+of all five audited quantities on the split (mass, momentum, kinetic, internal to 1e-6 relative;
+angular momentum to 1e-5, all f32 rounding scale, with the stencil reconstructed child by child);
+the relax releases inside the bound on a uniform basalt field (raw blip 7.5e-2, released 5.0e-3
+in 378 iterations, max child shift 0.234 m at h = 2 m, relax angular-momentum drift 3.8e2 against
+its stated bound 7.9e4 on |L| 6.9e6) and across a basalt/iron interface (9.5e-2 released to
+5.0e-3 in 1212 iterations, material identity preserved through the rung); contamination refused
+with the offender named and the world untouched; a second rung against unbuffered coarse refused
+while a buffered interior second rung is admitted; the pi gate reproduces a hand-computed Meteor
+Crater example (rim radius 425 m predicted, observed 593 m, ratio 1.39, inside the factor-2 gate)
+and degrades explicitly to the order-of-magnitude bound when the predicted crater rivals the
+body. Full native suite 369 green, 22 ignored; wasm32 check clean.
+
 ## 2026-07-23: the descent camera holds precision from orbit to the ground
 
 **What.** Terra renders under one camera-relative-eye convention (docs/59 order-of-work item 2:

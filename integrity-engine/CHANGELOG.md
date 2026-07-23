@@ -9,6 +9,28 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The celestial field can initialize the local patch, conserved (docs/59 item 3): built, tested,
+  deliberately unwired.** New `refine` module, the upward rung mirroring `recohere`'s downward one:
+  a one-shot icosahedron split with a mandatory retained center child (13 children inheriting the
+  parent's velocity and specific internal energy, masses summing exactly to the parent's), then
+  relax-then-release with a frozen clock: children shift, damped, against the coarse field's own
+  interpolated density with the coarse exterior held as a fixed guard band, and release is the
+  stated 5e-3 relative density-error bound, never an iteration count. The two stencil constants
+  were re-derived offline for the engine's own cubic-spline kernel by least squares over the
+  kernel (separation 0.3051 h, child smoothing 0.7915 h in this kernel's support-radius
+  convention; the literature pair, 0.2 h and 0.9 h mapped into the same convention, measures 4.9%
+  L2 density error on this kernel against 0.7% for the derived pair). Interface discipline is
+  enforced by refusal with stated reasons: one rung per interface, and a coarse particle inside
+  the fine region is contamination that invalidates the refinement rather than being smoothed
+  over. A five-quantity conservation ledger (mass, momentum, angular momentum, kinetic, internal)
+  is audited before, after split and after relax; the split is exact to f32 rounding and the relax
+  carries its own stated angular-momentum drift bound. Measured on native tests: the raw split
+  blip is 7.5e-2 on a uniform basalt field and 9.5e-2 across a basalt/iron interface, both
+  released at 5.0e-3. The Holsapple-Housen pi-scaling gate (gravity regime, v2.2.1 hard-rock and
+  regolith rows) ships alongside for the future end-to-end crater check, unit-tested against a
+  hand-computed Meteor Crater example. FLAGGED IOU: zero production consumers; the M4 zoom
+  materialization milestone owns the camera trigger and the scene wiring (docs/46 ledger row 17).
+
 - **The descent camera holds f32 precision from orbit to standing height (docs/59 item 2).** Terra
   now renders under ONE camera-relative-eye convention (documented in `terra::fly_camera`): every
   draw uses the eye-at-origin view·projection, the eye is subtracted in f64 (per-vertex for the
