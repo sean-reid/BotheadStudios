@@ -917,37 +917,13 @@ impl Ground {
     /// cannot cross the surface either.
     fn camera_shell_resolve(&self, desired: Vec3) -> Vec3 {
         use glam::DVec3;
-        /// ≥ `NEAR_CLIP` (0.2 m) so the near plane can never cross the surface the shell rests on.
-        const SHELL_HALF: f64 = 0.35;
-        /// Solver relaxation rate, not a tuned edge — the same role it plays for grains.
-        const MAX_CORR: f64 = 0.5;
-
-        let mut pos = DVec3::new(desired.x as f64, desired.y as f64, desired.z as f64);
+        let to = DVec3::new(desired.x as f64, desired.y as f64, desired.z as f64);
         // SWEPT: resolve along the path from last frame to here, so a fast camera cannot tunnel through
         // the thin surface skin in one frame (a grain needs this for the same reason).
         let from = DVec3::new(self.last_eye.x as f64, self.last_eye.y as f64, self.last_eye.z as f64);
-        let steps = ((pos - from).length() / (SHELL_HALF * 2.0)).ceil().clamp(1.0, 24.0) as usize;
-        for i in 1..=steps {
-            let t = i as f64 / steps as f64;
-            let mut p = from.lerp(pos, t);
-            let sample = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
-            let (h, dhdx, dhdz) = self.sim.world.surface_bilinear_grad(sample);
-            let hit = crate::granular::terrain_contact_resolve(
-                p,
-                DVec3::ZERO, // the shell is carried by the rig, not ballistic: contact corrects POSITION
-                h as f64,
-                dhdx as f64,
-                dhdz as f64,
-                SHELL_HALF,
-                0.0,                // frictionless: the camera slides, it does not stick to hillsides
-                MAX_CORR,
-                f64::INFINITY,      // open sky above the camera
-            );
-            if hit.hit {
-                p += hit.dpos;
-            }
-            pos = p;
-        }
+        let pos = crate::granular::sweep_shell_resolve(from, to, |sample| {
+            self.sim.world.surface_bilinear_grad(sample)
+        });
         Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32)
     }
 
