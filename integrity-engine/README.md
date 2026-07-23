@@ -6,22 +6,30 @@ Most game engines treat the world as textured surfaces that objects bounce off. 
 treats the world as **matter** — aggregates of particles with mass and density — and lets behavior
 *emerge* from physical properties instead of being hand-authored.
 
-## The idea, in four pillars
+## The goal, in four pillars
+
+These four are the destination the engine is built toward, not a status report. What runs today
+is under [Status](#status).
 
 1. **Matter = aggregates of particles with mass & density.** A 200 km sphere of rock is rock all
    the way down, not a shell with a texture.
 2. **Behavior emerges from density & material parameters.** Rock is dense, stiff, and hard to
    break; dirt separates in chunks more easily; grass is low-density and fragile — all from the
    *same* rules with different parameters, not per-material special cases.
-3. **Destructible all the way down.** Enough force breaks a segment off; the hole persists. Layer
-   10 m of dirt and a skin of grass on top of the rock and each behaves according to its material.
+3. **Destructible all the way down.** Enough force breaks a segment off; the hole persists. The
+   ground scene does this today: impacts excavate real craters in regolith, and the craters stay.
 4. **Real self-gravity from aggregate mass.** The world's own summed mass produces a gravitational
    field. A 5 kg mass above it accelerates per `F = ma`, with `g = G·M/r²`. Light is handled
    conventionally (like a normal engine) for now.
 
 The novel bit is making **density the single source of truth** that simultaneously drives material
-behavior, destruction, *and* gravity in one real-time browser loop. No existing engine fuses all
-four pillars — see [`docs/01-prior-art-existing-engines.md`](docs/01-prior-art-existing-engines.md).
+behavior, destruction, *and* gravity in one real-time browser loop. We know of no engine that fuses
+all four (the survey is [`docs/01`](docs/01-prior-art-existing-engines.md)), but the pitch does not
+rest on that claim. It rests on a discipline you can audit in five minutes: **this engine treats
+fudges as bugs.** Every known deviation from the one-physics promise sits on a public conformance
+ledger ([`docs/46`](docs/46-one-physics-charter.md)) with the test that closes it. `laws.rs` fails
+the build on the machine-detectable class. Accelerated code is pinned to brute-force references, so
+speed never changes an answer. Negative results ship in the [JOURNAL](JOURNAL.md).
 
 ## Architecture (short version)
 
