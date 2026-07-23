@@ -687,11 +687,16 @@ mod app {
     }
 
     /// Per-body metadata the engine renders and collides from. Indexed identically to `OrbitDemo::bodies`.
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     struct BodyMeta {
         radius_m: f64,
         tint: [f32; 4],
         role: BodyRole,
+        /// **This body's matter** — its layered material composition (`docs/58`). The engine keeps each
+        /// body's own matter so mass, radius, moment of inertia and particalization all DERIVE from it,
+        /// with no named `planet::earth()` lookup and no `EARTH_RADIUS_M`: a body is a body. `None` for a
+        /// bare point mass with no defined composition.
+        matter: Option<crate::planet::LayeredBody>,
         /// The engine has resolved this body into the debris field — its matter is particles now, so it
         /// is no longer drawn as an intact body. Set by collision detection, never by the scene.
         materialized: bool,
@@ -1421,6 +1426,7 @@ mod app {
                     radius_m: body_radius(d),
                     tint: this_tint,
                     role,
+                    matter: crate::body_definition(d.profile.as_deref()),
                     materialized: false,
                 });
                 match d.role.as_str() {
@@ -1428,9 +1434,13 @@ mod app {
                         planet_idx = i;
                         self.earth_tint = this_tint;
                         if let Some(p) = d.spin_period_s {
+                            // L = I·ω with the body's EMERGENT inertia (docs/58), so the declared day length
+                            // reproduces when the rotation reads the same emergent I back (spin_inertia()).
+                            let inertia = crate::body_definition(d.profile.as_deref())
+                                .map(|b| b.moment_of_inertia())
+                                .unwrap_or_else(|| crate::tides::moment_of_inertia(body_mass(d), body_radius(d)));
                             self.spin_l = glam::DVec3::new(0.0, 0.0, 1.0)
-                                * (crate::tides::moment_of_inertia(body_mass(d), body_radius(d))
-                                    * (2.0 * std::f64::consts::PI / p));
+                                * (inertia * (2.0 * std::f64::consts::PI / p));
                             self.initial_spin_l = self.spin_l;
                         }
                     }
@@ -1941,7 +1951,7 @@ mod app {
             if let Some(t) = self.sph_target_spin_period_s() {
                 return t / 3600.0;
             }
-            let t = crate::tides::spin_period_s(self.spin_l, self.bodies[1].mass, EARTH_RADIUS_M);
+            let t = crate::tides::spin_period_from_inertia(self.spin_l, self.spin_inertia());
             if t.is_finite() { t / 3600.0 } else { -1.0 }
         }
 
@@ -2062,6 +2072,30 @@ mod app {
         /// its own centre, over its measured moment of inertia. This is the honest "Earth day" during and
         /// after the impact — the quantity the scene exists to let EMERGE, rather than the modern 23.9 h
         /// the HUD was printing from an untouched N-body slot.
+        /// The index of the body the scene declared as its PLANET, found by ROLE — not the hardcoded
+        /// `bodies[1]=Earth` (docs/58 brick 3). The engine reads the roles the scene declared; a scene that
+        /// ordered its bodies differently, or has several planets, is no longer wrong. Falls back to 1 for
+        /// the default/birth setup whose `body_meta` is not yet populated (Sun at 0, the planet at 1).
+        fn planet_idx(&self) -> usize {
+            self.body_meta
+                .iter()
+                .position(|m| matches!(m.role, BodyRole::Planet))
+                .unwrap_or(1)
+        }
+
+        /// The planet's moment of inertia (kg·m²), EMERGENT from its matter (docs/58) — the actual layered
+        /// mass distribution, not the uniform-sphere ⅖mr² with a hardcoded Earth radius. Falls back to the
+        /// uniform form only where a scene has no per-body matter yet (the default/birth setup, whose spin
+        /// is zero), so a declared day length is read back with the SAME inertia it was set with.
+        fn spin_inertia(&self) -> f64 {
+            let p = self.planet_idx();
+            self.body_meta
+                .get(p)
+                .and_then(|m| m.matter.as_ref())
+                .map(|b| b.moment_of_inertia())
+                .unwrap_or_else(|| crate::tides::moment_of_inertia(self.bodies[p].mass, EARTH_RADIUS_M))
+        }
+
         fn sph_target_spin_period_s(&self) -> Option<f64> {
             let [(m_t, c, v_c), _] = self.sph_body_state()?;
             let _ = m_t;
@@ -2488,9 +2522,9 @@ mod app {
             let strength = self.mats[materials::index_of(&self.mats, "basalt")].fracture_strength as f64;
             // Each body's radius comes from its OWN metadata — no shared `impactor_radius`, so two moons
             // of different sizes would collide at their own contact distances.
-            let meta = self.body_meta.clone();
+            let radii: Vec<f64> = self.body_meta.iter().map(|m| m.radius_m).collect();
             let body_state = |i: usize| {
-                let r = meta.get(i).map(|m| m.radius_m).unwrap_or(EARTH_RADIUS_M);
+                let r = radii.get(i).copied().unwrap_or(EARTH_RADIUS_M);
                 crate::interaction::BodyState {
                     pos: self.bodies[i].pos,
                     vel: self.bodies[i].vel,
@@ -2504,8 +2538,7 @@ mod app {
 
             crate::orbit::verlet_step(&mut self.bodies, &mut self.acc, dt);
             // The planet visibly ROTATES at the rate its spin angular momentum implies.
-            self.spin_angle += dt * self.spin_l.length()
-                / crate::tides::moment_of_inertia(self.bodies[1].mass, EARTH_RADIUS_M);
+            self.spin_angle += dt * self.spin_l.length() / self.spin_inertia();
 
             // **A body crossing its resolution distance stops being a point mass**: tides
             // make "two point masses" a lie there, so the engine hands the drop to the SPH machine
@@ -2906,7 +2939,7 @@ mod app {
             // system lives in an Earth-relative f32 frame, so its display origin is Earth's position in the
             // focused frame; the shader maps each Earth-relative position through DISPLAY_SCALE and view_proj.
             if self.sph_active {
-                let origin = ((r_bodies[1] - focus) * SPH_VIS_SCALE).as_vec3();
+                let origin = ((r_bodies[self.planet_idx()] - focus) * SPH_VIS_SCALE).as_vec3();
                 let cam = crate::gpu_sph::SphCam {
                     view_proj: view_proj.to_cols_array_2d(),
                     origin: [origin.x, origin.y, origin.z, 0.0],
@@ -2922,13 +2955,13 @@ mod app {
 
             // Light direction = TO the real Sun from each body (per-body; the Sun is the illuminant,
             // not a hardcoded direction). So the lit hemisphere and the phases come from the geometry.
-            let earth_light = (sun - r_bodies[1]).as_vec3().normalize();
+            let earth_light = (sun - r_bodies[self.planet_idx()]).as_vec3().normalize();
             // EARTH AS PARTICLES (docs/15): the planet renders as a shell of coarse grains — the honest
             // low-res visualization of the un-materialized bulk (whose PHYSICS is the boundary + gravity
             // source). A smooth sphere would hide excavation; grains can be missing. Shell points inside
             // the materialized impact region are hidden — the real (moving, glowing) cap particles are
             // the matter there now, and the void they leave IS the crater.
-            let earth_center = r_bodies[1];
+            let earth_center = r_bodies[self.planet_idx()];
             // The impact now runs the REAL Earth and the REAL Theia (their own definitions), so there is no
             // sub-scale body and no second display scale: both branches draw at DISPLAY_SCALE and differ
             // only in which radius they ask for. The `render_blend` cross-fade between the resolved surface
@@ -3077,10 +3110,9 @@ mod app {
             // OBLATE figure: the spin flattens the planet (Radau–Darwin) — equator bulges (+f/3),
             // poles sink (−2f/3), volume-preserving to first order. At today's day it's 1/298
             // (imperceptible); at the post-impact 3.8-h day it's ~13% — a visibly squashed world.
-            let spin_omega_r = self.spin_l.length()
-                / crate::tides::moment_of_inertia(self.bodies[1].mass, EARTH_RADIUS_M);
+            let spin_omega_r = self.spin_l.length() / self.spin_inertia();
             let flat = crate::tides::flattening_from_spin(
-                spin_omega_r, self.bodies[1].mass, EARTH_RADIUS_M,
+                spin_omega_r, self.bodies[self.planet_idx()].mass, EARTH_RADIUS_M,
             );
             // **The definitive Earth's transform.** One draw: spin the CRUST (so continents co-rotate,
             // exactly as they must), flatten it by the spin's own oblateness, and scale to the display.
