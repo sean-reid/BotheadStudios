@@ -116,6 +116,63 @@ and brake/drop controls. Driving the Drop control headed: the HUD switches to "i
 closest approach 1 km (inside contact at 9,551 km)", the GPU impact assembly takes over, and the
 view settles on the incandescent post-impact Earth. All of it ran from the definition.
 
+## 2026-07-23: the camera crossing its view threshold materializes ground zero
+
+**What.** The first camera-driven resolution-by-necessity trigger (docs/59 order-of-work item 2's
+trigger half, plus the entry point of item 3), wired into the space band and deliberately
+mirroring the moon-drop's resolution-distance idiom: one derived distance, one crossing check per
+frame, one materialization pattern. `crate::site` derives the view-necessity threshold as the
+distance where one coarse SPH particle's matter share, `s = (m/rho)^(1/3)`, subtends the docs/49
+angular budget (the one declared fidelity dial): `d* = s / theta`, the inversion of the
+camera-granularity law. For the 2400-particle Earth statement at the crust's in-situ density that
+is 9.52e8 m; when a live celestial field exists the quantum is measured from its own particles
+instead. The bidirectional `SiteTrigger` demands Materialize below the threshold and Deresolve
+above it, and a demand stands until the crossing actually executes, so refusals stay on screen
+and the trigger re-arms on ascent for the out-and-back demo arc. Materialization reads the Ground
+Zero world's own `ground` block (the shared Earth's `surface_strata` at the declared lat/lon, the
+declared iron ball) and goes through the refine rung: equal-mass coarse parents (the ball's real
+mass sets the rung) in a guarded bowl under the real free surface, split toward release, ledger
+surfaced to the HUD. The downward crossing goes through the docs/61 criterion (`SettleGauge`):
+settled folds back to the summary with the fold audited; unsettled honestly stays. The smallest
+honest energy hand-down: a quiescent live field's specific internal energy is sampled at the site
+(quiescence is `recohere::quiescent_speed` at the coarse quantum); a mid-event field refuses with
+the measured speeds stated; the full mid-event hand-down is the next milestone. The refine rung
+was fixed where its first consumer broke it: the density error is now denominated by
+`max(target, the particle's own in-situ density)` so a coarse-vacuum fringe cannot read an
+infinite error, and a stall guard turns a measured convergence plateau into a prompt stated
+refusal (thresholds an order below the slowest releasing run's flattest window, so nothing that
+released before is refused now).
+
+**Why.** The demo arc is out-and-back (open at the ball, pull out, witness the impact, descend to
+the aftermath), which puts this trigger and its bidirectionality on the critical path; and the
+engine must not grow a second materialization idiom when the moon-drop already has the right
+shape (Law II). Law IV bounds it: the camera changes representation, never existence, and the
+ledger is what proves the change conserved.
+
+**Honest limits, stated where they bind.** This site's relief stalls the relax at a measured
+4.8e-2 plateau (an order over the 5e-3 release bound; the flat and free-surface lattice cases
+release fine at 171 to 1415 iterations), so the patch materializes as the EXACT conserving split
+with the residual quoted on the HUD; the release remains the gate between the site and any entry
+into dynamics. The ball splits exactly but does not relax: an isolated sub-resolution body has no
+uniform coarse environment to relax against (measured divergent). The fine site enters no
+dynamics this milestone, and the 1 m grass skin is sub-quantum at this rung. docs/46 row 18
+carries all of it.
+
+**Verified.** Red first at the pure seams: the trigger and threshold tests were written against
+stubs returning nothing and failed; the materialize, hand-down, column-agreement and fold tests
+failed against a stub returning a refusal, then went green as the physics landed
+(`site::tests`, 6 tests). The rung's new behaviour is pinned at the refine level red-first too:
+the free-floating slab measured `achieved: inf` before the metric change and now refuses with a
+finite stated error; the relief stall test would catch a silent release. Full native suite
+388/388 green, wasm32 check clean at the baseline warning count. Watched headed on the Mac
+(mac_shot pattern, port 6499, `web/rig/mac_site_materialize.mjs` on the Ground Zero page): at
+zoom 1.0 the camera sits at 648,696 km, inside the 952,220 km threshold, and the site
+materializes on load with the HUD reading the full audit (ball 13 + patch 260 fine, 477 coarse
+guards, 1.3134e8 kg in and 1.3134e8 kg out, zero angular-momentum drift); the particle cluster is
+visible on the disc at the declared site (screenshot, magnified crop); zooming out to
+2,668,401 km folds it (750 particles, 1.3134e8 kg returned, drift +0.0e0 kg) and the cluster
+leaves the disc; zooming back to 187,222 km re-materializes it. Zero console errors across the
+whole arc.
 ## 2026-07-23: the orbit camera pans, in the focused body's frame
 
 **What.** The space band's camera can now translate its look target off the focused body.

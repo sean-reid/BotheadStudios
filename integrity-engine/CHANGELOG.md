@@ -9,6 +9,27 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Crossing the camera's resolution distance materializes ground zero.** The space band now
+  carries the first camera-driven resolution-by-necessity trigger (`crate::site`), deliberately
+  mirroring the moon-drop's resolution-distance idiom so the engine has one materialization
+  pattern. The threshold is derived, never declared: the distance at which one coarse SPH
+  particle's matter share subtends the docs/49 angular budget (about 952,000 km for the
+  2400-particle Earth statement), measured from the live field when one exists. Descending
+  inside it on the Ground Zero page materializes the declared iron ball and a terrain patch of
+  Earth's own strata at the declared site through the refine rung, with the conservation ledger
+  on the HUD (mass in equals mass out to f32 rounding); ascending back outside folds the site
+  into the summary through the docs/61 settling criterion, and the trigger re-arms, so the
+  out-and-back arc crosses cleanly in both directions. Refusals render honestly: a mid-event
+  celestial field refuses the hand-down with its measured speeds, a coarse particle penetrating
+  the site invalidates it on screen, and an unsettled site refuses to fold and says why. Landed
+  limits, stated on the HUD and in the ledger row: this site's relief stalls the relax, so the
+  patch is the exact conserving split with the density residual quoted (the release still gates
+  any future entry into dynamics); the ball splits exactly but does not relax (an isolated
+  sub-resolution body has no coarse environment to relax against); the fine site enters no
+  dynamics yet. The refine rung itself learned two things from its first consumer: the density
+  error is now denominated by the matter's own in-situ density at coarse-vacuum fringes (a free
+  surface no longer reads an infinite error), and a measured convergence stall refuses promptly
+  with the plateau stated instead of grinding to the iteration cap.
 - **Wasm download weight is now tracked.** The release `engine_bg.wasm` baseline is recorded in
   the versioning doc (811,915 bytes raw, 322,386 bytes gzipped on 2026-07-23), measuring it is a
   release-checklist step alongside the `wgpu` version note, and the CI wasm job prints the raw and
