@@ -200,6 +200,40 @@ fn declared_body_radius(d: &crate::terra::world_def::BodyDef) -> f64 {
     d.radius_m.unwrap_or(0.0)
 }
 
+/// **The live resolution-crossing check** (the wiring the SPH assembly primitive exists for): the first orbiting body
+/// (index >= 2 in the [Sun, planet, moons…] layout) whose separation from the planet (index 1) is inside
+/// `accretion::resolution_distance` (the point where tidal stress makes "two point masses" a lie), plus
+/// its body-centric (offset, relative velocity) in f64 SI. That pair is exactly what
+/// `gpu_sph::assemble_from_relaxed_at` takes: TARGET-relative, never heliocentric (f32 collapses at
+/// 1.5e11 m). `eligible[i] == false` skips a body (already materialized, or already handed to the SPH).
+///
+/// Pure and kept OUT of the wasm-only `mod app` so it is natively tested, like the body-spec rules above.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn live_resolution_crossing(
+    bodies: &[crate::orbit::Body],
+    planet_radius_m: f64,
+    eligible: &[bool],
+    tidal_fraction: f64,
+) -> Option<(usize, glam::DVec3, glam::DVec3)> {
+    let planet = bodies.get(1)?;
+    for i in 2..bodies.len() {
+        if !eligible.get(i).copied().unwrap_or(true) {
+            continue;
+        }
+        let resolve_at = crate::accretion::resolution_distance(
+            planet.mass,
+            planet_radius_m,
+            bodies[i].mass,
+            tidal_fraction,
+        );
+        let offset = bodies[i].pos - planet.pos;
+        if offset.length() <= resolve_at {
+            return Some((i, offset, bodies[i].vel - planet.vel));
+        }
+    }
+    None
+}
+
 #[cfg(target_arch = "wasm32")]
 mod app {
     use crate::mesher::{self, Mesh, Vertex};
@@ -886,6 +920,13 @@ mod app {
         sph_snapshot: Vec<crate::gpu_sph::SphParticle>,
         /// The GPU impact's setup/step phase (relax on GPU → assemble collision → dynamics). See `advance`.
         sph_phase: SphPhase,
+        /// **A LIVE de-orbit the SPH machine owns** (the live de-orbit hand-off): `Some(i)` once `bodies[i]` crossed
+        /// `accretion::resolution_distance` and was handed to the SPH. `Assembling` then places the
+        /// collision on the body's REAL (offset, velocity) via `assemble_from_relaxed_at`, instead of
+        /// birth's imposed canonical approach; the CPU detect/materialization path skips the body,
+        /// which is matter-in-waiting now, not a point mass to crater with. `None` on the declared
+        /// (`start_gpu_impact`) path.
+        sph_live_drop: Option<usize>,
         /// docs/42 render-layer blend: 0 = the PRETTY render (sphere/atmosphere), 1 = the raw PHYSICS particles.
         /// Cross-fades by size (grains × (1−blend), billboards × blend), so no alpha-sort. Only meaningful while
         /// `sph_active`. Default 0 (pretty first — the slider reveals the physics).
@@ -1222,6 +1263,7 @@ mod app {
                 sph_substeps: 6,
                 sph_snapshot: Vec::new(),
                 sph_phase: SphPhase::Dynamics,
+                sph_live_drop: None,
                 render_blend: 0.0, // pretty by default (docs/42)
                 gpu_impact_site: None,
                 gpu_crater_frac: 0.0,
@@ -1503,6 +1545,13 @@ mod app {
             // Drop the snapshot history — the renderer must not interpolate across the reset.
             self.snaps.clear();
             self.real_accum = 0.0;
+            // A LIVE hand-off is undone with the rest of the world: the SPH machine was entered from
+            // the N-body state this just restored, so tear it down and the moon is a point mass again.
+            if self.sph_live_drop.take().is_some() {
+                self.sph_active = false;
+                self.gpu_sph = None;
+                self.sph_phase = SphPhase::Dynamics;
+            }
         }
 
         /// Predicted perigee (closest approach) of the Moon's orbit about the Earth, in km — or a
@@ -1804,6 +1853,7 @@ mod app {
                 self.sph_active = false;
                 self.gpu_sph = None;
                 self.sph_phase = SphPhase::Dynamics;
+                self.sph_live_drop = None; // the drop's matter lives in the moonlets now
                 self.camera.zoom = 1.0; // back out from the impact framing to the Earth–Moon geologic view
                 self.geologic = true;
                 return;
@@ -2099,9 +2149,49 @@ mod app {
                 self.acc = crate::orbit::accelerations(&self.bodies);
             }
             self.sph_phase = SphPhase::Relaxing(0);
+            self.sph_live_drop = None; // this is the DECLARED path: the geometry is the canonical approach
             self.gpu_impact_site = None; // no crater until Theia makes contact (docs/42 Phase 2)
             self.gpu_crater_frac = 0.0;
             self.sph_substeps = 6; // start conservative; the frame-budget controller adapts up (docs/42)
+            self.focus = 1; // centre on Earth (the particle system sits at the display origin)
+            self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
+        }
+
+        /// Enter the SPH machine for a LIVE de-orbit: `bodies[i]`
+        /// crossed `accretion::resolution_distance`, so its collision must be resolved as matter, through
+        /// the SAME machine as the birth impact, not the CPU `Aggregate` path. Mirrors the relax start of
+        /// [`Self::start_gpu_impact`], with the one difference that IS the point: the bodies keep flying
+        /// their real N-body trajectory (nothing truncates or re-aims them), and `Assembling` reads that
+        /// trajectory at assembly time via `assemble_from_relaxed_at`.
+        fn start_live_drop_sph(&mut self, i: usize) {
+            // Name the bodies actually colliding, or the relax builds the birth defaults (proto-Earth +
+            // a Theia-sized impactor) for an Earth–Luna event. Every moon a system world places is an
+            // instance of Luna (`assets/bodies/moon.json`, the docs/51 rule), so "moon" IS the
+            // impactor's definition; a world that drops some OTHER defined body needs the body id
+            // carried per-body (in `BodyMeta`) before this can name it.
+            self.impact_def = crate::terra::world_def::ImpactDef {
+                target: crate::terra::world_def::ImpactBody { body: "earth".into() },
+                impactor: crate::terra::world_def::ImpactBody { body: "moon".into() },
+                ..Default::default()
+            };
+            let eos = [crate::gpu_sph::SphEos::basalt(), crate::gpu_sph::SphEos::iron()];
+            let (particles, softening, relax_dt) =
+                crate::gpu_sph::build_far_apart_from(&self.impact_def, 2400, 400);
+            self.sph_soft = softening as f64;
+            let cap = particles.len() as u32;
+            let mut sph = crate::gpu_sph::GpuSph::new(&self.device, cap);
+            sph.upload(&self.queue, &particles, &eos, softening);
+            sph.set_dt(&self.queue, relax_dt, 0.94); // damped relaxation toward hydrostatic equilibrium
+            sph.set_av(&self.queue, 0.0, 0.0); // no artificial viscosity during relax
+            self.gpu_sph = Some(sph);
+            self.sph_dt = relax_dt;
+            self.sph_active = true;
+            self.sph_snapshot.clear();
+            self.sph_phase = SphPhase::Relaxing(0);
+            self.sph_live_drop = Some(i);
+            self.gpu_impact_site = None;
+            self.gpu_crater_frac = 0.0;
+            self.sph_substeps = 6;
             self.focus = 1; // centre on Earth (the particle system sits at the display origin)
             self.camera.zoom = 0.4; // frame the impact (the Earth–Moon default zoom shows it as a speck)
         }
@@ -2224,8 +2314,11 @@ mod app {
                         while self.real_accum >= real_per_sub && steps < 96 {
                             // Hand off to the resolved SPH the moment tides make "two point masses" a lie
                             // — which is above contact, so `step_substep` never detects an N-body collision
-                            // here and never materialises the wrong kind of debris.
-                            let sep = (self.bodies[2].pos - self.bodies[1].pos).length();
+                            // here and never materialises the wrong kind of debris. A LIVE drop is already
+                            // inside the threshold when the machine starts, so it assembles immediately;
+                            // its impactor is whichever body crossed, not necessarily index 2.
+                            let im = self.sph_live_drop.unwrap_or(2);
+                            let sep = (self.bodies[im].pos - self.bodies[1].pos).length();
                             if sep <= resolve_at {
                                 self.sph_phase = SphPhase::Assembling;
                                 break;
@@ -2242,7 +2335,32 @@ mod app {
                     SphPhase::Assembling => {
                         let relaxed = self.gpu_sph.as_mut().and_then(|s| s.take_readback());
                         if let Some(relaxed) = relaxed {
-                            let (particles, eos, softening, dt) = crate::gpu_sph::assemble_from_relaxed_with(&self.impact_def, &relaxed);
+                            // Two honest geometry sources, one primitive (`assemble_from_relaxed_at`):
+                            // a LIVE de-orbit hands over the trajectory the N-body actually integrated,
+                            // read at assembly time; the declared birth impact keeps its imposed
+                            // canonical approach (free-fall from rest gives the wrong one).
+                            let (particles, eos, softening, dt) = match self.sph_live_drop {
+                                Some(i) => {
+                                    // Body-centric f64 SI, never heliocentric (f32 collapses at 1.5e11 m).
+                                    let offset = self.bodies[i].pos - self.bodies[1].pos;
+                                    let rel_vel = self.bodies[i].vel - self.bodies[1].vel;
+                                    // Earth's spin rate from its angular momentum, exactly as the CPU
+                                    // materialization does: omega = L/I, solid-sphere I = 2/5 M R². The
+                                    // primitive spins about +z, so the z component is the rate it takes.
+                                    let earth_i =
+                                        0.4 * self.bodies[1].mass * EARTH_RADIUS_M * EARTH_RADIUS_M;
+                                    let target_spin =
+                                        if earth_i > 0.0 { self.spin_l.z / earth_i } else { 0.0 };
+                                    // impactor_spin = 0.0 is a Law V IOU: the engine keeps no per-body
+                                    // spin state (only Earth's `spin_l`), so the moon's own rotation
+                                    // cannot be handed over. The real computation this defers: per-body
+                                    // spin angular momentum carried in the N-body state.
+                                    crate::gpu_sph::assemble_from_relaxed_at(
+                                        &relaxed, target_spin, offset, rel_vel, 0.0,
+                                    )
+                                }
+                                None => crate::gpu_sph::assemble_from_relaxed_with(&self.impact_def, &relaxed),
+                            };
                             self.sph_soft = softening as f64;
                             self.sph_dt = dt; // the SMALL shock dt (resolves the collision)
                             self.sph_dt_aftermath = dt * 5.0; // switch to this once the shock has passed
@@ -2341,6 +2459,15 @@ mod app {
                 self.real_accum -= real_per_sub;
                 steps += 1;
                 self.step_substep(dt_sub);
+                // The substep detected a live body inside its resolution distance: enter the SPH
+                // machine NOW, on the trajectory the N-body just integrated. From the next `advance`
+                // the machine owns the frame (Relaxing → Approaching → Assembling → Dynamics).
+                if !self.sph_active {
+                    if let Some(i) = self.sph_live_drop {
+                        self.start_live_drop_sph(i);
+                        break;
+                    }
+                }
             }
             self.push_snapshot();
         }
@@ -2380,12 +2507,40 @@ mod app {
             self.spin_angle += dt * self.spin_l.length()
                 / crate::tides::moment_of_inertia(self.bodies[1].mass, EARTH_RADIUS_M);
 
+            // **A body crossing its resolution distance stops being a point mass**: tides
+            // make "two point masses" a lie there, so the engine hands the drop to the SPH machine
+            // (the same machine as the birth impact) instead of the CPU debris path. Checked right
+            // after integration because one fast-forward substep (~123 s at 118,000x) can carry a
+            // dropped moon from outside the threshold to below contact; the guards below then keep
+            // this substep's swept detection and parking pass off a body the SPH is about to own.
+            // (`advance` starts the relax as soon as this substep returns.) The retired CPU birth
+            // path (`start_birth`) keeps its own Aggregate route until the CPU debris path is retired.
+            if !self.sph_active && self.sph_live_drop.is_none() && !self.birth_mode {
+                let eligible: Vec<bool> = (0..self.bodies.len())
+                    .map(|i| self.body_meta.get(i).map_or(true, |m| !m.materialized))
+                    .collect();
+                let r_planet = self.body_meta.get(1).map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                if let Some((i, ..)) = crate::live_resolution_crossing(
+                    &self.bodies,
+                    r_planet,
+                    &eligible,
+                    crate::accretion::RESOLVE_TIDAL_FRACTION,
+                ) {
+                    self.sph_live_drop = Some(i);
+                }
+            }
+
             // The integrated endpoints, and which bodies may still collide (a moon already materialised
             // into Earth is no longer a distinct body to detect). The Sun (index 0) never reaches anything
             // — it is checked and correctly finds nothing, which is more honest than special-casing it out.
+            // A body handed to the SPH machine is excluded too: its collision belongs to the particle
+            // physics now, and CPU-materialising it here would resolve the same matter twice.
             let after_pos: Vec<glam::DVec3> = self.bodies.iter().map(|b| b.pos).collect();
             let active: Vec<bool> = (0..self.bodies.len())
-                .map(|i| self.body_meta.get(i).map_or(true, |m| !m.materialized))
+                .map(|i| {
+                    self.body_meta.get(i).map_or(true, |m| !m.materialized)
+                        && self.sph_live_drop != Some(i)
+                })
                 .collect();
             let collisions = crate::interaction::detect_swept(&before, &after_pos, &active);
 
@@ -2425,10 +2580,15 @@ mod app {
             }
 
             // Keep already-hit / overlapping bodies parked at the surface (the slow-approach case and
-            // the ongoing merge — the heavier Earth barely moves; momentum conserved).
+            // the ongoing merge — the heavier Earth barely moves; momentum conserved). NOT the body the
+            // SPH machine owns: parking would clamp its position and cancel the very approach velocity
+            // `Assembling` is about to read as the live collision geometry.
             let (head, tail) = self.bodies.split_at_mut(2);
             let earth = &mut head[1];
-            for moon in tail.iter_mut() {
+            for (k, moon) in tail.iter_mut().enumerate() {
+                if self.sph_live_drop == Some(k + 2) {
+                    continue;
+                }
                 crate::orbit::resolve_contact(earth, moon, contact);
             }
 
@@ -4533,6 +4693,61 @@ mod app {
 #[cfg(test)]
 mod tests {
     use crate::{body, gravity, materials, mesher, world};
+
+    /// **A live body crossing its resolution distance is the engine's cue to resolve it as matter**
+    /// (the cue to resolve it as matter): the check must report the FIRST orbiting body inside
+    /// `accretion::resolution_distance` of the planet, together with the exact body-centric
+    /// (offset, relative velocity) pair: the same f64 SI numbers `assemble_from_relaxed_at` will
+    /// receive. Body-centric, never heliocentric (f32 collapses at 1.5e11 m).
+    #[test]
+    fn a_body_crossing_its_resolution_distance_is_reported_with_its_live_geometry() {
+        use crate::orbit::Body;
+        use glam::DVec3;
+        const M_EARTH: f64 = 5.972e24;
+        const R_EARTH: f64 = 6.371e6;
+        const M_MOON: f64 = 7.342e22;
+        let f = crate::accretion::RESOLVE_TIDAL_FRACTION;
+        let resolve_at = crate::accretion::resolution_distance(M_EARTH, R_EARTH, M_MOON, f);
+        let sun = Body { pos: DVec3::ZERO, vel: DVec3::ZERO, mass: 1.989e30 };
+        let earth = Body {
+            pos: DVec3::new(1.496e11, 0.0, 0.0),
+            vel: DVec3::new(0.0, 29_780.0, 0.0),
+            mass: M_EARTH,
+        };
+        // One moon just OUTSIDE the threshold, one just INSIDE: the crossing is at index 3 only.
+        let outside = Body {
+            pos: earth.pos + DVec3::new(0.0, 1.05 * resolve_at, 0.0),
+            vel: earth.vel + DVec3::new(-1022.0, 0.0, 0.0),
+            mass: M_MOON,
+        };
+        let inside = Body {
+            pos: earth.pos + DVec3::new(0.95 * resolve_at, 0.0, 0.0),
+            vel: earth.vel + DVec3::new(0.0, -3000.0, 0.0),
+            mass: M_MOON,
+        };
+        let bodies = [sun, earth, outside, inside];
+
+        let (i, offset, rel_vel) =
+            crate::live_resolution_crossing(&bodies, R_EARTH, &[true; 4], f)
+                .expect("a body inside the resolution distance must be reported");
+        assert_eq!(i, 3, "the body OUTSIDE the threshold must not fire; the one INSIDE must");
+        // EXACT equality: the pair is handed straight to the SPH assembly, so nothing may drift here.
+        assert_eq!(offset, bodies[3].pos - bodies[1].pos, "body-centric offset, bit-exact");
+        assert_eq!(rel_vel, bodies[3].vel - bodies[1].vel, "body-centric velocity, bit-exact");
+
+        // Nobody inside ⇒ no crossing (the point-mass representation is still honest).
+        assert!(
+            crate::live_resolution_crossing(&bodies[..3], R_EARTH, &[true; 3], f).is_none(),
+            "a body above the threshold is still a body"
+        );
+        // An ineligible body (already materialized, or already handed to the SPH) is skipped.
+        let mut eligible = [true; 4];
+        eligible[3] = false;
+        assert!(
+            crate::live_resolution_crossing(&bodies, R_EARTH, &eligible, f).is_none(),
+            "an ineligible body must not be reported twice"
+        );
+    }
 
     #[test]
     fn metres_per_pixel_matches_frustum_geometry() {
