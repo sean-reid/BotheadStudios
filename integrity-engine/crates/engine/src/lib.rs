@@ -67,6 +67,7 @@ mod planet;
 /// they were never scene code, and living there kept them out of every native build.
 mod render;
 pub mod recohere; // docs/61 — the batch downward rung: a settled particle field re-coheres to ground
+pub mod refine; // docs/59, the upward rung: the celestial field initializes the local patch, conserved (UNWIRED; the M4 zoom materialization milestone owns the trigger)
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 /// docs/49 — surface detail that follows the camera CONTINUOUSLY. The consumer
 /// `ResolutionController::camera_grain_radius` never had.
