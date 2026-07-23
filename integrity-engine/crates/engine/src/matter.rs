@@ -1053,7 +1053,10 @@ impl MatterSim {
     /// as ground, not as a bare particle field. Adapts the particles to
     /// [`crate::recohere::FieldGrain`], runs [`crate::recohere::recohere_settled`], and on success
     /// swaps in the remainder (sub-quantum masses and law-refused columns, which STAY particles).
-    /// Returns the voxels written; a [`crate::recohere::Refusal`] passes through untouched.
+    /// Returns the rung's full audit (voxels written, deposited mass, and the kinetic energy and
+    /// heat measured at the crossing, which has no voxel-side thermal sink yet, docs/46 row 17)
+    /// with the remainder ALREADY swapped into this field; a [`crate::recohere::Refusal`] passes
+    /// through untouched.
     ///
     /// [`SettleGauge`]: crate::recohere::SettleGauge
     pub fn recohere_settled(
@@ -1063,7 +1066,7 @@ impl MatterSim {
         g: f32,
         gauge: &crate::recohere::SettleGauge,
         bodies: &[Sphere],
-    ) -> Result<usize, crate::recohere::Refusal> {
+    ) -> Result<crate::recohere::Recohered, crate::recohere::Refusal> {
         let grains: Vec<crate::recohere::FieldGrain> = self
             .particles
             .iter()
@@ -1091,7 +1094,7 @@ impl MatterSim {
                 .collect();
             self.dirty = true;
         }
-        Ok(r.voxels)
+        Ok(r)
     }
 
     /// Advance all particles by `dt`: gravity from the field, terrain collision, and — when a
@@ -1364,7 +1367,7 @@ mod tests {
         let folded = sim
             .recohere_settled(&mut w, &mats, g, &gauge, &[])
             .expect("a settled field folds");
-        assert_eq!(folded, 1, "1.6 quanta afford exactly ONE whole voxel");
+        assert_eq!(folded.voxels, 1, "1.6 quanta afford exactly ONE whole voxel");
         assert_eq!(w.solid_count(), before + 1);
         assert_eq!(w.material_at(4, 1, 4), Some(gravel), "gravel comes back as gravel");
         assert_eq!(sim.particle_count(), 1, "the 0.6-quantum remainder stays a particle");

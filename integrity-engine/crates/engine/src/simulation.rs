@@ -176,6 +176,12 @@ pub struct Simulation {
     settle: crate::recohere::SettleGauge,
     /// Voxels the batch rung has returned to the world since construction (matter accounting).
     recohered_voxels: usize,
+    /// J of kinetic energy the batch rung's crossings have measured since construction. The voxel
+    /// world has no thermal sink for it yet (docs/46 row 17), so this is a MEASURED loss the
+    /// energy accounting can see, not a deposit.
+    recohered_kinetic_j: f64,
+    /// J of carried heat measured at the same crossings, same missing sink, same deferral.
+    recohered_heat_j: f64,
 }
 
 /// A meteor: real matter with a mass, a material, a place and a velocity.
@@ -246,6 +252,8 @@ impl Simulation {
             bodies,
             settle: crate::recohere::SettleGauge::new(),
             recohered_voxels: 0,
+            recohered_kinetic_j: 0.0,
+            recohered_heat_j: 0.0,
         };
         sim.apply_events();
         Ok(sim)
@@ -336,11 +344,16 @@ impl Simulation {
         if !self.settle.settled(self.surface_g) {
             return;
         }
-        if let Ok(voxels) =
+        if let Ok(r) =
             self.matter
                 .recohere_settled(&mut self.world, &self.materials, self.surface_g, &self.settle, &[])
         {
-            self.recohered_voxels += voxels;
+            self.recohered_voxels += r.voxels;
+            // The crossing's measured energy (docs/46 row 17): kinetic energy and carried heat the
+            // binned mass took into a store with no thermal state. Accumulated so the loss is
+            // visible in the accounting, not silent.
+            self.recohered_kinetic_j += r.binned_kinetic_j;
+            self.recohered_heat_j += r.binned_heat_j;
             // Re-arm: what remains (sub-quantum mass, law-refused columns) stays honest particles,
             // and any new excitement starts its own settle window.
             self.settle.reset();
@@ -861,6 +874,21 @@ impl Simulation {
     /// counterpart of `created_total`, so "the grains became ground" is measurable, not assumed.
     pub fn recohered_voxels(&self) -> usize {
         self.recohered_voxels
+    }
+
+    /// J of kinetic energy measured at the batch rung's grain-to-voxel crossings since
+    /// construction. Settling is dissipation, so this energy should become heat on the receiving
+    /// side; the voxel world carries no thermal state yet (docs/46 row 17), so the engine measures
+    /// the loss instead of pretending it did not happen.
+    pub fn recohered_kinetic_j(&self) -> f64 {
+        self.recohered_kinetic_j
+    }
+
+    /// J of heat above ambient measured at the same crossings: the binned mass's carried
+    /// temperature, which the voxel store cannot hold yet (docs/46 row 17). Remainder grains keep
+    /// their own heat; only what actually crossed is booked here.
+    pub fn recohered_heat_j(&self) -> f64 {
+        self.recohered_heat_j
     }
 }
 
