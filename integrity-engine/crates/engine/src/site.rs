@@ -1083,10 +1083,11 @@ mod tests {
         // refine-level test pins that behaviour; if the rung improves, Released is fine too).
         let release_line = match site.release {
             SiteRelease::Released(r) => {
-                assert!(r.released_max_density_error <= refine::RELEASE_DENSITY_ERROR);
+                assert!(r.released_max_density_error <= r.release_bound);
+                assert!(r.release_bound >= refine::RELEASE_DENSITY_ERROR);
                 format!(
-                    "released {:.3e} in {} iterations",
-                    r.released_max_density_error, r.iterations
+                    "released {:.3e} under bound {:.3e} in {} iterations",
+                    r.released_max_density_error, r.release_bound, r.iterations
                 )
             }
             SiteRelease::Unreleased { achieved, bound, iterations } => {

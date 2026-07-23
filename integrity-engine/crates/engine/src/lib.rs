@@ -4251,9 +4251,14 @@ mod app {
         let l = &site.ledger;
         let release = match site.release {
             crate::site::SiteRelease::Released(r) => format!(
-                "released {:.1e} (bound {:.0e}) in {} iters",
+                "released {:.1e} (bound {:.1e}{}) in {} iters",
                 r.released_max_density_error,
-                crate::refine::RELEASE_DENSITY_ERROR,
+                r.release_bound,
+                if r.release_bound > crate::refine::RELEASE_DENSITY_ERROR {
+                    ", the field's own scale mismatch at the stall"
+                } else {
+                    ""
+                },
                 r.iterations
             ),
             crate::site::SiteRelease::Unreleased { achieved, bound, iterations } => format!(
