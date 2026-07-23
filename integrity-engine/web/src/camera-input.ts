@@ -20,6 +20,9 @@
 
 export type LookHandler = (dyawRad: number, dpitchRad: number) => void;
 
+/** Pointer travel while panning, in CSS pixels (screen x right, screen y down). */
+export type PanHandler = (dxPx: number, dyPx: number) => void;
+
 /** What the camera is being asked to do this frame. */
 export interface CameraIntent {
   /** −1 backward, 0 still, +1 forward. Polled per frame so movement is smooth and frame-rate driven. */
@@ -33,6 +36,13 @@ export interface CameraInputOptions {
   sensitivity?: number;
   /** Invert the vertical axis. */
   invertY?: boolean;
+  /**
+   * PAN — **shift + left-drag, or middle-drag** translates the view target. Optional because only a
+   * scene whose camera has a movable look target (the orbit band) can honour it; scenes that supply
+   * no handler keep the plain grammar, where shift + left-button means move backward. While a pan
+   * drag is active the movement keys are not engaged, so the two meanings never fire together.
+   */
+  onPan?: PanHandler;
 }
 
 /**
@@ -48,8 +58,9 @@ export function attachCameraInput(
   onLook: LookHandler,
   opts: CameraInputOptions = {},
 ): CameraIntent {
-  const { sensitivity = 0.005, invertY = false } = opts;
+  const { sensitivity = 0.005, invertY = false, onPan } = opts;
   let looking = false;
+  let panning = false;
   let lastX = 0;
   let lastY = 0;
   let pointerId: number | null = null;
@@ -57,6 +68,10 @@ export function attachCameraInput(
   // A gesture counts as look if the right button is held (buttons bit 2) or ALT is down. `buttons` is
   // used rather than `button` so a modifier pressed mid-drag still reads correctly on move events.
   const isLook = (e: PointerEvent | MouseEvent): boolean => (e.buttons & 2) !== 0 || e.altKey;
+  // A gesture counts as pan (when the scene supplied a handler) if the middle button is held
+  // (buttons bit 4) or shift accompanies the left button. Alt keeps its look meaning.
+  const isPan = (e: PointerEvent | MouseEvent): boolean =>
+    !!onPan && ((e.buttons & 4) !== 0 || ((e.buttons & 1) !== 0 && e.shiftKey && !e.altKey));
 
   // Movement state, polled each frame. `ctrl` is the keyboard equivalent of holding the left button, so
   // the scheme works on a trackpad without a right button or a comfortable click-drag.
@@ -65,6 +80,16 @@ export function attachCameraInput(
   let shiftHeld = false;
 
   const down = (e: PointerEvent) => {
+    if (isPan(e)) {
+      // A pan drag owns the pointer: the left button (if any) drives the pan, not the walk.
+      panning = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      pointerId = e.pointerId;
+      canvas.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      return;
+    }
     if ((e.buttons & 1) !== 0 && !e.altKey) leftHeld = true;
     shiftHeld = e.shiftKey;
     if (!isLook(e)) return;
@@ -76,9 +101,13 @@ export function attachCameraInput(
     e.preventDefault();
   };
   const move = (e: PointerEvent) => {
-    if (!looking) return;
-    // Releasing the modifier/button mid-drag ends the look rather than leaving it stuck on.
-    if (!isLook(e)) {
+    if (!looking && !panning) return;
+    // Releasing the modifier/button mid-drag ends the gesture rather than leaving it stuck on.
+    if (panning && !isPan(e)) {
+      panning = false;
+      return;
+    }
+    if (looking && !isLook(e)) {
       looking = false;
       return;
     }
@@ -87,13 +116,15 @@ export function attachCameraInput(
     const dy = e.clientY - lastY;
     lastX = e.clientX;
     lastY = e.clientY;
-    onLook(-dx * sensitivity, (invertY ? dy : -dy) * sensitivity);
+    if (panning) onPan?.(dx, dy);
+    else onLook(-dx * sensitivity, (invertY ? dy : -dy) * sensitivity);
     e.preventDefault();
   };
   const up = (e: PointerEvent) => {
     if ((e.buttons & 1) === 0) leftHeld = false;
-    if (!looking) return;
+    if (!looking && !panning) return;
     looking = false;
+    panning = false;
     if (pointerId !== null && canvas.hasPointerCapture(pointerId)) {
       canvas.releasePointerCapture(pointerId);
     }
@@ -112,6 +143,7 @@ export function attachCameraInput(
     ctrlHeld = false;
     shiftHeld = false;
     looking = false;
+    panning = false;
   };
 
   canvas.addEventListener("pointerdown", down);

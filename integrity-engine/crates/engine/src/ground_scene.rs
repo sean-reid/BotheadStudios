@@ -611,7 +611,13 @@ impl Ground {
             // Start high and back, pitched down at the origin where meteors land — so the impact is in
             // frame from the first moment (Robin: "can see a flicker of a meteor falling but can't see the
             // actual impact"). Free to fly anywhere from there.
-            camera: Camera { yaw: 0.6, pitch: -0.55, zoom: 1.0, base_distance: eye_height_m * 3.0 },
+            camera: Camera {
+                yaw: 0.6,
+                pitch: -0.55,
+                zoom: 1.0,
+                base_distance: eye_height_m * 3.0,
+                pan: Vec3::ZERO,
+            },
             cam_eye: {
                 let g = eye_height_m; // a metre or two; used as the scene's length unit
                 Vec3::new(-24.0 * g, ground0 + 18.0 * g, -24.0 * g)
