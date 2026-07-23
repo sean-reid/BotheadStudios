@@ -2200,25 +2200,44 @@ mod app {
         /// Enter the SPH machine for a LIVE de-orbit: `bodies[i]`
         /// crossed `accretion::resolution_distance`, so its collision must be resolved as matter, through
         /// the SAME machine as the birth impact, not the CPU `Aggregate` path. Mirrors the relax start of
-        /// [`Self::start_gpu_impact`], with the one difference that IS the point: the bodies keep flying
-        /// their real N-body trajectory (nothing truncates or re-aims them), and `Assembling` reads that
+        /// [`Self::start_gpu_impact`], with the differences that ARE the point: each body is PARTICALIZED
+        /// from its own declared matter (docs/58), not from a named impact definition, and the bodies keep
+        /// flying their real N-body trajectory (nothing truncates or re-aims them); `Assembling` reads that
         /// trajectory at assembly time via `assemble_from_relaxed_at`.
         fn start_live_drop_sph(&mut self, i: usize) {
-            // Name the bodies actually colliding, or the relax builds the birth defaults (proto-Earth +
-            // a Theia-sized impactor) for an Earth–Luna event. Every moon a system world places is an
-            // instance of Luna (`assets/bodies/moon.json`, the docs/51 rule), so "moon" IS the
-            // impactor's definition. Still literal names: per-body matter (docs/58) carries each body's
-            // COMPOSITION (`BodyMeta.matter`, a `LayeredBody`) but not the definition id, and `ImpactDef`
-            // names its bodies by id (`assets/bodies/<id>.json`), so a world that drops some OTHER
-            // defined body needs the id carried per-body before this can name it.
-            self.impact_def = crate::terra::world_def::ImpactDef {
-                target: crate::terra::world_def::ImpactBody { body: "earth".into() },
-                impactor: crate::terra::world_def::ImpactBody { body: "moon".into() },
-                ..Default::default()
+            // Each colliding body's SPH particles are built from its OWN matter (docs/58): `particalize`
+            // reads the layered composition the scene declared per body (`BodyMeta.matter`), so the
+            // hand-off names no definition id and carries no target/impactor asymmetry. The detection
+            // gate admits only bodies that carry matter, so the guard below is a formality: a body
+            // without a declared composition stays a point mass on the CPU contact path.
+            let p = self.planet_idx();
+            let (Some(t_matter), Some(i_matter)) = (
+                self.body_meta.get(p).and_then(|m| m.matter.clone()),
+                self.body_meta.get(i).and_then(|m| m.matter.clone()),
+            ) else {
+                self.sph_live_drop = None;
+                return;
             };
+            // Resolution is the ENGINE's compute budget, the same 2400-particle target the declared
+            // birth path spends, allocated as ONE particle mass across the system so neither body's
+            // resolution biases the shared dynamics. The floor keeps a small impactor from being a
+            // handful of mega-particles; below it its particles are lighter than the target's, which is
+            // a resolution statement, not physics (the same floor the birth builder uses).
+            const LIVE_TARGET_N: usize = 2400;
+            let m_particle = t_matter.total_mass() / LIVE_TARGET_N as f64;
+            let n_impactor = ((i_matter.total_mass() / m_particle).round() as usize).max(50);
+            let target = crate::hydrostatic::HydroBody::particalize(&t_matter, LIVE_TARGET_N);
+            let impactor = crate::hydrostatic::HydroBody::particalize(&i_matter, n_impactor);
+            // The relax staging separation is the same declared knob the birth path reads (default:
+            // far enough that mutual gravity is negligible while each body settles under its own).
+            let far = self.impact_def.relax_separation * (t_matter.radius() + i_matter.radius());
+            // The GPU kernel resolves the N-material matter onto its two EOS slots (basalt-like vs
+            // iron-like, by reference density, in `push_body`), a flagged resolution limit of the
+            // in-browser stepper; the per-particle mass, geotherm and smoothing lengths stay the
+            // matter's own.
             let eos = [crate::gpu_sph::SphEos::basalt(), crate::gpu_sph::SphEos::iron()];
             let (particles, softening, relax_dt) =
-                crate::gpu_sph::build_far_apart_from(&self.impact_def, 2400, 400);
+                crate::gpu_sph::far_apart_pair(&target, &impactor, far);
             self.sph_soft = softening as f64;
             let cap = particles.len() as u32;
             let mut sph = crate::gpu_sph::GpuSph::new(&self.device, cap);
@@ -2341,14 +2360,31 @@ mod app {
                         // they sat at arm's length while the analytical "IMPACT IN T−N" countdown promised
                         // a collision that could not arrive. They are whole bodies on an inbound
                         // trajectory; integrate them under gravity at the scene's fast-forward rate.
-                        let target = self.impact_def.target.definition();
-                        let impactor = self.impact_def.impactor.definition();
-                        let resolve_at = crate::accretion::resolution_distance(
-                            target.total_mass(),
-                            target.radius(),
-                            impactor.total_mass(),
-                            crate::accretion::RESOLVE_TIDAL_FRACTION,
-                        );
+                        // The threshold reads the bodies the machine actually holds: a LIVE drop uses the
+                        // colliding bodies' own mass and radius (the same inputs the crossing detection
+                        // used, so it assembles immediately); the declared birth impact reads its
+                        // declared impact definitions.
+                        let resolve_at = match self.sph_live_drop {
+                            Some(im) => {
+                                let p = self.planet_idx();
+                                crate::accretion::resolution_distance(
+                                    self.bodies[p].mass,
+                                    self.body_meta.get(p).map_or(EARTH_RADIUS_M, |m| m.radius_m),
+                                    self.bodies[im].mass,
+                                    crate::accretion::RESOLVE_TIDAL_FRACTION,
+                                )
+                            }
+                            None => {
+                                let target = self.impact_def.target.definition();
+                                let impactor = self.impact_def.impactor.definition();
+                                crate::accretion::resolution_distance(
+                                    target.total_mass(),
+                                    target.radius(),
+                                    impactor.total_mass(),
+                                    crate::accretion::RESOLVE_TIDAL_FRACTION,
+                                )
+                            }
+                        };
                         self.real_accum += real_dt;
                         let real_per_sub = 1.0 / 960.0;
                         let dt_sub = self.time_scale / 960.0;
@@ -2562,21 +2598,33 @@ mod app {
             // (`advance` starts the relax as soon as this substep returns.) The retired CPU birth
             // path (`start_birth`) keeps its own Aggregate route until the CPU debris path is retired.
             if !self.sph_active && self.sph_live_drop.is_none() && !self.birth_mode {
+                // Only a body that CARRIES matter can be resolved into particles: the hand-off
+                // particalizes each body's own layered composition (docs/58), so a bare point mass
+                // (or the un-migrated default scene, whose metadata is empty) stays a point mass on
+                // the CPU contact path rather than being rebuilt from a named definition.
                 let eligible: Vec<bool> = (0..self.bodies.len())
-                    .map(|i| self.body_meta.get(i).map_or(true, |m| !m.materialized))
+                    .map(|i| {
+                        self.body_meta
+                            .get(i)
+                            .map_or(false, |m| !m.materialized && m.matter.is_some())
+                    })
                     .collect();
                 // The planet by its declared ROLE (docs/58), never an index-1 layout assumption.
                 let planet = self.planet_idx();
+                let planet_has_matter =
+                    self.body_meta.get(planet).is_some_and(|m| m.matter.is_some());
                 let r_planet =
                     self.body_meta.get(planet).map_or(EARTH_RADIUS_M, |m| m.radius_m);
-                if let Some((i, ..)) = crate::live_resolution_crossing(
-                    &self.bodies,
-                    planet,
-                    r_planet,
-                    &eligible,
-                    crate::accretion::RESOLVE_TIDAL_FRACTION,
-                ) {
-                    self.sph_live_drop = Some(i);
+                if planet_has_matter {
+                    if let Some((i, ..)) = crate::live_resolution_crossing(
+                        &self.bodies,
+                        planet,
+                        r_planet,
+                        &eligible,
+                        crate::accretion::RESOLVE_TIDAL_FRACTION,
+                    ) {
+                        self.sph_live_drop = Some(i);
+                    }
                 }
             }
 
