@@ -148,11 +148,20 @@ async function main() {
           `standing on <b>${g.surface_material()}</b> · eye <b>${g.eye_altitude_m().toFixed(0)}</b> m above ground`,
           `grains <b>${g.particle_count()}</b> · meteors in flight <b>${g.meteors_in_flight()}</b> · total ever <b>${g.created_total()}</b>`,
           // The declared solid body (the iron ball), reported from the same state the physics runs on.
+          // The VERDICT leads: parcels are conserved matter (the count never drops), so a first-time
+          // viewer read "33 parcels" as "still intact" after a direct hit. The one word the sim
+          // already knows answers the question the line is really asked - did it survive? - and the
+          // parcel/bond counts stay as the supporting numbers.
           ...(() => {
             const bp = g.body_probe();
             if (bp.length !== 4) return [];
+            const verdict = g.body_verdict();
+            const color =
+              verdict === "shattered" ? "#ff8a8a" : verdict === "dented" ? "#ffd08a" : "#9fe0a2";
             return [
-              `ball <b>${bp[0]}</b> parcels · <b>${bp[1]}</b> bonds · com <b>${bp[2].toFixed(1)}</b> m over ground <b>${bp[3].toFixed(1)}</b> m`,
+              `ball <b style="color:${color}">${verdict.toUpperCase()}</b> · ` +
+                `<b>${bp[0]}</b> parcels · <b>${bp[1]}</b> bonds · ` +
+                `com <b>${bp[2].toFixed(1)}</b> m over ground <b>${bp[3].toFixed(1)}</b> m`,
             ];
           })(),
         ],
