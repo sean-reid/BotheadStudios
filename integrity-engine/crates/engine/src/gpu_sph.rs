@@ -79,6 +79,25 @@ pub struct SphParams {
 }
 
 impl SphEos {
+    /// The GPU (f32) mirror of an engine-side condensed-matter EOS (`eos::Tillotson`) — how a particalized
+    /// particle's OWN material (docs/58 #4) reaches the shader. The padding tail stays zero.
+    pub fn from_tillotson(t: &crate::eos::Tillotson) -> Self {
+        SphEos {
+            rho0: t.rho0 as f32,
+            a: t.a as f32,
+            b: t.b as f32,
+            cap_a: t.cap_a as f32,
+            cap_b: t.cap_b as f32,
+            e0: t.e0 as f32,
+            e_iv: t.e_iv as f32,
+            e_cv: t.e_cv as f32,
+            alpha: t.alpha as f32,
+            beta: t.beta as f32,
+            _p0: 0.0,
+            _p1: 0.0,
+        }
+    }
+
     pub fn basalt() -> Self {
         SphEos { rho0: 2700.0, a: 0.5, b: 1.5, cap_a: 2.67e10, cap_b: 2.67e10, e0: 4.87e8, e_iv: 4.72e6, e_cv: 1.82e7, alpha: 5.0, beta: 5.0, _p0: 0.0, _p1: 0.0 }
     }
@@ -88,6 +107,10 @@ impl SphEos {
 }
 pub const MAT_BASALT: u32 = 0;
 pub const MAT_IRON: u32 = 1;
+/// The GPU EOS table holds up to this many DISTINCT materials — the shader indexes `eos[particle.mat]`, and a
+/// body's layers are rock/metal/ice, so a handful. The EOS array used to be a fixed pair (`[basalt, iron]`);
+/// an N-body impact of differentiated worlds (docs/58) needs the table to grow. Generous headroom.
+pub const MAX_MATERIALS: usize = 16;
 
 /// Camera uniform for `sph_render.wgsl` (96 bytes): the view-projection matrix + the Earth display origin +
 /// (DISPLAY_SCALE, billboard half-size) so the instanced particle shader does the Earth-relative→clip map.
@@ -246,6 +269,49 @@ fn body_bulk(particles: &[SphParticle], prov: u32) -> (glam::DVec3, f64, f64) {
     (c, m, r)
 }
 
+/// One source body's placement in an N-body SPH collision (docs/58 #7): where its recentred matter goes, its
+/// bulk velocity, and its angular velocity ω — a VECTOR (any axis, not +z). Indexed by `prov` (the source
+/// body). The engine computes these from the live bodies it holds; a scene never declares them.
+#[derive(Clone, Copy, Debug)]
+pub struct BodyPlacement {
+    pub offset: glam::DVec3,
+    pub vel: glam::DVec3,
+    pub spin: glam::DVec3, // angular velocity ω (rad/s); v_spin = ω × (r − com)
+}
+
+/// **Place N relaxed source bodies on a given collision geometry — the generic, N-body assembly (docs/58 #7;
+/// Robin: only two is not robust).** `placements[k]` is the placement for source `prov == k`: recentre that
+/// body and put it at `offset` moving at `vel` + ω×(r−com). Materials are carried by the particles' `mat`
+/// (the shared table [`SphAssembly`] built once); this only repositions. Returns (particles, softening, the
+/// shock-safe dt against the fastest approach). A particle whose `prov` has no placement is dropped.
+pub fn assemble_from_relaxed_n(
+    particles: &[SphParticle],
+    placements: &[BodyPlacement],
+) -> (Vec<SphParticle>, f32, f32) {
+    use glam::DVec3;
+    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+    // Each source body's robust centre (surviving the strays a relax always leaves).
+    let coms: Vec<DVec3> = (0..placements.len()).map(|k| body_bulk(particles, k as u32).0).collect();
+    let mut out = Vec::with_capacity(particles.len());
+    for p in particles {
+        let Some(pl) = placements.get(p.prov as usize) else { continue };
+        let local = pos(p) - coms[p.prov as usize];
+        let q = local + pl.offset;
+        let v = pl.vel + pl.spin.cross(local); // ω × (r − com), full vector — any spin axis
+        out.push(SphParticle {
+            pos: [q.x as f32, q.y as f32, q.z as f32],
+            vel: [v.x as f32, v.y as f32, v.z as f32],
+            ..*p
+        });
+    }
+    // softening = finest spacing (min_h/4). Shock-safe dt against the FASTEST approach among the bodies.
+    let min_h = out.iter().map(|p| p.h).fold(f32::INFINITY, f32::min);
+    let softening = 0.25 * min_h;
+    let max_speed = placements.iter().map(|pl| pl.vel.length()).fold(0.0, f64::max);
+    let dt = (0.01 * min_h as f64 / (20_000.0 + max_speed)) as f32;
+    (out, softening, dt)
+}
+
 /// **Place the two relaxed bodies on a GIVEN collision geometry -- the engine's geometry-agnostic assembly
 /// primitive.** In the target-relative frame: the target (prov 0) recentred at the origin and spun at
 /// `target_spin` (rad/s about +z), the impactor (prov 1) recentred then placed at `impactor_offset` moving at
@@ -267,36 +333,14 @@ pub fn assemble_from_relaxed_at(
     impactor_spin: f64,
 ) -> (Vec<SphParticle>, [SphEos; 2], f32, f32) {
     use glam::DVec3;
-    let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
-    let (target_com, ..) = body_bulk(particles, 0);
-    let (impactor_com, ..) = body_bulk(particles, 1);
-    // Emit a body recentred (-com) to its own origin, translated to `place`, moving at `bulk_vel` with rigid
-    // spin `spin` (rad/s) about +z through its own centre: v = bulk_vel + spin * z_hat x local, local = pos-com.
-    let emit = |out: &mut Vec<SphParticle>, prov: u32, com: DVec3, place: DVec3, bulk_vel: DVec3, spin: f64| {
-        for p in particles.iter().filter(|p| p.prov == prov) {
-            let local = pos(p) - com;
-            let q = local + place;
-            let v = bulk_vel + DVec3::new(-spin * local.y, spin * local.x, 0.0);
-            out.push(SphParticle {
-                pos: [q.x as f32, q.y as f32, q.z as f32],
-                vel: [v.x as f32, v.y as f32, v.z as f32],
-                ..*p
-            });
-        }
-    };
-    let mut out = Vec::with_capacity(particles.len());
-    // The target's SPIN is applied here at assembly (docs/41 spin IOU): a spinning target flings its own
-    // mantle into a rotationally-sustained disk, recovering the Earth-rich disk a non-spinning impact never
-    // reaches -- and after a spherical relax, so no rotational-equilibrium relaxation is needed.
-    emit(&mut out, 0, target_com, DVec3::ZERO, DVec3::ZERO, target_spin); // target at the frame origin
-    emit(&mut out, 1, impactor_com, impactor_offset, impactor_vel, impactor_spin); // impactor on the geometry
-    // softening = finest (iron) spacing = min_h/4. Shock-safe dt: the fixed-dt browser path (WebGPU forbids
-    // the adaptive read-back) must resolve the impact shock or the impactor interpenetrates and hit-and-runs
-    // (docs/41). The speed term is the ACTUAL approach speed, so a slow de-orbit and a fast giant impact each
-    // get the dt their own shock needs.
-    let min_h = out.iter().map(|p| p.h).fold(f32::INFINITY, f32::min);
-    let softening = 0.25 * min_h;
-    let dt = (0.01 * min_h as f64 / (20_000.0 + impactor_vel.length())) as f32;
+    // The 2-body case of `assemble_from_relaxed_n`: the target (prov 0) at the frame origin spun about +z (the
+    // docs/41 spin IOU — a spinning target flings its own mantle into a rotationally-sustained disk), the
+    // impactor (prov 1) on the given geometry. A convenience wrapper for the scene's current 2-body callers.
+    let placements = [
+        BodyPlacement { offset: DVec3::ZERO, vel: DVec3::ZERO, spin: DVec3::new(0.0, 0.0, target_spin) },
+        BodyPlacement { offset: impactor_offset, vel: impactor_vel, spin: DVec3::new(0.0, 0.0, impactor_spin) },
+    ];
+    let (out, softening, dt) = assemble_from_relaxed_n(particles, &placements);
     (out, [SphEos::basalt(), SphEos::iron()], softening, dt)
 }
 
@@ -609,6 +653,64 @@ fn push_body(out: &mut Vec<SphParticle>, b: &crate::hydrostatic::HydroBody, prov
     }
 }
 
+/// **Builds the SPH particle set + the shared material EOS table for a collision of ANY NUMBER of bodies**
+/// (docs/58 #4/#5/#7 — N-body, not just target+impactor; "only two is not particularly robust", Robin). Each
+/// body is particalized ([`crate::hydrostatic::HydroBody::particalize`]) then appended with its own SOURCE
+/// index as `prov`; materials are deduped ACROSS ALL bodies into one ≤[`MAX_MATERIALS`]-entry table the shader
+/// indexes with `eos[particle.mat]`. So a three-moon impact and a two-body impact are the same path.
+#[derive(Default)]
+pub struct SphAssembly {
+    pub particles: Vec<SphParticle>,
+    pub eos: Vec<SphEos>,
+}
+
+impl SphAssembly {
+    /// Append body `prov`'s particalized matter, translated by `offset` and moving at bulk `vel`. The EOS
+    /// table grows only when this body introduces a material not already present.
+    pub fn add_body(
+        &mut self,
+        body: &crate::hydrostatic::HydroBody,
+        prov: u32,
+        offset: glam::DVec3,
+        vel: glam::DVec3,
+    ) {
+        for i in 0..body.pos.len() {
+            let t = match &body.eos[i] {
+                crate::eos::Eos::Tillotson(t) => *t,
+                // A body is condensed matter; a stray gas parcel is unexpected here — fall back, don't panic.
+                crate::eos::Eos::IdealGas { .. } => crate::eos::Tillotson::basalt(),
+            };
+            let mat = self.material_index(SphEos::from_tillotson(&t));
+            let q = body.pos[i] + offset;
+            self.particles.push(SphParticle {
+                pos: [q.x as f32, q.y as f32, q.z as f32],
+                h: body.h[i] as f32,
+                vel: [vel.x as f32, vel.y as f32, vel.z as f32],
+                u: body.u[i] as f32,
+                mass: body.mass[i] as f32,
+                mat,
+                rho: body.rho.get(i).copied().unwrap_or(t.rho0) as f32,
+                prov,
+            });
+        }
+    }
+
+    /// The index of a material in the shared table, inserting it if new. Deduped by reference density (a
+    /// material's identity). Capped at `MAX_MATERIALS`; beyond that a new material folds onto the last slot —
+    /// a flagged ceiling, never an overflow (a body has far fewer distinct materials than the cap).
+    fn material_index(&mut self, se: SphEos) -> u32 {
+        if let Some(k) = self.eos.iter().position(|e| e.rho0 == se.rho0) {
+            return k as u32;
+        }
+        if self.eos.len() < MAX_MATERIALS {
+            self.eos.push(se);
+            (self.eos.len() - 1) as u32
+        } else {
+            (MAX_MATERIALS - 1) as u32
+        }
+    }
+}
+
 /// GPU-resident SPH particle system + the `sph_step.wgsl` pipelines. Owns the physics buffer (which is ALSO
 /// the render vertex buffer — zero-copy instanced draw) and the grid/force scratch.
 pub struct GpuSph {
@@ -648,7 +750,7 @@ impl GpuSph {
         });
         let eos_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sph-eos"),
-            size: (2 * std::mem::size_of::<SphEos>()) as u64,
+            size: (MAX_MATERIALS * std::mem::size_of::<SphEos>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -705,9 +807,10 @@ impl GpuSph {
         }
     }
 
-    /// Upload a particle set (≤ capacity) + the two EOS materials, and set the physics params. `cell_size` is
-    /// the max smoothing length (set here from the particles so the 27-cell grid scan stays exact).
-    pub fn upload(&mut self, queue: &wgpu::Queue, particles: &[SphParticle], eos: &[SphEos; 2], softening: f32) {
+    /// Upload a particle set (≤ capacity) + the material EOS TABLE (≤ [`MAX_MATERIALS`]; each particle's `mat`
+    /// indexes it), and set the physics params. `cell_size` is the max smoothing length (set here from the
+    /// particles so the 27-cell grid scan stays exact). Was fixed at two materials — `[basalt, iron]`.
+    pub fn upload(&mut self, queue: &wgpu::Queue, particles: &[SphParticle], eos: &[SphEos], softening: f32) {
         // Clamp-to-capacity + write-at-0 + set-count IS the shared container's `replace` (docs/50).
         self.store.replace(queue, particles);
         let n = self.store.count() as usize;
@@ -715,6 +818,7 @@ impl GpuSph {
         self.params.n = n as u32;
         self.params.softening = softening;
         self.params.cell_size = cell_size;
+        let eos = &eos[..eos.len().min(MAX_MATERIALS)]; // the table is buffer-capped; a `mat` never exceeds it
         queue.write_buffer(&self.eos_buf, 0, bytemuck::cast_slice(eos));
         queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
     }
@@ -1093,5 +1197,81 @@ mod impact_geometry_tests {
         let target_mats: Vec<u32> = out.iter().filter(|p| p.prov == 0).map(|p| p.mat).collect();
         assert!(target_mats.contains(&MAT_IRON) && target_mats.contains(&MAT_BASALT));
         assert!(softening > 0.0 && relax_dt > 0.0, "usable relax parameters");
+    }
+
+    /// **An N-body, N-material assembly — one path for any number of bodies (docs/58 #4/#5/#7, Robin's
+    /// N-body note).** Particalize Earth + Moon into ONE SPH field: the EOS table holds each distinct
+    /// material once (deduped across both bodies), every particle's `mat` indexes it, and the two bodies keep
+    /// distinct source provenances. Proves the field is no longer the fixed `[basalt, iron]` pair of two.
+    #[test]
+    fn sph_assembly_builds_an_n_material_field_across_bodies() {
+        let earth = crate::hydrostatic::HydroBody::particalize(&crate::planet::earth(), 1500);
+        let moon = crate::hydrostatic::HydroBody::particalize(&crate::planet::moon(), 300);
+        let mut asm = SphAssembly::default();
+        asm.add_body(&earth, 0, DVec3::ZERO, DVec3::ZERO);
+        asm.add_body(&moon, 1, DVec3::new(4.0e7, 0.0, 0.0), DVec3::ZERO);
+
+        // Distinct materials across BOTH bodies (iron / peridotite / basalt) → deduped to ≥3, > the old 2.
+        assert!(
+            (3..=MAX_MATERIALS).contains(&asm.eos.len()),
+            "an N-material EOS table, deduped across bodies (got {})",
+            asm.eos.len()
+        );
+        // Every particle's `mat` is a valid index into that table.
+        assert!(asm.particles.iter().all(|p| (p.mat as usize) < asm.eos.len()), "every mat is a valid index");
+        // Both source bodies are present with distinct provenance.
+        assert!(
+            asm.particles.iter().any(|p| p.prov == 0) && asm.particles.iter().any(|p| p.prov == 1),
+            "both bodies present with distinct source provenance"
+        );
+        // The iron-core particles index the iron EOS entry (ρ₀ 7850), not a defaulted material.
+        let iron = asm.eos.iter().position(|e| (e.rho0 - 7850.0).abs() < 50.0).expect("iron is in the table");
+        assert!(asm.particles.iter().any(|p| p.mat as usize == iron), "core particles index the iron EOS");
+        // Mass is conserved to the two real bodies.
+        let m: f64 = asm.particles.iter().map(|p| p.mass as f64).sum();
+        let real = crate::planet::earth().total_mass() + crate::planet::moon().total_mass();
+        assert!((m - real).abs() / real < 0.03, "N-body mass conserved (got {m:.3e} vs {real:.3e})");
+    }
+
+    /// **`assemble_from_relaxed_n` places EVERY body at its own live geometry, and spins about ANY axis
+    /// (docs/58 #7 — N-body + vector spin).** Three bodies each land at their placement with their own
+    /// velocity, and an off-axis (x) spin gives the target a `vz` a +z-only path could never produce.
+    #[test]
+    fn assemble_n_places_every_body_and_spins_about_any_axis() {
+        let earth = crate::hydrostatic::HydroBody::particalize(&crate::planet::earth(), 1200);
+        let m = crate::hydrostatic::HydroBody::particalize(&crate::planet::moon(), 250);
+        let mut asm = SphAssembly::default();
+        asm.add_body(&earth, 0, DVec3::ZERO, DVec3::ZERO);
+        asm.add_body(&m, 1, DVec3::new(4.0e7, 0.0, 0.0), DVec3::ZERO);
+        asm.add_body(&m, 2, DVec3::new(-4.0e7, 0.0, 0.0), DVec3::ZERO);
+
+        let placements = [
+            // Target at the origin, spun about the X axis — an off-axis spin a +z-only path cannot express.
+            BodyPlacement { offset: DVec3::ZERO, vel: DVec3::ZERO, spin: DVec3::new(3.0e-4, 0.0, 0.0) },
+            BodyPlacement { offset: DVec3::new(1.5e7, 2.0e6, 0.0), vel: DVec3::new(-8000.0, 0.0, 0.0), spin: DVec3::ZERO },
+            BodyPlacement { offset: DVec3::new(0.0, 1.6e7, 0.0), vel: DVec3::new(0.0, -7000.0, 0.0), spin: DVec3::ZERO },
+        ];
+        let (out, _, _) = assemble_from_relaxed_n(&asm.particles, &placements);
+
+        let com_vel = |prov: u32| -> (DVec3, DVec3) {
+            let ps: Vec<&SphParticle> = out.iter().filter(|p| p.prov == prov).collect();
+            let mm: f64 = ps.iter().map(|p| p.mass as f64).sum();
+            let c = ps.iter().map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64).sum::<DVec3>() / mm;
+            let v = ps.iter().map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64).sum::<DVec3>() / mm;
+            (c, v)
+        };
+        let (c0, v0) = com_vel(0);
+        let (c1, v1) = com_vel(1);
+        let (c2, v2) = com_vel(2);
+        let r_e = crate::planet::earth().radius();
+        assert!(c0.length() < 0.02 * r_e, "target recentred to the origin");
+        assert!((c1 - c0 - placements[1].offset).length() < 0.02 * r_e, "moon 1 at its own offset");
+        assert!((c2 - c0 - placements[2].offset).length() < 0.02 * r_e, "moon 2 at its own offset");
+        assert!((v1 - v0 - placements[1].vel).length() < 1.0, "moon 1 carries its own velocity");
+        assert!((v2 - v0 - placements[2].vel).length() < 1.0, "moon 2 carries its own velocity");
+        // An X-axis spin gives the target particles a Z velocity — impossible for a +z-only spin.
+        let max_vz = out.iter().filter(|p| p.prov == 0).map(|p| p.vel[2].abs()).fold(0.0f32, f32::max);
+        assert!(max_vz > 1.0, "an off-axis spin produces vz — spin is a VECTOR, not +z (max vz {max_vz})");
+        assert!(v0.length() < 1.0, "spin is internal — no net bulk velocity on the target");
     }
 }
