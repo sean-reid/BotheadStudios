@@ -2207,8 +2207,10 @@ mod app {
             // Name the bodies actually colliding, or the relax builds the birth defaults (proto-Earth +
             // a Theia-sized impactor) for an Earth–Luna event. Every moon a system world places is an
             // instance of Luna (`assets/bodies/moon.json`, the docs/51 rule), so "moon" IS the
-            // impactor's definition; a world that drops some OTHER defined body needs the body id
-            // carried per-body (in `BodyMeta`) before this can name it.
+            // impactor's definition. Still literal names: per-body matter (docs/58) carries each body's
+            // COMPOSITION (`BodyMeta.matter`, a `LayeredBody`) but not the definition id, and `ImpactDef`
+            // names its bodies by id (`assets/bodies/<id>.json`), so a world that drops some OTHER
+            // defined body needs the id carried per-body before this can name it.
             self.impact_def = crate::terra::world_def::ImpactDef {
                 target: crate::terra::world_def::ImpactBody { body: "earth".into() },
                 impactor: crate::terra::world_def::ImpactBody { body: "moon".into() },
