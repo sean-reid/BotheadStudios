@@ -152,8 +152,9 @@ computation it defers** (Law V) — recorded in `docs/46`'s ledger, not a quiet 
    hand. (`CONTRIBUTING.md` now says the same; if the two ever disagree again, this rule is the
    working one and the other is the bug.)
 3. **Test:** `bash scripts/test.sh --fast [filter]` (inner loop) · full `bash scripts/test.sh` before any
-   deploy (240 run by default). O(n²) measurement tests are `#[ignore]` (18 of them —
-   `hydrostatic.rs` 9, `impact.rs` 8, `aggregate.rs` 1; run `--ignored`). Accelerated code is always pinned
+   deploy (362 run by default, measured 2026-07-23). O(n²) measurement tests and GPU-requiring benches
+   are `#[ignore]` (22 of them: `hydrostatic.rs` 9, `impact.rs` 8, `aggregate.rs` 2, `gpu_gravity.rs` 2,
+   `gpu_host.rs` 1; run `--ignored`). Accelerated code is always pinned
    to its exact/brute-force reference so speed never changes the answer. `gpu_sph.rs`'s PHYSICS is still
    verified out-of-process by `tools/sph-verify` (which carries its own replica of the structs), but the
    module is no longer invisible to the suite: it compiles on every target since 2026-07-20, and its three
