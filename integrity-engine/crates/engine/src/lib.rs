@@ -2387,11 +2387,13 @@ mod app {
                                     let p = self.planet_idx();
                                     let offset = self.bodies[i].pos - self.bodies[p].pos;
                                     let rel_vel = self.bodies[i].vel - self.bodies[p].vel;
-                                    // The target's spin rate from its angular momentum: omega = L/I,
-                                    // solid-sphere I = 2/5 M R². The primitive spins about +z, so the
-                                    // z component is the rate it takes.
-                                    let target_i =
-                                        0.4 * self.bodies[p].mass * EARTH_RADIUS_M * EARTH_RADIUS_M;
+                                    // The target's spin rate from its angular momentum: omega = L/I with
+                                    // the moment of inertia EMERGENT from the body's own layered matter
+                                    // (docs/58) -- the same inertia the rotation and the HUD read, so the
+                                    // spin handed to the SPH matches the day length the scene declared.
+                                    // The primitive spins about +z, so the z component is the rate it
+                                    // takes.
+                                    let target_i = self.spin_inertia();
                                     let target_spin =
                                         if target_i > 0.0 { self.spin_l.z / target_i } else { 0.0 };
                                     // impactor_spin = 0.0 is a Law V IOU: the engine keeps no per-body
