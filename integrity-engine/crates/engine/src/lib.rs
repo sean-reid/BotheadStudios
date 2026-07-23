@@ -94,6 +94,7 @@ pub mod materials;
 pub mod matter;
 mod mesher;
 mod neighbors;
+mod intercept; // the launch-window solve: release time chosen so the site rotates under the impact
 mod orbit;
 pub mod terra; // docs/43 — worlds-as-data: the world schema (+ later raster/mesh/camera). The wasm `Terra` scene
            // struct lives in `mod app` below to reuse its render helpers.
@@ -1000,6 +1001,12 @@ mod app {
         /// which is matter-in-waiting now, not a point mass to crater with. `None` on the declared
         /// (`start_gpu_impact`) path.
         sph_live_drop: Option<usize>,
+        /// A drop ARMED for the launch window (`crate::intercept`): on a world that declares a
+        /// site, the Drop control solves for the release time at which the site rotates under
+        /// the fall's impact point and arms this instead of releasing. The times count down in
+        /// SIM seconds inside `step_substep`; the release fires itself at the window. `None` =
+        /// nothing armed (and a world without a site never arms - the drop stays instant).
+        armed_drop: Option<crate::intercept::DropWindow>,
         /// docs/42 render-layer blend: 0 = the PRETTY render (sphere/atmosphere), 1 = the raw PHYSICS particles.
         /// Cross-fades by size (grains × (1−blend), billboards × blend), so no alpha-sort. Only meaningful while
         /// `sph_active`. Default 0 (pretty first — the slider reveals the physics).
@@ -1363,6 +1370,7 @@ mod app {
                 sph_eos: Vec::new(),
                 sph_phase: SphPhase::Dynamics,
                 sph_live_drop: None,
+                armed_drop: None,
                 render_blend: 0.0, // pretty by default (docs/42)
                 gpu_impact_site: None,
                 gpu_crater_frac: 0.0,
@@ -1631,19 +1639,91 @@ mod app {
             }
         }
 
+        /// The Drop control. On a world that declares a ground site, this ARMS for the launch
+        /// window instead of releasing: the intercept solve (`crate::intercept`) integrates the
+        /// same fall the scene will run and picks the release time at which the site rotates
+        /// under the impact point - the ball never moves, the trajectory is never bent, only the
+        /// release time is chosen, which is what any real mission does. The release then fires
+        /// itself in `step_substep` when the countdown reaches the window. A world without a
+        /// site (or one whose solve cannot find a window) keeps the instant drop.
+        pub fn drop_moon(&mut self) {
+            if let Some(w) = self.solve_site_drop_window() {
+                log::info!(
+                    "drop armed: window in {:.0} sim s, contact {:.2} sim days out (residual {:.4} deg, plane offset {:.1} deg)",
+                    w.release_in_s,
+                    w.impact_in_s / 86_400.0,
+                    w.residual_rad.to_degrees(),
+                    w.plane_offset_rad.to_degrees(),
+                );
+                self.armed_drop = Some(w);
+                return;
+            }
+            self.release_drop();
+        }
+
         /// Cancel every moon's velocity relative to the Earth — they drop straight in and crash. The
         /// dramatic version (both moons at once).
-        pub fn drop_moon(&mut self) {
+        fn release_drop(&mut self) {
             let earth_vel = self.bodies[1].vel;
             for i in 2..self.bodies.len() {
                 self.bodies[i].vel = earth_vel;
             }
         }
 
+        /// Solve the launch window for the declared site from the CURRENT deterministic state:
+        /// the N-body positions, the planet's declared spin (day length and accumulated angle),
+        /// and the site's lat/lon. `None` when no site is declared, the planet does not spin,
+        /// or no moon is left to drop - the callers then keep the instant behaviour.
+        fn solve_site_drop_window(&self) -> Option<crate::intercept::DropWindow> {
+            let spec = self.site_spec.as_ref()?;
+            let p = self.planet_idx();
+            let drop = self
+                .body_meta
+                .iter()
+                .position(|m| matches!(m.role, BodyRole::Moon) && !m.materialized)?;
+            let inertia = self.spin_inertia();
+            let omega = if inertia > 0.0 { self.spin_l.length() / inertia } else { 0.0 };
+            let spin = crate::intercept::Spin {
+                axis: self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z),
+                omega_rad_s: omega,
+                angle_rad: self.spin_angle,
+            };
+            let r_contact = self.body_meta.get(p).map_or(earth_radius_m(), |m| m.radius_m)
+                + self.body_meta.get(drop).map_or(self.impactor_radius, |m| m.radius_m);
+            // The solver integrates the scene's own law; its step only needs to resolve the
+            // fall, so bound it: at the top fast-forward the scene substep is ~2,000 s, far too
+            // coarse a statement of the trajectory to time a window against, and at 1x it is
+            // milliseconds, which would spend minutes of compute on a days-long forecast. The
+            // release itself still fires on the LIVE substep grid, whatever its size.
+            let dt = (self.time_scale / 960.0).clamp(30.0, 120.0);
+            crate::intercept::solve_drop_window(
+                &self.bodies,
+                p,
+                drop,
+                r_contact,
+                &spin,
+                spec.lat_deg,
+                spec.lon_deg,
+                dt,
+            )
+        }
+
+        /// SIM seconds until an armed drop releases (-1 when nothing is armed) - the HUD's
+        /// "window in T−…" countdown.
+        pub fn drop_window_s(&self) -> f64 {
+            self.armed_drop.map_or(-1.0, |w| w.release_in_s)
+        }
+
+        /// SIM seconds from now to the armed drop's forecast contact (−1 when nothing is armed).
+        pub fn drop_window_impact_s(&self) -> f64 {
+            self.armed_drop.map_or(-1.0, |w| w.impact_in_s)
+        }
+
         /// Restore the original Sun–Earth–Moon(s) state (undo braking / the crash).
         pub fn reset_moon(&mut self) {
             self.bodies = self.initial_bodies.clone();
             self.acc = crate::orbit::accelerations(&self.bodies);
+            self.armed_drop = None; // an armed window belongs to the state this just discarded
             self.impacted = false;
             self.impact_energy_j = 0.0;
             for hit in &mut self.moon_hit {
@@ -2788,6 +2868,18 @@ mod app {
         /// One physics substep: N-body verlet + swept CCD (conservation-law contact state) + the
         /// mutual-impact materialization + the debris cloud. Pure physics — no rendering state.
         fn step_substep(&mut self, dt: f64) {
+            // An ARMED drop counts down in sim time and fires at the substep boundary nearest
+            // the solved window (±dt/2 - the wiring's honest quantization, measured in the
+            // intercept tests). The solver chose the time; nothing else about the drop changes.
+            if let Some(w) = self.armed_drop.as_mut() {
+                if w.release_in_s <= 0.5 * dt {
+                    self.armed_drop = None;
+                    self.release_drop();
+                } else {
+                    w.release_in_s -= dt;
+                    w.impact_in_s -= dt;
+                }
+            }
             // Surfaces touch here — used by the parking pass below (the detector reads each body's own
             // radius, so it does not need this).
             let contact = earth_radius_m() + self.impactor_radius;
