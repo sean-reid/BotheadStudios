@@ -3,6 +3,42 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the ground-zero demo is a world definition
+
+**What.** The docs/23 demo now exists as data the engine executes, not as a scene struct.
+`web/public/worlds/ground-zero/world.json` declares the full cast in one file: the Sun, the shared
+Earth and one Luna instance on her real orbit (the mean distance and its circular speed, the same
+declared state the Space world carries), plus a `ground` block placing ground zero at a lat/lon
+site on that same Earth with the iron ball declared as cohesive matter in the patch. A new page,
+`groundzero.html` (scene picker: Ground Zero), points `data-world` at the file and loads it
+through the existing space-band host; no engine or host code changed for the page, and no new
+schema was needed, because a system world can already carry the `ground` block and `GroundDef`
+already declares `planet`, `lat`, `lon` and `bodies`. What sets the page apart from Space is not
+the drop, which Space has too; it is the declared iron ball standing at the impact site, the
+witness the zoom milestones descend to, and the page says so. Two native tests make the shipped
+file executable truth: one runs BOTH halves (the system cast parses through the space band's
+schema, is star/planet/moon, and Luna's declared state is a bound orbit at the mean distance; the
+ground half builds through `Simulation::from_json`, derives its column from the shared Earth at
+the site, and builds the ball as a bonded iron lattice), the other pins the ground-zero round trip
+(lat/lon to a point on the orbital Earth's surface and back, through the one `geo` conversion,
+landing on land).
+
+**Why.** The demo must ship as a definition the space band machinery executes; adding a third
+`#[wasm_bindgen]` scene is forbidden, and worlds-as-data (docs/43, docs/51-55) is the seam that
+makes a scene a file. What runs today is what the milestones allow: the orbital system with the
+brake and drop controls, ending in the same emergent GPU impact. The ball exists in the definition
+but nothing renders it at orbital scale; the zoom milestones (docs/59 order of work 2 to 4:
+descent camera and trigger, conserved hand-down, re-coherence) are the consumers of the ground
+block, and the world file's own comment names that IOU rather than hiding it.
+
+**Verified.** Full native suite green including the two new tests; wasm32 check clean; the laws
+scans pass over the new world file (no emergent quantity declared, no defined-body override).
+Watched headed on the Mac (mac_shot pattern, port 6399): the Ground Zero page renders the space
+band with Earth crescent-lit in the Sun's light, Luna in frame, the Earth and Luna focus buttons,
+and brake/drop controls. Driving the Drop control headed: the HUD switches to "impact trajectory ·
+closest approach 1 km (inside contact at 9,551 km)", the GPU impact assembly takes over, and the
+view settles on the incandescent post-impact Earth. All of it ran from the definition.
+
 ## 2026-07-23: the orbit camera pans, in the focused body's frame
 
 **What.** The space band's camera can now translate its look target off the focused body.

@@ -17,6 +17,20 @@ because **we are our own first customers** and pin exact engine versions in our 
   are derived from the scene's own view geometry, one frustum height of world per viewport height
   of drag at the aimed distance (Ground) or the current altitude (Terra), so the ground under the
   pointer tracks it one-for-one, map-style. Controls hints on both pages name the gesture.
+- **The ground-zero demo is a world definition (docs/23 as data).** `worlds/ground-zero/world.json`
+  declares the whole demo in one file: the Sun, the shared Earth, one Luna instance on her real
+  orbit, and the iron ball as declared cohesive matter at a ground-zero lat/lon site on that same
+  Earth. A new Ground Zero page (`groundzero.html`, listed in the scene picker) loads it through
+  the space band: the same system as Space, plus the declared iron ball standing at the impact
+  site, the witness the zoom milestones descend to. Braking or dropping Luna into the Earth runs
+  today from this definition, through the same N-body integrator, swept contact and GPU impact
+  assembly the Space scene uses. The ground block is the surface placement the zoom milestones
+  (docs/59 order of work 2 to 4) will materialize; nothing renders the ball at orbital scale yet,
+  and the file says so itself. No new schema was needed: a system world may carry the existing
+  `ground` block, whose `planet`, `lat` and `lon` anchor it to the body the orbital cast places.
+  Native tests execute both halves of the shipped file (the system cast parses and is bound; the
+  ground half builds and runs through the definition-driven `Simulation`) and pin the ground-zero
+  round trip onto the orbital Earth's surface through the one `geo` conversion.
 - **The space scenes gained pan.** Shift-drag or middle-drag translates the look target off the
   focused body (`OrbitDemo::pan_view`). The offset is held in the frame that rides the focus body,
   so the framing follows the body's orbital motion instead of smearing against inertial space, and
