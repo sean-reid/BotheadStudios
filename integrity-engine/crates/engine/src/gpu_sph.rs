@@ -188,6 +188,32 @@ pub fn build_impact_bodies(n_earth: usize, _n_theia: usize) -> (crate::hydrostat
 }
 
 
+/// **Build the relax-input SPH field for a collision of ANY NUMBER of bodies (docs/58 #7 — the ONE collision
+/// engine).** Particalize each `(matter, resolution)` ([`crate::hydrostatic::HydroBody::particalize`]) and
+/// place the bodies FAR APART on a line (adjacent spacing `separation`× the largest body diameter) so each
+/// settles under its own gravity with the others' pull negligible (~1/FAR²). Returns (particles, the shared
+/// material EOS table `SphAssembly` deduped, softening, the relaxation Courant dt). This is the generic
+/// replacement for `build_far_apart_from` + `build_impact_bodies_from` (the Earth/Theia iron-basalt pair):
+/// birth and the moon-drop both build through it, any bodies, any materials.
+pub fn build_far_apart_n(
+    bodies: &[(&crate::planet::LayeredBody, usize)],
+    separation: f64,
+) -> (Vec<SphParticle>, Vec<SphEos>, f32, f32) {
+    let hbs: Vec<crate::hydrostatic::HydroBody> = bodies
+        .iter()
+        .map(|(m, res)| crate::hydrostatic::HydroBody::particalize(m, *res))
+        .collect();
+    let r_max = bodies.iter().map(|(m, _)| m.radius()).fold(0.0, f64::max);
+    let spacing = separation * 2.0 * r_max; // adjacent bodies this far apart along +x
+    let mut asm = SphAssembly::default();
+    for (k, hb) in hbs.iter().enumerate() {
+        asm.add_body(hb, k as u32, glam::DVec3::new(k as f64 * spacing, 0.0, 0.0), glam::DVec3::ZERO);
+    }
+    let softening = hbs.iter().map(|hb| hb.softening).fold(f64::INFINITY, f64::min) as f32;
+    let relax_dt = hbs.iter().map(|hb| hb.relax_dt(0.2)).fold(f64::INFINITY, f64::min) as f32;
+    (asm.particles, asm.eos, softening, relax_dt)
+}
+
 /// Build the two UNRELAXED bodies as one SPH particle set for GPU relaxation: Earth at the origin, Theia far
 /// away (`RELAX_SEPARATION`× the contact radius), both at rest. The caller relaxes this on the GPU (`cs_relax`,
 /// milliseconds — no CPU chunking), reads it back, then [`assemble_from_relaxed`] positions the collision.
@@ -1273,5 +1299,22 @@ mod impact_geometry_tests {
         let max_vz = out.iter().filter(|p| p.prov == 0).map(|p| p.vel[2].abs()).fold(0.0f32, f32::max);
         assert!(max_vz > 1.0, "an off-axis spin produces vz — spin is a VECTOR, not +z (max vz {max_vz})");
         assert!(v0.length() < 1.0, "spin is internal — no net bulk velocity on the target");
+    }
+
+    /// **`build_far_apart_n` particalizes any bodies and separates them for relax (docs/58 #7).** Earth + Moon
+    /// build to a shared N-material table, placed far enough apart that mutual gravity is negligible.
+    #[test]
+    fn build_far_apart_n_particalizes_and_separates_the_bodies() {
+        let (earth, moon) = (crate::planet::earth(), crate::planet::moon());
+        let (parts, eos, soft, dt) = build_far_apart_n(&[(&earth, 1500), (&moon, 300)], 40.0);
+        assert!(eos.len() >= 3, "shared N-material EOS table (got {})", eos.len());
+        assert!(soft > 0.0 && dt > 0.0, "positive softening ({soft:.2e}) and relax dt ({dt:.2e})");
+        let com = |prov: u32| {
+            let ps: Vec<&SphParticle> = parts.iter().filter(|p| p.prov == prov).collect();
+            let m: f64 = ps.iter().map(|p| p.mass as f64).sum();
+            ps.iter().map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) * p.mass as f64).sum::<DVec3>() / m
+        };
+        let sep = (com(1) - com(0)).length();
+        assert!(sep > 10.0 * earth.radius(), "bodies placed far apart for relax (sep {sep:.2e})");
     }
 }

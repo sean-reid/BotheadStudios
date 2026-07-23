@@ -19,7 +19,10 @@ because **we are our own first customers** and pin exact engine versions in our 
   table. `assemble_from_relaxed_n(particles, placements)` places each source body at its own
   `{offset, vel, spin}` where spin is a vector (any axis, applied as omega cross (r - com)); the
   two-body `assemble_from_relaxed_at` now delegates to it, byte-identical (the +z scalar becomes
-  `omega = (0, 0, spin)`). The declared birth path is unchanged: it passes its `[basalt, iron]`
+  `omega = (0, 0, spin)`). `build_far_apart_n(bodies, separation)` particalizes each
+  `(matter, resolution)` and places the bodies far apart on a line for the GPU relax, returning
+  particles plus the shared deduped EOS table plus softening and relax dt: the generic relax input
+  for any number of bodies. The declared birth path is unchanged: it passes its `[basalt, iron]`
   pair as a two-entry slice.
 
 - **The live drop particalizes each body's own matter; the definition-id stopgap is gone (docs/58).**
