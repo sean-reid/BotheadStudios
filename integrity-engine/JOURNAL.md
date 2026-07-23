@@ -175,6 +175,55 @@ while a buffered interior second rung is admitted; the pi gate reproduces a hand
 Crater example (rim radius 425 m predicted, observed 593 m, ratio 1.39, inside the factor-2 gate)
 and degrades explicitly to the order-of-magnitude bound when the predicted crater rivals the
 body. Full native suite 369 green, 22 ignored; wasm32 check clean.
+## 2026-07-23: the CPU Aggregate debris path is deleted; one collision resolution remains
+
+**What.** The orbital scene's CPU `Aggregate` impact-debris path is gone (docs/58 item 7; docs/46
+ledger rows 1 and 3 closed). Deleted from `OrbitDemo`: `moon_debris: Option<Aggregate>` and every
+reader: the swept-collision materialization block (`impact::build_impact_debris_scaled` call,
+cap-mass bookkeeping, absorb/GPU-gravity wiring), the debris stepping block (step_block, momentum
+mirror, J2/tidal kicks, drain_settled/crater heal), the CPU debris substep mode and its tight
+12-substep budget, the crater-wall render machinery (`WALL_N`, `hole_radius`, `impact_site_rel`,
+`crater_heal_m3`), the per-fragment snapshot plumbing (`FrameSnap` carries only body positions
+now), and the retired-in-name CPU birth scenario (`start_birth`, `birth_mode`) whose only debris
+route was the deleted block. The consumers converged onto their SPH twins: `disk_stats_json`
+delegates to the SPH read-back measurement (`gpu_sph::disk_stats_json`) outside geologic time,
+`enter_geologic_time` keeps only the SPH moonlet promotion, `debris_count` counts the SPH
+snapshot. A bare point mass that reaches contact (nothing with declared matter can, since the SPH
+hand-off takes it at its resolution distance) merges inelastically and momentum-conservingly into
+the planet, energy measured and reported, never materialised a second way. In `impact.rs` only
+`build_impact_debris` (the moon-into-Earth wrapper) retired with its last caller; the general
+builders and the furrow/plough/vapor physics stay, consumed by that module's measurement tests.
+
+**Why.** One question, one answer (docs/46): a dropped moon and Theia are the same event at two
+scales, and the live drop already routes through the SPH machine; the Aggregate path was a
+second, unreachable answer waiting to drift. docs/58's order of work names this retirement as the
+step after birth and the live drop went generic; this lands it.
+
+**Verified.** The pinned physics moved BEFORE the CPU test retired:
+`gpu_sph::a_dropped_moon_impact_leaves_most_matter_bound_on_the_sph_path` replaces
+`impact::a_dropped_moon_impact_leaves_most_debris_gravitationally_bound`. The GPU half of the SPH
+machine cannot run headless in the native suite, so the port asserts at the largest native seam:
+the live drop's own staging (`build_far_apart_n`), a CPU relax at the staged dt, the same assembly
+(`assemble_from_relaxed_n`) on a drop geometry derived from energy conservation, and the CPU KDK
+twin (`HydroBody::step`, the physics `sph_step.wgsl` is verified against by `tools/sph-verify`);
+only the dispatch differs, and that limitation is stated in the test. Measured there: bound
+fraction 100% (pin: >60%), impactor hottest parcel 1,977 K before to 34,349 K after (emergent
+shock heating past the 800 K emission threshold), remnant radius 5,601 km. Suite: 362 passed both
+before and after (one CPU test retired, one SPH-side pin added, net zero); wasm32 check clean;
+fmt untouched (hand-edited). Live (headed Chromium on the Mac, Apple Metal, `web/rig/mac_drop.mjs`
+on orbit.html): Drop Moon crossed its resolution distance, the SPH machine owned the frame
+(Relaxing, Approaching, Assembling, Dynamics), 2,451 particles resolved and merged over a 150 s
+session with zero console errors at 25 to 28 fps. The two runtime caveats from the proof run,
+checked deliberately. First, the remnant radius: it reads 5,873 km live (5,601 km at the native
+seam, N 700 vs the browser's 2,400) against Earth's 6,371 km. But `remnant_km` is the radius
+enclosing 85% of the system mass, not a surface radius, and the DECLARED Earth's own 85%-mass
+radius, computed from its layer densities, is 5,941 km. The live remnant is within 1.2% of what
+an intact Earth measures by the same yardstick; the alarming "4,900 km" of the proof run predates
+the particalize-at-real-density staging (the old reference-density seeding under-massed Earth to
+~64%, the flagged IOU pinned in `a_moon_drop_builds_and_strikes_through_the_same_assembly`).
+Second, the remnant stays a particle ball with no re-coherence to a rendered surface within the
+session; that is docs/61's flagged IOU 1 (the SPH-remnant wiring of `recohere`), named there and
+deliberately not raced here.
 
 ## 2026-07-23: the descent camera holds precision from orbit to the ground
 
