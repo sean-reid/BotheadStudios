@@ -23,6 +23,12 @@ because **we are our own first customers** and pin exact engine versions in our 
   verified) and **water** (SWIFT/Melosh, provisional). The eos physics tests now iterate the catalogue, so
   every Tillotson material is validated automatically.
 
+- **Docs truth-sync:** the READMEs describe the engine as it is (GPU SPH giant impact with a
+  Tillotson EOS; no rapier or MLS-MPM, which were never dependencies; the phase ladder and the
+  deleted terrain slice are gone from the pitch), SECURITY.md is a real policy instead of the
+  GitHub template, and the stale hero-field TODO in `web/src/landing.ts` is deleted (the field
+  has been live since it was built; the TODO referenced a handoff spec that no longer exists).
+
 - **New scene: `/ground.html` (docs/55)** — a regolith ground world rendered from
   `/worlds/ground/world.json`. Every world number is in the file (size, relief, strata, camera, gravity,
   grain size); the scene supplies a camera rig, a "Drop meteor" button and three passes. Procedural

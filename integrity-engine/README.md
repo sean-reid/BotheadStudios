@@ -31,28 +31,37 @@ buffers (zero-copy). TypeScript is only the thin host: canvas, input, and UI.
 
 ```
 web/ (TypeScript + Vite)  ──►  Rust → WASM (single wgpu device)
-                                ├─ matter-core : chunked sparse voxel store {material, density}
-                                ├─ materials   : physical params (density, stiffness, cohesion…)
-                                ├─ mpm         : MLS-MPM solver (WGSL compute) — the "matter"
-                                ├─ gravity     : Barnes-Hut self-gravity field
-                                ├─ rapier      : rigid bodies (chunks, debris, player, dropped mass)
-                                └─ render      : custom wgpu renderer + surface meshing + shading
+                                ├─ matter / aggregate / granular : particle matter, one contact law
+                                ├─ materials : sourced physical params (data/materials.json)
+                                ├─ eos       : Tillotson equation of state (Benz & Asphaug 1999)
+                                ├─ gravity   : Barnes-Hut self-gravity (CPU) + GPU kernels (WGSL)
+                                ├─ gpu_sph   : SPH giant-impact solver (WGSL compute)
+                                └─ render    : custom wgpu renderer + surface meshing + sky
 ```
 
-Built on permissively-licensed OSS: `wgpu`, `rapier3d`, `glam`, `wasm-bindgen`, surface-nets
+Built on permissively-licensed OSS: `wgpu`, `glam`, `wasm-bindgen`, `fast-surface-nets`
 meshing. See [`docs/02-oss-building-blocks.md`](docs/02-oss-building-blocks.md) for the full
 survey and rationale.
 
 ## Status
 
-🚧 **Pre-alpha.** Building the first vertical slice: a small layered chunk (rock / dirt / grass)
-you can dig and blast, with local gravity that pulls a 5 kg mass down per `F = ma`. Roadmap phases:
+🚧 **Pre-1.0, under heavy development.** What runs today, in a WebGPU-capable browser:
 
-- **Phase 0** — Scaffold + `wgpu` first pixel in the browser.
-- **Phase 1** — Voxel matter store, layered world, surface-nets meshing.
-- **Phase 2** — Self-gravity + a Rapier 5 kg sphere that falls per `F = ma`.
-- **Phase 3** — MLS-MPM: dig, fracture, chunks fall; materials differ by density alone.
-- **Phase 4** — Emergent procedural texture, tools, benchmarks.
+- **Birth of the Moon** (`/birth.html`): proto-Earth and Theia collide; GPU SPH with a Tillotson
+  equation of state relaxes the bodies, runs the impact, and accretes a proto-lunar disk.
+- **Space / Two Moons** (`/orbit.html`, `/twomoons.html`): real orbital mechanics for
+  engine-owned bodies.
+- **Ground** (`/ground.html`): a regolith surface with a free-fly camera; impacts excavate
+  real craters.
+- **Earth** (`/terra.html`): a worlds-as-data globe built from sourced elevation and landcover
+  rasters.
+
+The charter is [`docs/00-laws-of-integrity.md`](docs/00-laws-of-integrity.md): one physics at
+every scale, no fudge. Current work is the law-conformance burn-down
+([`docs/57`](docs/57-law-conformance-burndown.md)) on the way to the north-star demo
+([`docs/23`](docs/23-everything-is-matter-north-star.md)): de-orbit the Moon onto a metal ball
+and zoom from the celestial view down to find it destroyed, with no line of code that says
+destroy.
 
 ## Building
 
