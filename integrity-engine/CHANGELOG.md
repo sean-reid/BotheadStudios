@@ -9,6 +9,14 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The ground HUD leads with the ball's verdict.** The ball line now opens with the one-word
+  structural state the sim already knows: INTACT, DENTED or SHATTERED, colour-coded, with parcels
+  and bonds kept as the supporting numbers. Parcels are conserved matter, so their count never
+  drops on impact; leading with them let a direct hit read as "still intact". New surface:
+  `CohesiveBody::verdict()` names the bond state (all bonds hold / a minority fractured / fewer
+  than half survive, the same boundaries the fracture tests assert), and `Ground::body_verdict()`
+  exports it to the page.
+
 - **The descent camera holds f32 precision from orbit to standing height (docs/59 item 2).** Terra
   now renders under ONE camera-relative-eye convention (documented in `terra::fly_camera`): every
   draw uses the eye-at-origin view·projection, the eye is subtracted in f64 (per-vertex for the

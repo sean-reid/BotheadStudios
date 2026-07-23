@@ -3,6 +3,29 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the ground HUD says whether the ball survived
+
+**What.** The ground scene's ball line leads with a one-word verdict: INTACT (green), DENTED
+(amber) or SHATTERED (red), followed by the parcel/bond counts it always showed.
+`CohesiveBody::verdict()` (simulation.rs) names the bond state the physics already runs on:
+"intact" while every forged bond holds, "dented" while a minority has fractured, "shattered" once
+fewer than half survive, the same half-way boundary the fracture tests assert. `Ground::body_verdict()`
+exports the word to the page, and `web/rig/ground_ball_shatter.mjs` now asserts the leading word
+agrees with the bond collapse it measures.
+
+**Why.** First-hand user test: after a direct hit, "ball 33 parcels · 0 bonds" read as "still
+intact" to fresh eyes, because parcels are conserved matter and never drop, and the parcel count
+led the line. The destruction meter was the bond count, second and unlabelled as such. The sim
+knew the answer all along; the HUD just never said it. No new physics: the verdict is a NAME for
+an existing public number, so a viewer is not asked to interpret it.
+
+**Verified.** Full native suite green (362 passed) with new assertions: the sufficient-meteor test
+requires `verdict() == "shattered"` after the hit, the insufficient-meteor test requires "intact"
+after settling and never "shattered" after the boulder. wasm32 check clean. Watched headed on the
+Mac (mac_shot pattern): before the hit the HUD reads "ball INTACT · 33 parcels · 212 bonds"; after
+the 17 km/s meteor it reads "ball SHATTERED · 33 parcels · 0 bonds" over the scattered parcels,
+and both words are legible at a glance.
+
 ## 2026-07-23: the descent camera holds precision from orbit to the ground
 
 **What.** Terra renders under one camera-relative-eye convention (docs/59 order-of-work item 2:
