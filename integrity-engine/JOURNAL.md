@@ -89,6 +89,40 @@ of orbit.html, terra.html and ground.html: Earth renders in all three; the groun
 visible change is the derived column - a grass biosphere skin over Earth's own crust, mantle and
 core replaces the former sand/gravel/dirt sandbox list the world file carried (the strata
 sequence itself is asserted in tests).
+## 2026-07-23: the re-coherence rung measures the energy it cannot yet keep
+
+**What.** The batch downward rung (docs/61) had three physics debts: a binned grain's heat was
+dropped at the grain-to-voxel crossing, its remaining sub-threshold kinetic energy was zeroed
+rather than dissipated to heat, and re-cohered ejecta consolidates instantly to intact strength
+and reference density. Status after this change, plainly: **debts 1 and 2 are MEASURED and
+ledgered, not closed** (the receiving sink they need, thermal state on the voxel side, does not
+exist anywhere in `World`, and building a fake one was refused); **debt 3 is DESIGNED only**
+(docs/46 row 17c, no code). The rung's audit `Recohered` now carries `binned_kinetic_j` and
+`binned_heat_j`, booked per column as energy carried in minus energy the remainder carries back
+out, with heat counted only where `Material::specific_heat` is sourced so an unknown c stays
+unknown. `MatterSim::recohere_settled` returns the full audit, `Simulation` accumulates it
+behind `recohered_kinetic_j()` / `recohered_heat_j()`, and `run-definition` prints a `recohered`
+line whenever the rung ran. All three debts are one ledger row (docs/46 row 17) naming the
+deferred computations: a voxel-side thermal field that `deposit_grain` deposits into, and a
+consolidation state (porosity and strength fraction) relaxing toward intact over a physical
+timescale, each with the test that would close it.
+
+**Why.** Settling is dissipation, and dissipation becomes heat, not nothing; energy that
+silently vanishes at a representation crossing is a conservation violation the accounting cannot
+see. Law V allows the deferral but not the silence: an IOU must name the real computation it
+defers, and a loss that is measured is a loss that can be paid back and tested against. The
+smaller honest step was chosen over inventing a thermal sink the store cannot hold.
+
+**Verified.** Red first: `the_crossing_measures_the_binned_kinetic_energy_and_carried_heat` was
+written against the empty audit and failed (audit read 0 J), then passed once the booking
+landed. The test checks both parts against independently computed expectations (two
+whole-quantum gravel grains at 2 m/s and 50 K above ambient bin entirely; a 1.6-quantum grain
+loses exactly its binned quantum's share while the 0.6-quantum remainder keeps its own velocity
+and temperature) and holds the ledger identity, energy in = energy still on particles + energy
+in the audit, within f32 accumulation. Full native suite 363/363 green (362 at baseline, one
+new); wasm32 check clean; `run-definition definitions/ejecta-ground.json` unchanged in its
+matter accounting (the per-grain path empties that field before the batch rung fires, so the
+`recohered` line prints only when the rung actually ran).
 
 ## 2026-07-23: the descent camera holds precision from orbit to the ground
 
