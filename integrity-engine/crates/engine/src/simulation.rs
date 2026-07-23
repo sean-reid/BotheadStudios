@@ -58,6 +58,26 @@ pub struct CohesiveBody {
     pub part_half: f64,
 }
 
+impl CohesiveBody {
+    /// The body's structural verdict in one word, read from the same bond state the physics runs
+    /// on: "intact" while every forged bond still holds, "dented" once some fraction has fractured
+    /// but the majority still binds the lattice, "shattered" once fewer than half survive. The
+    /// half-way boundary is the one the fracture tests already assert (a sufficient meteor breaks
+    /// more than half the bonds; an insufficient one leaves at least nine in ten). No new physics -
+    /// this only NAMES the bond count so a reader is not left to interpret a raw number.
+    pub fn verdict(&self) -> &'static str {
+        let total = self.agg.bonds.len();
+        let active = self.agg.active_bonds();
+        if active == total {
+            "intact"
+        } else if 2 * active >= total {
+            "dented"
+        } else {
+            "shattered"
+        }
+    }
+}
+
 /// Build a declared body as a cohesive aggregate. The lattice spacing is the world's own grain scale,
 /// so the body is resolved at the same granularity as the matter around it (docs/47).
 fn build_cohesive_body(
@@ -1353,6 +1373,7 @@ mod tests {
             bonds1 < bonds0 / 2,
             "iron's thresholds are exceeded: the structure fractures ({bonds0} -> {bonds1} bonds)"
         );
+        assert_eq!(ball.verdict(), "shattered", "the one-word verdict reports the same bond state");
         let spread1 = ball.agg.rms_radius();
         assert!(
             spread1 > 2.0 * spread0,
@@ -1385,6 +1406,11 @@ mod tests {
             sim.step(1.0 / 60.0);
         }
         let bonds0 = sim.cohesive_bodies()[0].agg.active_bonds();
+        assert_eq!(
+            sim.cohesive_bodies()[0].verdict(),
+            "intact",
+            "settling onto the ground breaks nothing, and the verdict says so"
+        );
         let spread0 = sim.cohesive_bodies()[0].agg.rms_radius();
         let com_v0 = {
             let b = &sim.cohesive_bodies()[0];
@@ -1423,6 +1449,7 @@ mod tests {
             bonds1 * 10 >= bonds0 * 9,
             "below iron's thresholds the structure holds ({bonds0} -> {bonds1} bonds)"
         );
+        assert_ne!(ball.verdict(), "shattered", "a surviving ball never reads as shattered");
         let spread1 = ball.agg.rms_radius();
         assert!(
             spread1 < 1.3 * spread0,
