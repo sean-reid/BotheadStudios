@@ -67,7 +67,8 @@ mod planet;
 /// they were never scene code, and living there kept them out of every native build.
 mod render;
 pub mod recohere; // docs/61 — the batch downward rung: a settled particle field re-coheres to ground
-pub mod refine; // docs/59, the upward rung: the celestial field initializes the local patch, conserved (UNWIRED; the M4 zoom materialization milestone owns the trigger)
+pub mod refine; // docs/59, the upward rung: the celestial field initializes the local patch, conserved
+pub mod site; // docs/59, the camera-driven materialization trigger and its site (wires refine.rs)
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 /// docs/49 — surface detail that follows the camera CONTINUOUSLY. The consumer
 /// `ResolutionController::camera_grain_radius` never had.
@@ -1008,6 +1009,32 @@ mod app {
         /// grows as the shock excavates). `None` until contact. Persists after (bake-back — Robin's call).
         gpu_impact_site: Option<glam::DVec3>,
         gpu_crater_frac: f64,
+        // --- docs/59: the declared site and its camera-driven materialization trigger. ---
+        /// The declared ground-zero site (from the ground world definition), armed once the host
+        /// loads it. `None` = no site declared; the trigger never fires.
+        site_spec: Option<crate::site::SiteSpec>,
+        /// The bidirectional trigger - the camera's mirror of the moon-drop's
+        /// resolution-distance crossing (one materialization pattern, docs/59).
+        site_trigger: crate::site::SiteTrigger,
+        site: Option<crate::site::MaterializedSite>,
+        /// The docs/61 settle gauge gating the downward (fold) crossing.
+        site_gauge: crate::recohere::SettleGauge,
+        /// The honest one-line site state for the HUD: the audit when materialized, the refusal
+        /// and its reason when refused, the fold report when folded.
+        site_status: String,
+        /// A refine-level refusal at the current descent is remembered so the standing demand
+        /// does not rebuild (and re-refuse) every frame; cleared when the camera re-arms by
+        /// ascending back past the threshold.
+        site_refused: bool,
+        /// Instance buffer for the site's particles (billboards through `sph_render.wgsl`),
+        /// rewritten per frame with Earth-relative positions (the site co-rotates with the
+        /// crust, exactly like the shell grains and the crater mask).
+        site_buf: Option<wgpu::Buffer>,
+        site_cam: UniformSlot,
+        /// Live trigger inputs, kept for the HUD: the camera's distance to the site and the
+        /// derived view-necessity threshold (both metres, updated every `advance`).
+        site_dist_m: f64,
+        site_resolve_at_m: f64,
     }
 
     /// Earth rendered as a shell of particles (the honest low-res look, docs/15): a smooth sphere is a
@@ -1162,20 +1189,24 @@ mod app {
                 entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT)],
             });
             let sph_pipeline = build_sph_pipeline(&device, &particle_bind_layout, config.format);
-            let sph_cam = {
+            let make_particle_cam = |label: &str| {
                 let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("sph-cam"),
+                    label: Some(label),
                     size: std::mem::size_of::<crate::gpu_sph::SphCam>() as u64,
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
                 let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("sph-cam-bind"),
+                    label: Some(label),
                     layout: &particle_bind_layout,
                     entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
                 });
                 UniformSlot { buf, bind }
             };
+            let sph_cam = make_particle_cam("sph-cam");
+            // The declared site's particles render through the SAME billboard pipeline (one
+            // particle look, not two), with their own camera slot.
+            let site_cam = make_particle_cam("site-cam");
 
             // The real three-body system in SI units: [Sun, Earth, Moon] (orbit.rs). The Earth carries
             // its true heliocentric velocity and the Moon co-moves with it plus its own orbital speed,
@@ -1321,6 +1352,16 @@ mod app {
                 render_blend: 0.0, // pretty by default (docs/42)
                 gpu_impact_site: None,
                 gpu_crater_frac: 0.0,
+                site_spec: None,
+                site_trigger: crate::site::SiteTrigger::new(),
+                site: None,
+                site_gauge: crate::recohere::SettleGauge::new(),
+                site_status: String::new(),
+                site_refused: false,
+                site_buf: None,
+                site_cam,
+                site_dist_m: 0.0,
+                site_resolve_at_m: 0.0,
             })
         }
 
@@ -1979,6 +2020,172 @@ mod app {
             Ok(())
         }
 
+        /// docs/59 - arm the declared site: load a `"ground"` world (the SAME file the ground
+        /// scene runs) and derive the trigger's spec from it and the one shared body. Until this
+        /// is called no site exists and the trigger never fires.
+        pub fn load_site_world(&mut self, world_json: &str) -> Result<(), JsValue> {
+            let w = crate::terra::world_def::World::parse(world_json)
+                .map_err(|e| JsValue::from_str(&e))?;
+            let spec = crate::site::SiteSpec::from_ground_world(&w)
+                .map_err(|e| JsValue::from_str(&e))?;
+            self.site_status = format!(
+                "site armed at ({:.0}, {:.0}): descend inside the view threshold to materialize",
+                spec.lat_deg, spec.lon_deg
+            );
+            self.site_spec = Some(spec);
+            self.site_trigger = crate::site::SiteTrigger::new();
+            self.site = None;
+            self.site_buf = None;
+            self.site_refused = false;
+            Ok(())
+        }
+
+        /// The site's honest HUD line: the standing state (armed / materialized with its audit /
+        /// refused with the reason / folded with the fold audit) plus the live camera-vs-threshold
+        /// numbers the trigger is watching. Empty when no site is armed.
+        pub fn site_status(&self) -> String {
+            if self.site_spec.is_none() {
+                return String::new();
+            }
+            let (d, at) = (self.site_dist_m, self.site_resolve_at_m);
+            format!("{} · camera {:.0} km / threshold {:.0} km", self.site_status, d / 1.0e3, at / 1.0e3)
+        }
+
+        /// docs/59 - the per-frame site check: the camera's mirror of the moon-drop's
+        /// resolution-distance crossing (`live_resolution_crossing`), so the engine has ONE
+        /// materialization pattern. Derives the view-necessity threshold from the coarse quantum
+        /// (measured from the live field when one exists, the declared celestial statement
+        /// otherwise) and the docs/49 angular budget; executes whatever crossing the trigger
+        /// demands; keeps the refusals and the audit on the HUD.
+        fn update_site(&mut self, dt: f64) {
+            let Some(spec) = self.site_spec.as_ref() else { return };
+            let p = self.planet_idx();
+            let r_p = self.body_meta.get(p).map_or(earth_radius_m(), |m| m.radius_m);
+            // The site rides the rotating crust, exactly like the shell grains and the crater.
+            let spin_axis = self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
+            let spin_rot = glam::DQuat::from_axis_angle(
+                spin_axis,
+                self.spin_angle % (2.0 * std::f64::consts::PI),
+            );
+            let site_dir = spin_rot * crate::geo::dir_from_lat_lon(spec.lat_deg, spec.lon_deg);
+            let site_w = self.bodies[p].pos + site_dir * r_p;
+            // The camera eye in world metres: the focus body plus the display-space eye offset
+            // (the same construction as `view_proj`).
+            let focus_w = self.bodies.get(self.focus).map_or(self.bodies[p].pos, |b| b.pos);
+            let eye_disp = self.camera.eye_dir().as_dvec3()
+                * (self.camera.base_distance * self.camera.zoom) as f64
+                + self.camera.pan.as_dvec3();
+            let eye_w = focus_w + eye_disp / display_scale();
+            let dist = (eye_w - site_w).length();
+            // The coarse quantum this site is currently represented at.
+            let live = self.sph_active
+                && matches!(self.sph_phase, SphPhase::Dynamics)
+                && !self.sph_snapshot.is_empty();
+            let extent = if live {
+                crate::site::measured_coarse_extent_m(&self.sph_snapshot)
+            } else {
+                spec.declared_coarse_extent_m()
+            };
+            let theta = crate::resolution::ResolutionController::default().angular_resolution;
+            let resolve_at = crate::site::view_resolution_distance(extent, theta);
+            self.site_dist_m = dist;
+            self.site_resolve_at_m = resolve_at;
+
+            if let Some(site) = self.site.as_ref() {
+                // Feed the docs/61 gauge the site's own peak speed (static this milestone; the
+                // gauge is the law, not a shortcut past it).
+                self.site_gauge.observe(
+                    crate::site::site_peak_speed(site),
+                    spec.g_ms2 as f32,
+                    dt as f32,
+                );
+                // The standing contamination check while a live celestial field exists: a coarse
+                // particle penetrating the fine site invalidates it, and the screen says so.
+                if live {
+                    let fine_mass = site.particles[site.fine_start..]
+                        .iter()
+                        .map(|q| q.mass)
+                        .fold(f32::INFINITY, f32::min);
+                    let region = crate::refine::Region {
+                        center: (site_dir * r_p).as_vec3(),
+                        radius: site.extent_m as f32,
+                    };
+                    if let Err(r) =
+                        crate::refine::contamination_check(&self.sph_snapshot, &region, fine_mass)
+                    {
+                        self.site_status = format!("SITE INVALID: {r}");
+                        return;
+                    }
+                }
+            }
+
+            match self.site_trigger.observe(dist, resolve_at) {
+                Some(crate::site::SiteCrossing::Materialize) => {
+                    if self.site_refused {
+                        return; // the standing refusal is on the HUD; re-arms on ascent
+                    }
+                    // The smallest honest hand-down: sample a quiescent live field, refuse a
+                    // mid-event one (a cheap check, retried every frame so the demand stands),
+                    // or take the definition when no field exists.
+                    let hand = if live {
+                        match crate::site::sample_hand_down(
+                            &self.sph_snapshot,
+                            site_dir * r_p,
+                            spec.g_ms2,
+                        ) {
+                            Ok(h) => h,
+                            Err(r) => {
+                                self.site_status = format!("{r}");
+                                return;
+                            }
+                        }
+                    } else {
+                        crate::site::HandDown::Declared
+                    };
+                    match crate::site::materialize_site(spec, &hand, &self.mats) {
+                        Ok(site) => {
+                            self.site_trigger.confirm(crate::site::SiteCrossing::Materialize);
+                            self.site_gauge.reset();
+                            self.site_status = site_audit_line(&site);
+                            self.site = Some(site);
+                            self.site_buf = None; // sized on first draw
+                        }
+                        Err(r) => {
+                            // A build-level refusal is deterministic at this descent: latch it
+                            // (the demand stands, stated) instead of re-refusing every frame.
+                            self.site_refused = true;
+                            self.site_status = format!("{r}");
+                        }
+                    }
+                }
+                Some(crate::site::SiteCrossing::Deresolve) => {
+                    let Some(site) = self.site.as_ref() else { return };
+                    match crate::site::fold_site(site, &self.site_gauge, spec.g_ms2 as f32) {
+                        Ok(rep) => {
+                            self.site_trigger.confirm(crate::site::SiteCrossing::Deresolve);
+                            self.site = None;
+                            self.site_buf = None;
+                            self.site_status = format!(
+                                "site folded to the summary: {} particles, {:.4e} kg returned \
+                                 (drift {:+.1e} kg)",
+                                rep.folded, rep.audit.mass, rep.mass_drift_kg
+                            );
+                        }
+                        Err(r) => {
+                            // Not settled: it honestly stays resolved; the demand stands.
+                            self.site_status = format!("{r}");
+                        }
+                    }
+                }
+                None => {
+                    // Ascended past the threshold un-materialized: the next descent retries.
+                    if !self.site_trigger.is_resolved() {
+                        self.site_refused = false;
+                    }
+                }
+            }
+        }
+
         pub fn start_gpu_impact(&mut self) {
             // Build the two bodies UNRELAXED and FAR APART, and RELAX them on the GPU (`cs_relax`, fast — the
             // measured cure for the dispersal was proper relaxation, docs/35). `advance` runs the relax steps,
@@ -2162,6 +2369,9 @@ mod app {
         /// the physics with an oversized step — time slows before truth breaks.
         pub fn advance(&mut self, real_dt: f64) {
             let real_dt = real_dt.clamp(0.0, 0.25); // tab-sleep / hiccup guard
+            // docs/59 - the declared site's camera trigger runs every frame, whichever machine
+            // owns the physics below (the SPH phases early-return out of this function).
+            self.update_site(real_dt);
             // docs/42 — ADAPTIVE GPU-load control: keep each frame's encoded work inside a wall-clock budget so
             // the sim can never monopolize the GPU and freeze the tab / OS. `real_dt` is the previous frame's
             // total time; a slow frame shrinks the substep count (multiplicative, down to 1), headroom grows it
@@ -2693,6 +2903,86 @@ mod app {
             let coherence = target.map_or(1.0, |(_, _, c)| c);
             let pretty_fade = crate::accretion::surface_weight(coherence, 0.55);
             self.render_blend = 1.0 - pretty_fade as f64; // particles take over as the surface loses meaning
+
+            // docs/59 - the materialized site: rebuild its instances in the lagged render frame
+            // (site-local particles mapped through the rotating tangent frame onto Earth-relative
+            // metres - the site rides the crust like the shell grains and the crater) and push
+            // its camera slot; drawn later in the pass through the ONE billboard pipeline. The
+            // radial anchor is the DRAWN surface (body radius plus the raster's local elevation),
+            // so the site sits on the planet the viewer actually sees; procedural-patch relief vs
+            // raster elevation converging into one surface is docs/54's noted seam.
+            let site_count = {
+                let Self {
+                    site,
+                    site_spec,
+                    site_buf,
+                    site_cam,
+                    device,
+                    queue,
+                    earth_surface,
+                    spin_l,
+                    spin_angle,
+                    ..
+                } = &mut *self;
+                if let (Some(site), Some(spec)) = (site.as_ref(), site_spec.as_ref()) {
+                    let spin_axis = spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
+                    let spin_rot = glam::DQuat::from_axis_angle(
+                        spin_axis,
+                        *spin_angle % (2.0 * std::f64::consts::PI),
+                    );
+                    let (up, north, east) = crate::geo::tangent_frame(spec.lat_deg, spec.lon_deg);
+                    let (up, north, east) = (spin_rot * up, spin_rot * north, spin_rot * east);
+                    let elev = earth_surface
+                        .as_ref()
+                        .and_then(|s| {
+                            s.elevation.as_ref().map(|r| {
+                                r.elevation_m_at(
+                                    spec.lat_deg,
+                                    spec.lon_deg,
+                                    s.elev_range[0],
+                                    s.elev_range[1],
+                                )
+                                .max(0.0)
+                                    * s.relief_exag
+                            })
+                        })
+                        .unwrap_or(0.0);
+                    let base = up * (pretty_r_surf + elev);
+                    let mut inst = Vec::with_capacity(site.particles.len());
+                    for q in &site.particles {
+                        let w = base
+                            + east * q.pos[0] as f64
+                            + up * q.pos[1] as f64
+                            + north * q.pos[2] as f64;
+                        let mut qq = *q;
+                        qq.pos = w.as_vec3().to_array();
+                        inst.push(qq);
+                    }
+                    let bytes: Vec<u8> = bytemuck::cast_slice(&inst).to_vec();
+                    let need = bytes.len() as u64;
+                    if site_buf.as_ref().map_or(true, |b| b.size() < need) {
+                        *site_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("site-particles"),
+                            size: need,
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        }));
+                    }
+                    queue.write_buffer(site_buf.as_ref().unwrap(), 0, &bytes);
+                    let origin = ((earth_center - focus) * display_scale()).as_vec3();
+                    let cam = crate::gpu_sph::SphCam {
+                        view_proj: view_proj.to_cols_array_2d(),
+                        origin: [origin.x, origin.y, origin.z, 0.0],
+                        // The same mote half-size the SPH ejecta use (one particle look); the
+                        // ejecta-radius param is pushed out so that ramp never fires for ground.
+                        params: [display_scale() as f32, 0.006, 1.0e12, 0.0],
+                    };
+                    queue.write_buffer(&site_cam.buf, 0, bytemuck::bytes_of(&cam));
+                    inst.len() as u32
+                } else {
+                    0
+                }
+            };
             // **The impactor, by the same rule.** Measured position, measured radius, drawn as a solid
             // body for as long as it IS one — and it is one, all the way in, because nothing has touched
             // it yet. Its own declared geotherm decides whether it glows: Theia's mantle is 1,200 K, hot
@@ -3169,6 +3459,17 @@ mod app {
                         }
                     }
                 }
+                // docs/59 - the materialized site's fine matter (the declared ball and its
+                // ground patch), instanced through the SAME billboard pipeline: one particle
+                // representation, wherever fine matter comes from.
+                if site_count > 0 {
+                    if let Some(buf) = self.site_buf.as_ref() {
+                        pass.set_pipeline(&self.sph_pipeline);
+                        pass.set_bind_group(0, &self.site_cam.bind, &[]);
+                        pass.set_vertex_buffer(0, buf.slice(..));
+                        pass.draw(0..6, 0..site_count);
+                    }
+                }
             }
             self.queue.submit(std::iter::once(encoder.finish()));
             output.present();
@@ -3354,6 +3655,50 @@ mod app {
 
     /// Earth's DEFINITIVE surface, handed over by the host once and reused by every draw. The scene
     /// does not own these continents — the body definition does; this is just the decoded copy.
+    /// The one-line conservation audit of a materialized site for the HUD (docs/59: the ledger
+    /// is surfaced, not implied): mass in and out, the release state or its stated residual,
+    /// the angular-momentum drift against the relax's own bound, and where the thermal state
+    /// came from.
+    fn site_audit_line(site: &crate::site::MaterializedSite) -> String {
+        let l = &site.ledger;
+        let release = match site.release {
+            crate::site::SiteRelease::Released(r) => format!(
+                "released {:.1e} (bound {:.0e}) in {} iters",
+                r.released_max_density_error,
+                crate::refine::RELEASE_DENSITY_ERROR,
+                r.iterations
+            ),
+            crate::site::SiteRelease::Unreleased { achieved, bound, iterations } => format!(
+                "UNRELEASED: exact split, density residual {achieved:.1e} over the {bound:.0e} \
+                 bound after {iterations} iters (static site; the release gates dynamics)"
+            ),
+        };
+        let hand = match site.hand_down {
+            crate::site::HandDown::Declared => String::from("state from the definition"),
+            crate::site::HandDown::Sampled { u_j_kg, peak_speed_ms, quiescent_speed_ms } => {
+                format!(
+                    "u sampled from the quiet field: {u_j_kg:.2e} J/kg (peak {peak_speed_ms:.0} \
+                     < v_q {quiescent_speed_ms:.0} m/s)"
+                )
+            }
+        };
+        let n_fine = site.particles.len() - site.fine_start;
+        let am_drift = (l.after_relax.angular_momentum - l.before.angular_momentum).length();
+        format!(
+            "SITE MATERIALIZED: ball {} + patch {} fine, {} coarse guards · mass {:.4e} kg in, \
+             {:.4e} kg out · |dL| {:.1e} (bound {:.1e}) · {} · {}",
+            site.ball_children,
+            n_fine - site.ball_children,
+            site.fine_start,
+            l.before.mass,
+            l.after_relax.mass,
+            am_drift,
+            l.relax_am_bound,
+            release,
+            hand
+        )
+    }
+
     struct EarthSurface {
         landmask: Option<crate::terra::raster::Raster>,
         elevation: Option<crate::terra::raster::Raster>,

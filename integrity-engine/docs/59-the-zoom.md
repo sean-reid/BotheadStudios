@@ -75,6 +75,19 @@ ejecta a few to 10%) appear only in tests as sanity bounds, cited.
 3. Conserved hand-down: split, relax, release, with the pi-scaling gate and the energy ledger.
 4. Re-coherence: the settled site returns to meshed ground through the surface-nets rung.
 
+## Status, 2026-07-23
+
+Item 1 landed (one Earth, see the ledger row 16 narrowing). Item 2's trigger half landed together
+with item 3's entry point: `crate::site` derives the view-necessity threshold (one coarse SPH
+particle's matter share against the docs/49 angular budget, measured from the live field when one
+exists) and the space band materializes the Ground Zero world's declared ball and strata patch
+through `crate::refine` on the descending crossing, folding back through the docs/61 gauge on the
+ascending one, bidirectional for the out-and-back demo arc, ledger and refusals on the HUD. Open
+within items 2 and 3, carried by docs/46 row 18: the descent camera below the orbit camera's
+floor; releasing relief surfaces in the relax (the shipped site is the exact conserving split
+with its density residual stated); the mid-event hand-down and any entry of the fine patch into
+dynamics; the pi-scaling gate still awaits its end-to-end consumer.
+
 ## IOUs this design leaves open, named
 
 - Melt, vapor, and comminution tracking in the fine patch (fractions per Gault and Heitowit 1963;
