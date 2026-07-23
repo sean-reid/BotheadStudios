@@ -23,15 +23,15 @@ await p.goto(`http://127.0.0.1:${PORT}/ground.html`, { waitUntil: 'load' });
 await p.waitForFunction(() => !document.body.innerText.includes('GPU device'), { timeout: 30000 }).catch(() => {});
 // The HUD reports the ball from the same state the physics runs on; wait for it to exist.
 await p.waitForFunction(
-  () => /ball \d+ parcels/.test(document.getElementById('stats')?.textContent ?? ''),
+  () => /ball [A-Z]+ · \d+ parcels/.test(document.getElementById('stats')?.textContent ?? ''),
   { timeout: 30000 },
 );
 await p.waitForTimeout(3000); // let the ball settle onto the terrain in view
 
 const ballLine = async () => {
   const t = await p.evaluate(() => document.getElementById('stats')?.textContent ?? '');
-  const m = t.match(/ball (\d+) parcels · (\d+) bonds/);
-  return m ? { parcels: +m[1], bonds: +m[2] } : null;
+  const m = t.match(/ball ([A-Z]+) · (\d+) parcels · (\d+) bonds/);
+  return m ? { verdict: m[1], parcels: +m[2], bonds: +m[3] } : null;
 };
 
 // AIM AT THE BALL, the way a user would: right-drag to look until the engine reports the aim ray
@@ -68,8 +68,11 @@ console.log('after:', after);
 const uniq = [...new Set(errs)];
 uniq.slice(0, 5).forEach(e => console.log('ERR', e));
 
-// The claim: the impact fractured the structure. Bonds are the HUD's own number.
-const shattered = before && after && after.bonds < before.bonds / 2;
+// The claim: the impact fractured the structure. Bonds are the HUD's own number, and the HUD's
+// leading verdict word must agree with them.
+const shattered = before && after
+  && before.verdict === 'INTACT' && after.verdict === 'SHATTERED'
+  && after.bonds < before.bonds / 2;
 console.log(shattered ? 'SHATTERED: bonds collapsed' : 'NOT shattered - look at the shots');
 await b.close();
 process.exit(shattered && uniq.length === 0 ? 0 : 1);

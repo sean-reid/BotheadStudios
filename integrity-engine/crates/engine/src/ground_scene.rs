@@ -725,6 +725,12 @@ impl Ground {
             self.sim.world.ground_height(c.x as f32, c.z as f32),
         ]
     }
+    /// The declared body's one-word structural verdict ("intact" / "dented" / "shattered"), read
+    /// from the same bond state `body_probe` counts - so the HUD can LEAD with the state instead of
+    /// asking the viewer to interpret a raw bond number. Empty when no body is declared.
+    pub fn body_verdict(&self) -> String {
+        self.sim.cohesive_bodies().first().map(|b| b.verdict().to_string()).unwrap_or_default()
+    }
     pub fn created_total(&self) -> usize { self.sim.created_total() }
     pub fn world_name(&self) -> String { self.sim.name().to_string() }
     pub fn surface_material(&self) -> String { self.sim.surface_material().to_string() }
