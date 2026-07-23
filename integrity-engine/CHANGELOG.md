@@ -24,6 +24,26 @@ because **we are our own first customers** and pin exact engine versions in our 
   measured contact state (barycentric closing speed, measured impactor mass), the crater rim is
   measured from the field at the field's own quantum, and the verdict, or the honest sub-quantum
   refusal, renders next to the window with the coefficient vintage named.
+- **One continuous camera path, surface to celestial and back (`crate::arc`).** The Ground Zero
+  page carries a demo-arc control, labelled as the camera/time driver it is: one press glides
+  the space band's camera from wherever it stands down to standing over the declared site, the
+  next pulls out past the fold threshold, the next descends home, no cuts, no scene switch,
+  either direction, with the site trigger materializing and folding along the way. Both ends of
+  the path are derived: the floor is the view-resolution distance of the site's finest
+  materialized quantum (about 1.4 km for the declared ball's one-rung child, as deep as the
+  current representation honestly serves the view), and the top clears the fold threshold at
+  the scene's own whole-orbit framing margin. Sim-time compression is tied to camera distance
+  by a derived pacing law, proportional to distance (constant apparent angular rate), anchored
+  at the world's declared celestial `time.scale`, real time at the surface. The world file
+  declares the one pacing number the arc adds (`arc.octave_s`, real seconds per octave of
+  scale). Riding the spinning crust under compression uses two derived rules: crust-anchored
+  quantities weight by the reciprocal of the compression (their drift never exceeds Earth's
+  real rotation rate), and the descent leads the spin by the closed-form remaining crust turn,
+  so the site rotates into place beneath the arriving camera. Dropping Luna from the celestial
+  hold is witnessed at scale, and the descent through a quiescent aftermath re-materializes the
+  site carrying the live field's sampled internal energy; the arc itself drives only the camera
+  and the observable clock, never matter.
+
 - **The hand-down is designed (docs/59).** The demo site pre-resolves at world load (refinement
   ahead of the shock, never inside it), ownership is single with the guard band as the interface
   re-sampling the coarse field each step, and cold mid-event materialization stays refused with

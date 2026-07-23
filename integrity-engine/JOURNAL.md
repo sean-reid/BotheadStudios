@@ -51,6 +51,55 @@ mid-event because decompressed ejecta are the widest thing one particle answers 
 stated, not smoothed); zero console errors across the run; screenshots in the rig's output
 directory, viewed.
 
+## 2026-07-23: the out-and-back arc: one camera path from the ball to celestial and back
+
+**What.** The demo choreography's camera path exists: `crate::arc` (pure, natively tested) plus
+a drive in the space band and a plainly-labelled control on the Ground Zero page ("Demo arc ·
+drives camera + time only"). One press takes the camera from wherever the manual rig stands and
+glides it down to the site; the next pulls out to celestial framing; the next descends home:
+one continuous parameterization, no cuts, no scene switch, either direction, with the docs/59
+trigger materializing and folding the site along the way. The span is derived at both ends:
+floor = the site's finest materialized quantum over the docs/49 angular budget (the ball's
+one-rung child, 1.37 m, gives ~1.4 km, the deepest framing the current rung honestly serves,
+and the tested point at which absolute-f32 rendering is still sub-pixel, so Terra's
+camera-relative-eye convention is not yet needed); top = the fold threshold at the scene's own
+1.7 whole-orbit margin (now one constant, `arc::WHOLE_ORBIT_MARGIN`, where two literals lived).
+The pacing rule is declared-or-derived, never buried: sim compression proportional to camera
+distance (holding apparent angular rate constant), anchored to the world's declared
+`time.scale` at the top, flooring at real time near the ground; the world file declares the one
+new number, `arc.octave_s` (real seconds per octave of scale). Two derived rules make a
+spinning, time-compressed crust rideable: crust-anchored quantities (hover direction, look
+target, view-up) weight by the reciprocal of the compression, so nothing drifts across the view
+faster than Earth's REAL rotation; and the descent aims where the site WILL be, the remaining
+crust turn under the geometric glide is closed-form (Ω·τ·(S−1)), a constant of the motion, so
+the site rotates into place beneath the camera exactly as it arrives.
+
+**Why.** The demo decision is out-and-back: open at the ball (the scale referent), pull out
+while sim time compresses, witness the de-orbit and impact at celestial scale, descend to the
+re-cohered site. The trigger was already bidirectional; what was missing was a camera that
+spans standing-at-the-site to celestial without a representation break, and a time-compression
+law tied to altitude instead of a hand-set dial. The arc touches nothing physical, it is Law
+IV/VI kept deliberately: a camera/time driver whose every crossing goes through the site
+trigger's own laws.
+
+**Verified.** Native suite 394 passed, 0 failed, 22 ignored (388 baseline + 6 arc tests: span
+derivation pinned against `materialize_site`'s own finest particle, pacing endpoints and
+proportionality, pose continuity over a compressed spinning crust in both directions, the
+lead's conserved quantity, the pan shaping, the declared pacing in the shipped world). wasm32
+check clean; vite build clean. Watched headed on the Mac (mac_shot pattern, port 6999,
+`web/rig/mac_arc.mjs`): the arc ran station to station with ZERO console errors, celestial
+start (site materialized on load, x118,000), mid-descent (x80, aim glided onto the site),
+surface hold (camera 2 km from the site, x1 real time, ball + patch cluster centred), pull-out
+(x104 mid), celestial hold at 1.62e9 m (site FOLDED: 750 particles, 1.3134e8 kg returned, drift
++0.0e0), and the return re-materialized the same site. With IMPACT=1 the full choreography ran:
+Luna dropped from the celestial hold, the GPU impact witnessed at scale (incandescent remnant,
+Earth day 23.9 h -> 25.7 h on the HUD), and the descent through the quieted aftermath
+re-materialized the site carrying the live field's sampled state ("u sampled from the quiet
+field: 3.55e6 J/kg (peak 1012 < v_q 4358 m/s)"), the hand-down path exercised end to end from
+the camera's side. Honest remainders: the opening framing shows the ball as a small central
+cluster (going closer needs the next rung down, docs/59 item 4), and the ball's own destruction
+at the site awaits the mid-event hand-down and site dynamics (docs/59, docs/46 row 18).
+
 ## 2026-07-23: wasm size baseline recorded
 
 **What.** Recorded the release wasm baseline and made it a release-checklist step (docs/03), with a

@@ -91,9 +91,16 @@ band re-samples the coarse field once per coarse step (`site::resample_guards`),
 energy arrives as boundary state and `site::EventWindow` books the window on the HUD; and the
 pi-scaling gate gained its end-to-end consumer (`refine::measure_crater_rim` reads the rim off
 the field at the field's own quantum, prediction frozen from the measured contact state, verdict
-or the stated sub-quantum refusal on the same line). Open within items 2 and 3, carried by
-docs/46 row 18: the descent camera below the orbit camera's floor; releasing relief surfaces in
-the relax (the shipped site is the exact conserving split with its density residual stated); any
+or the stated sub-quantum refusal on the same line).
+
+The out-and-back arc landed the same day (`crate::arc`): one continuous camera parameterization
+from the manual rig's celestial framing down to ~1.4 km over the site, the view-resolution
+distance of the site's finest materialized quantum, the deepest framing the current rung
+honestly serves, with sim-time compression proportional to camera distance, flying the trigger
+in both directions from one control on the Ground Zero page. Open within items 2 and 3, carried
+by docs/46 row 18: the camera below the arc's derived floor (needs the next rung down, and with
+it Terra's camera-relative-eye convention in the space band); releasing relief surfaces in the
+relax (the shipped site is the exact conserving split with its density residual stated); any
 entry of the fine patch into dynamics (the release gate stands); and the N-material upload
 reaching the guards (the sampled state inherits the coarse field's EOS collapse until then).
 
