@@ -9,6 +9,20 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Orbital debris self-gravity dispatches to the GPU above a measured knee.** The verified
+  `cs_gravity_direct` direct sum (`gpu_gravity`, checked against the CPU brute-force sum) is wired
+  into the live path instead of sitting dispatched-to by nothing: `Aggregate` carries an optional
+  `GravityField` built on the scene's shared wgpu device (the same device the renderer and `gpu_sph`
+  run on), and `accelerations` shunts any pass whose gravity-active count reaches
+  `gpu_gravity::DIRECT_SUM_KNEE` to the exact GPU sum in place of the θ=0.5 CPU tree. The knee (600)
+  is read off the `gpu_gravity_speedup` crossover, not guessed: CPU wins at N=400, GPU from N=750 on
+  the measuring box, and the discrete-card history agrees. The orbital scene attaches the field when
+  an impact materialises its debris cloud. Natively the dispatch is synchronous and exact; in the
+  browser it is the engine's two-phase non-blocking read-back (one submission deferred, the CPU tree
+  covering passes still in flight, because WebGPU forbids blocking). Measured end to end at N=3000
+  debris on an Apple M4 Max: acceleration pass 15.2 ms to 7.0 ms, full `step_block` frame 117 ms to
+  78 ms; the exact sum also removes the tree's multipole error, so fidelity rises with the speed.
+
 - **The live moon-drop wiring reads the generic body (docs/58).** `live_resolution_crossing` takes the
   planet's index, resolved from the role the scene declared (`planet_idx`), instead of assuming the
   planet sits at `bodies[1]`; the `Approaching` separation check and the `Assembling` body-centric
