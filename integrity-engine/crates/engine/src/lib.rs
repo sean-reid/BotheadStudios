@@ -69,6 +69,7 @@ mod render;
 pub mod recohere; // docs/61 — the batch downward rung: a settled particle field re-coheres to ground
 pub mod refine; // docs/59, the upward rung: the celestial field initializes the local patch, conserved
 pub mod site; // docs/59, the camera-driven materialization trigger and its site (wires refine.rs)
+pub mod arc; // the out-and-back demo arc: one continuous camera path, surface ⇄ celestial, pacing derived
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 /// docs/49 — surface detail that follows the camera CONTINUOUSLY. The consumer
 /// `ResolutionController::camera_grain_radius` never had.
@@ -1049,6 +1050,44 @@ mod app {
         pi_prediction: Option<(f64, f64)>,
         /// The latest pi-gate readout (measured rim vs prediction, or the stated refusal).
         pi_line: String,
+        // --- The out-and-back demo arc (crate::arc): a CAMERA/TIME driver, never physics. ---
+        /// The world's declared arc pacing (s per octave of camera distance). `None` = this world
+        /// declares no arc; the control never appears.
+        arc_octave_s: Option<f64>,
+        /// The world's DECLARED celestial time scale, the pacing law's top anchor. `time_scale`
+        /// itself mutates (⏪/⏩, the arc), so the declaration is kept separately.
+        arc_declared_scale: f64,
+        /// The running arc, when one is active. While `Some`, the arc owns the camera pose and the
+        /// observable time rate; manual camera/time input is ignored until `arc_stop`.
+        arc: Option<ArcDrive>,
+        /// The time scale to hand back on `arc_stop` (captured at start).
+        arc_saved_scale: f64,
+    }
+
+    /// Where the running demo arc is in its choreography. Glides advance on real time; holds wait
+    /// for the operator's next press (the arc is a camera/time driver, dropping Luna, watching the
+    /// impact, and when to come home stay the operator's calls).
+    #[derive(Clone, Copy, PartialEq)]
+    enum ArcPhase {
+        GlideDown,
+        HoldLow,
+        GlideUp,
+        HoldHigh,
+    }
+
+    /// The running arc: the derived span plus the current scalar state. The POSE is stateless,
+    /// a pure function of (`d_m`, the leg, the live crust orientation) via `crate::arc`, so the
+    /// path is continuous by construction, in both directions.
+    struct ArcDrive {
+        span: crate::arc::ArcSpan,
+        phase: ArcPhase,
+        d_m: f64,
+        leg: crate::arc::Leg,
+        /// Where the manual camera was aiming when the arc took over (Earth-relative, m), faded
+        /// into the arc's own look target over the first octave of travel so taking over is a
+        /// glide, not a cut.
+        aim_from_rel: glam::DVec3,
+        octaves: f64,
     }
 
     /// Earth rendered as a shell of particles (the honest low-res look, docs/15): a smooth sphere is a
@@ -1294,7 +1333,8 @@ mod app {
                 yaw: 0.6,
                 pitch: 0.5,
                 zoom: 1.0,
-                base_distance: (MOON_DIST_M * display_scale()) as f32 * 1.7,
+                base_distance: (MOON_DIST_M * display_scale() * crate::arc::WHOLE_ORBIT_MARGIN)
+                    as f32,
                 pan: Vec3::ZERO,
             };
 
@@ -1381,6 +1421,10 @@ mod app {
                 site_window: crate::site::EventWindow::default(),
                 pi_prediction: None,
                 pi_line: String::new(),
+                arc_octave_s: None,
+                arc_declared_scale: ORBIT_TIME_SCALE,
+                arc: None,
+                arc_saved_scale: ORBIT_TIME_SCALE,
             })
         }
 
@@ -1582,6 +1626,11 @@ mod app {
             if let Some(t) = w.time.as_ref() {
                 self.time_scale = t.scale.clamp(1.0, 2_000_000.0);
             }
+            // The pacing law's anchors: the DECLARED celestial scale (kept apart from the mutable
+            // time_scale) and the world's declared arc pacing, if it declares an arc at all.
+            self.arc_declared_scale = self.time_scale;
+            self.arc_octave_s = w.arc.as_ref().map(|a| a.octave_s);
+            self.arc = None;
 
             // Orbit camera: frame-of-reference focus body + framing.
             self.focus = planet_idx;
@@ -1605,7 +1654,8 @@ mod app {
             if let Some(moon) = self.bodies.get(planet_idx + 1) {
                 let sep = (moon.pos - self.bodies[planet_idx].pos).length();
                 if sep > 0.0 {
-                    self.camera.base_distance = (sep * display_scale()) as f32 * 1.7;
+                    self.camera.base_distance =
+                        (sep * display_scale() * crate::arc::WHOLE_ORBIT_MARGIN) as f32;
                 }
             }
 
@@ -1778,6 +1828,9 @@ mod app {
         /// body through its orbit rather than smearing against inertial space; the focus buttons
         /// snap it back to zero. Representation only — no matter moves.
         pub fn pan_view(&mut self, dx_px: f32, dy_px: f32) {
+            if self.arc.is_some() {
+                return; // the demo arc is the camera driver until arc_stop hands back
+            }
             self.camera.pan_by_pixels(dx_px, dy_px, 0.9, self.config.height.max(1) as f32);
         }
 
@@ -1795,6 +1848,9 @@ mod app {
         }
 
         pub fn set_orbit(&mut self, yaw: f32, pitch: f32, zoom: f32) {
+            if self.arc.is_some() {
+                return; // the demo arc is the camera driver until arc_stop hands back
+            }
             self.camera.yaw = yaw;
             self.camera.pitch = pitch.clamp(-1.5, 1.5);
             // Floor low enough for the descent-follow camera (25% of lunar distance ≈ zoom 0.147).
@@ -1913,6 +1969,9 @@ mod app {
         }
 
         pub fn set_time_scale(&mut self, scale: f32) {
+            if self.arc.is_some() {
+                return; // while the arc runs, the pacing law owns the observable clock
+            }
             self.time_scale = (scale as f64).clamp(1.0, 2_000_000.0);
         }
 
@@ -2130,6 +2189,243 @@ mod app {
             s
         }
 
+        // ----------------------------------------------------------------------------------
+        // The out-and-back demo arc (crate::arc): one continuous camera path from the manual
+        // celestial rig down to standing over the declared site and back, with sim-time
+        // compression tied to camera distance. A CAMERA/TIME driver only, it moves the eye
+        // and the observable clock, never any matter; the site trigger fires along the way
+        // exactly as it does under a manual camera, in both directions.
+        // ----------------------------------------------------------------------------------
+
+        /// Whether this world declares the arc (its pacing lives in the world file) AND arms a
+        /// site for it to open on. No declaration, no control.
+        pub fn arc_available(&self) -> bool {
+            self.arc_octave_s.is_some() && self.site_spec.is_some()
+        }
+
+        pub fn arc_active(&self) -> bool {
+            self.arc.is_some()
+        }
+
+        /// The arc control's label, the ENGINE names the phase, so the button cannot disagree
+        /// with what the camera is actually doing.
+        pub fn arc_label(&self) -> String {
+            match self.arc.as_ref().map(|a| a.phase) {
+                None if self.arc_available() => "▶ glide to the ball".to_string(),
+                None => String::new(),
+                Some(ArcPhase::GlideDown) => "descending · sim time easing to real".to_string(),
+                Some(ArcPhase::HoldLow) => "▶ pull out (sim time will compress)".to_string(),
+                Some(ArcPhase::GlideUp) => "pulling out · sim time compressing".to_string(),
+                Some(ArcPhase::HoldHigh) => "▶ descend to the site".to_string(),
+            }
+        }
+
+        /// The arc camera's current distance to the site (m); 0 while inactive. For the HUD and
+        /// the verification rig.
+        pub fn arc_distance_m(&self) -> f64 {
+            self.arc.as_ref().map_or(0.0, |a| a.d_m)
+        }
+
+        /// The manual rig's pose, `[yaw, pitch, zoom]`, the host resyncs its camera state from
+        /// this after `arc_stop`, so releasing the arc does not fight a stale local copy.
+        pub fn camera_state(&self) -> Vec<f32> {
+            vec![self.camera.yaw, self.camera.pitch, self.camera.zoom]
+        }
+
+        /// One press advances the choreography: from idle, take over the camera and glide down
+        /// to the site (opening framing); from the low hold, pull out; from the high hold,
+        /// descend home. Presses during a glide do nothing, the glide finishes first.
+        pub fn arc_press(&mut self) {
+            if self.arc.is_none() {
+                let Some(octave_s) = self.arc_octave_s else { return };
+                let Some(spec) = self.site_spec.as_ref() else { return };
+                let Some(q) = spec.finest_child_extent_m(&self.mats) else { return };
+                let theta =
+                    crate::resolution::ResolutionController::default().angular_resolution;
+                let threshold = crate::site::view_resolution_distance(
+                    spec.declared_coarse_extent_m(),
+                    theta,
+                );
+                let span = crate::arc::ArcSpan::derive(
+                    q,
+                    theta,
+                    self.camera.base_distance as f64 / display_scale(),
+                    threshold,
+                    self.arc_declared_scale,
+                    octave_s,
+                );
+                // Take over exactly where the manual camera stands: the leg's start direction
+                // and distance ARE the current eye, and the manual aim fades into the arc's
+                // over the first octave, a glide, never a cut.
+                let earth_c = self.bodies[self.planet_idx()].pos;
+                let r_anchor = self.site_anchor_radius_m();
+                let eye_w = self.manual_eye_world();
+                let v0 = (eye_w - earth_c).normalize_or(glam::DVec3::X);
+                let d0 = ((eye_w - earth_c).length() - r_anchor).max(span.d_floor_m);
+                let focus_w =
+                    self.bodies.get(self.focus).map_or(earth_c, |b| b.pos);
+                let aim_from_rel =
+                    focus_w + self.camera.pan.as_dvec3() / display_scale() - earth_c;
+                self.arc_saved_scale = self.time_scale;
+                self.arc = Some(ArcDrive {
+                    span,
+                    phase: ArcPhase::GlideDown,
+                    d_m: d0,
+                    leg: crate::arc::Leg { from_dir: v0, d_start_m: d0 },
+                    aim_from_rel,
+                    octaves: 0.0,
+                });
+                return;
+            }
+            // A hold advances to the next leg. The new leg sets out from the CURRENT pose
+            // direction, so the pose is continuous across the press by construction.
+            let earth_c = self.bodies[self.planet_idx()].pos;
+            let Some((eye_w, _, _, _)) = self.arc_pose_world(earth_c) else { return };
+            let v_now = (eye_w - earth_c).normalize_or(glam::DVec3::X);
+            let Some(a) = self.arc.as_mut() else { return };
+            match a.phase {
+                ArcPhase::HoldLow => {
+                    a.leg = crate::arc::Leg { from_dir: v_now, d_start_m: a.d_m };
+                    a.phase = ArcPhase::GlideUp;
+                }
+                ArcPhase::HoldHigh => {
+                    a.leg = crate::arc::Leg { from_dir: v_now, d_start_m: a.d_m };
+                    a.phase = ArcPhase::GlideDown;
+                }
+                ArcPhase::GlideDown | ArcPhase::GlideUp => {}
+            }
+        }
+
+        /// Release the camera to the manual rig at the nearest pose it can represent: same eye
+        /// direction, distance clamped into its envelope. The manual rig has no surface regime
+        /// (docs/59's open descent-camera remainder), so releasing near the floor steps out to
+        /// its zoom floor, an explicit exit from the choreography, stated, not a cut inside it.
+        /// The observable clock returns to the rate the arc found the scene at.
+        pub fn arc_stop(&mut self) {
+            if self.arc.is_none() {
+                return;
+            }
+            let p = self.planet_idx();
+            let earth_c = self.bodies[p].pos;
+            if let Some((eye_w, _t, _u, _d)) = self.arc_pose_world(earth_c) {
+                let dir = (eye_w - earth_c).normalize_or(glam::DVec3::X).as_vec3();
+                self.camera.yaw = dir.x.atan2(dir.z);
+                self.camera.pitch = dir.y.clamp(-1.0, 1.0).asin().clamp(-1.5, 1.5);
+                let dist_disp = ((eye_w - earth_c).length() * display_scale()) as f32;
+                self.camera.zoom = (dist_disp / self.camera.base_distance).clamp(0.05, 6.0);
+                self.camera.pan = Vec3::ZERO;
+                self.focus = p;
+            }
+            self.arc = None;
+            self.time_scale = self.arc_saved_scale;
+        }
+
+        /// The manual rig's eye in WORLD metres, the one construction `view_proj`, the site
+        /// trigger and the arc's takeover all share, so they cannot disagree about where the
+        /// camera stands.
+        fn manual_eye_world(&self) -> glam::DVec3 {
+            let focus_w = self
+                .bodies
+                .get(self.focus)
+                .map_or(self.bodies[self.planet_idx()].pos, |b| b.pos);
+            let eye_disp = self.camera.eye_dir().as_dvec3()
+                * (self.camera.base_distance * self.camera.zoom) as f64
+                + self.camera.pan.as_dvec3();
+            focus_w + eye_disp / display_scale()
+        }
+
+        /// The site's local elevation on the DRAWN planet (m): the raster elevation at the
+        /// declared lat/lon under the render's own exaggeration; 0 before the rasters arrive.
+        fn site_elev_m(&self) -> f64 {
+            let Some(spec) = self.site_spec.as_ref() else { return 0.0 };
+            self.earth_surface
+                .as_ref()
+                .and_then(|s| {
+                    s.elevation.as_ref().map(|r| {
+                        r.elevation_m_at(
+                            spec.lat_deg,
+                            spec.lon_deg,
+                            s.elev_range[0],
+                            s.elev_range[1],
+                        )
+                        .max(0.0)
+                            * s.relief_exag
+                    })
+                })
+                .unwrap_or(0.0)
+        }
+
+        /// The site's radial anchor on the drawn planet: body radius plus the local drawn
+        /// elevation, the same anchor the site's particles render on, so the arc's floor
+        /// hovers over the site the viewer actually sees.
+        fn site_anchor_radius_m(&self) -> f64 {
+            let p = self.planet_idx();
+            self.body_meta.get(p).map_or(earth_radius_m(), |m| m.radius_m) + self.site_elev_m()
+        }
+
+        /// The arc's camera pose in WORLD metres about the given planet centre (live for the
+        /// trigger, render-lagged for the frame, the caller picks the frame it composes in).
+        /// STATELESS: a pure function of the arc scalars and the crust's current orientation
+        /// through `crate::arc`, which is what makes the path cut-free in both directions.
+        /// Returns `(eye, look target, view up, distance-to-site)`.
+        fn arc_pose_world(
+            &self,
+            earth_c: glam::DVec3,
+        ) -> Option<(glam::DVec3, glam::DVec3, glam::DVec3, f64)> {
+            let a = self.arc.as_ref()?;
+            let spec = self.site_spec.as_ref()?;
+            let spin_axis = self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
+            let spin_rot = glam::DQuat::from_axis_angle(
+                spin_axis,
+                self.spin_angle % (2.0 * std::f64::consts::PI),
+            );
+            let (up_b, north_b, _east) = crate::geo::tangent_frame(spec.lat_deg, spec.lon_deg);
+            let (u_crust, north) = (spin_rot * up_b, spin_rot * north_b);
+            let r_anchor = self.site_anchor_radius_m();
+            let spin_rate = self.spin_l.length() / self.spin_inertia();
+            let v = match a.phase {
+                ArcPhase::GlideDown | ArcPhase::HoldLow => crate::arc::descend_dir(
+                    &a.span, &a.leg, a.d_m, u_crust, spin_axis, spin_rate, r_anchor,
+                ),
+                ArcPhase::GlideUp | ArcPhase::HoldHigh => {
+                    crate::arc::ascend_dir(&a.span, &a.leg, a.d_m, u_crust)
+                }
+            };
+            let eye_w = earth_c + crate::arc::eye(v, r_anchor, a.d_m);
+            let mut target_rel = crate::arc::look_target(&a.span, a.d_m, u_crust * r_anchor);
+            if a.octaves < 1.0 {
+                // The takeover blend (one octave): manual aim → the arc's own target.
+                target_rel = a.aim_from_rel.lerp(target_rel, a.octaves.clamp(0.0, 1.0));
+            }
+            let up = crate::arc::view_up(&a.span, a.d_m, north, glam::DVec3::Y);
+            Some((eye_w, earth_c + target_rel, up, a.d_m))
+        }
+
+        /// Advance the arc by real time: the glide moves the one scalar, the pacing law sets
+        /// the observable clock (every frame while active, the arc owns time until released),
+        /// and a finished glide parks in the next hold. Camera/time state only.
+        fn arc_tick(&mut self, real_dt: f64) {
+            let Some(a) = self.arc.as_mut() else { return };
+            match a.phase {
+                ArcPhase::GlideDown => {
+                    a.d_m = a.span.glide(a.d_m, real_dt, true);
+                    a.octaves += real_dt / a.span.octave_s;
+                    if a.d_m <= a.span.d_floor_m {
+                        a.phase = ArcPhase::HoldLow;
+                    }
+                }
+                ArcPhase::GlideUp => {
+                    a.d_m = a.span.glide(a.d_m, real_dt, false);
+                    a.octaves += real_dt / a.span.octave_s;
+                    if a.d_m >= a.span.d_top_m {
+                        a.phase = ArcPhase::HoldHigh;
+                    }
+                }
+                ArcPhase::HoldLow | ArcPhase::HoldHigh => {}
+            }
+            self.time_scale = a.span.time_scale(a.d_m);
+        }
+
         /// docs/59 - the per-frame site check: the camera's mirror of the moon-drop's
         /// resolution-distance crossing (`live_resolution_crossing`), so the engine has ONE
         /// materialization pattern. Derives the view-necessity threshold from the coarse quantum
@@ -2148,13 +2444,12 @@ mod app {
             );
             let site_dir = spin_rot * crate::geo::dir_from_lat_lon(spec.lat_deg, spec.lon_deg);
             let site_w = self.bodies[p].pos + site_dir * r_p;
-            // The camera eye in world metres: the focus body plus the display-space eye offset
-            // (the same construction as `view_proj`).
-            let focus_w = self.bodies.get(self.focus).map_or(self.bodies[p].pos, |b| b.pos);
-            let eye_disp = self.camera.eye_dir().as_dvec3()
-                * (self.camera.base_distance * self.camera.zoom) as f64
-                + self.camera.pan.as_dvec3();
-            let eye_w = focus_w + eye_disp / display_scale();
+            // The camera eye in world metres: the arc's pose while the arc drives, the manual
+            // rig's otherwise (ONE construction each, shared with the render path).
+            let eye_w = self
+                .arc_pose_world(self.bodies[p].pos)
+                .map(|(e, _, _, _)| e)
+                .unwrap_or_else(|| self.manual_eye_world());
             let dist = (eye_w - site_w).length();
             // The coarse quantum this site is currently represented at.
             let live = self.sph_active
@@ -2508,6 +2803,9 @@ mod app {
         /// the physics with an oversized step — time slows before truth breaks.
         pub fn advance(&mut self, real_dt: f64) {
             let real_dt = real_dt.clamp(0.0, 0.25); // tab-sleep / hiccup guard
+            // The demo arc drives camera distance and the observable clock first (a pure
+            // camera/time driver), so the site trigger below sees the arc's eye this frame.
+            self.arc_tick(real_dt);
             // docs/59 - the declared site's camera trigger runs every frame, whichever machine
             // owns the physics below (the SPH phases early-return out of this function).
             self.update_site(real_dt);
@@ -2979,12 +3277,30 @@ mod app {
             // by `advance(real_dt)`, on wall-clock time, independent of this function's call rate.
             let r_bodies = self.sampled_state();
 
-            let view_proj = self.view_proj();
-
             // Render in the focused body's frame of reference (docs/17): its position is the origin,
             // everything else is drawn relative to it. Switching focus re-centres the whole view.
             let focus = r_bodies[self.focus];
             let sun = r_bodies[0];
+
+            // The demo arc's pose, composed in this same lagged frame, replaces the manual rig's
+            // view while it drives. Built in f64 and cast once, with a distance-scaled near plane
+            // (the fly camera's discipline): at the arc floor the ground is ~1.4 km away, far
+            // inside the manual rig's fixed 0.05-display-unit near plane; near never EXCEEDS the
+            // manual value and far stays put, so the top of the arc is exactly the manual frustum.
+            let arc_pose = self.arc_pose_world(r_bodies[self.planet_idx()]);
+            let view_proj = match arc_pose {
+                Some((eye_w, target_w, up, d)) => {
+                    let ds = display_scale();
+                    let aspect = self.config.width as f64 / self.config.height.max(1) as f64;
+                    let near = (0.03 * d * ds).min(0.05);
+                    let proj =
+                        glam::DMat4::perspective_rh(0.9, aspect.max(1.0e-3), near, 100_000.0);
+                    let view =
+                        glam::DMat4::look_at_rh((eye_w - focus) * ds, (target_w - focus) * ds, up);
+                    (proj * view).as_mat4()
+                }
+                None => self.view_proj(),
+            };
 
             // GPU SPH impact (docs/33 stage 4c.4): push the particle-shader camera uniform. The particle
             // system lives in an Earth-relative f32 frame, so its display origin is Earth's position in the
@@ -3237,11 +3553,16 @@ mod app {
                 }
             }
             // Camera eye in display coordinates (relative to the focus body) — the same construction
-            // as view_proj (orbit distance around the panned look target), needed for the per-grain
-            // Rayleigh view path.
-            let eye_disp = self.camera.eye_dir().as_dvec3()
-                * (self.camera.base_distance * self.camera.zoom) as f64
-                + self.camera.pan.as_dvec3();
+            // as view_proj (the arc's eye while it drives, the orbit distance around the panned look
+            // target otherwise), needed for the per-grain Rayleigh view path.
+            let eye_disp = match arc_pose {
+                Some((eye_w, _, _, _)) => (eye_w - focus) * display_scale(),
+                None => {
+                    self.camera.eye_dir().as_dvec3()
+                        * (self.camera.base_distance * self.camera.zoom) as f64
+                        + self.camera.pan.as_dvec3()
+                }
+            };
             let sun_dir_earth = (sun - earth_center).normalize_or_zero();
             let spin_axis = self.spin_l.try_normalize().unwrap_or(glam::DVec3::Z);
             let spin_rot = glam::DQuat::from_axis_angle(
@@ -3653,8 +3974,12 @@ mod app {
         /// which the HUD renders as a km/AU scale bar. Honest live read of camera state; feeds the
         /// same scale bar as the terrain scene through `metres_per_pixel_at`.
         pub fn meters_per_pixel(&self) -> f64 {
-            let dist_disp = (self.camera.base_distance * self.camera.zoom) as f64;
-            let dist_m = dist_disp / display_scale(); // display units → metres
+            // While the arc drives, the focal distance is its camera-to-site distance; the HUD
+            // scale bar then reads honestly all the way down to the surface framing.
+            let dist_m = match self.arc.as_ref() {
+                Some(a) => a.d_m,
+                None => (self.camera.base_distance * self.camera.zoom) as f64 / display_scale(),
+            };
             crate::metres_per_pixel_at(dist_m, 0.9, self.config.height.max(1) as f64)
         }
 
