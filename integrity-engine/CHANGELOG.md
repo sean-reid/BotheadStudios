@@ -17,6 +17,13 @@ because **we are our own first customers** and pin exact engine versions in our 
   walk/zoom meaning, so a trackpad can pan without a middle button. The full-viewport status
   overlay on every scene page is now pointer-transparent, so a showing message no longer eats
   camera input.
+- **Doc truth-up: the architecture map traces the one SPH path.** docs/32 §6 now describes the live
+  birth trace (the GPU SPH machine with its two entries, the declared impact and the live-drop
+  hand-off) instead of the retired CPU `Aggregate` debris path, with anchors re-verified against the
+  current tree; the stale probe-path and terrain-contact mentions are re-anchored to their current
+  callers. CLAUDE.md's suite counts are re-measured (379 run by default, 22 ignored, per-file
+  breakdown listed), and the impactor-spin IOU in `lib.rs` names its wiring owner (the generic
+  body's per-body `ang_mom`, docs/58 item 3). No behaviour change.
 
 ## [0.11.0] — 2026-07-23
 

@@ -2303,7 +2303,11 @@ mod app {
                                     // the engine still keeps no per-body spin state (only the
                                     // planet's `spin_l`), so the impactor's own rotation cannot be
                                     // handed over yet. The real computation this defers: per-body
-                                    // spin angular momentum carried in the N-body state.
+                                    // spin angular momentum carried in the N-body state. That state
+                                    // has a wiring owner: the generic body's `ang_mom` vector,
+                                    // docs/58 item 3, which the generic-body arc upstream is
+                                    // building. Once a body carries its own L, this hand-off reads
+                                    // the impactor's omega the same way the planet's goes over today.
                                     let placements = [
                                         crate::gpu_sph::BodyPlacement {
                                             offset: glam::DVec3::ZERO,
