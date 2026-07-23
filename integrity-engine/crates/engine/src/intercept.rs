@@ -265,7 +265,16 @@ mod tests {
     fn solved_release_lands_the_contact_on_the_site() {
         let (bodies, planet, drop, r_contact) = ground_zero_bodies();
         let spin = earth_spin(1.234); // an arbitrary, nonzero phase: the solve must use it
-        let (site_lat, site_lon) = (45.0, -100.0); // the Ground Zero world's declared site
+        // The Ground Zero world's OWN declared site, read from the shipped file so the solver
+        // test and the world cannot drift apart.
+        let shipped = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../web/public/worlds/ground-zero/world.json"
+        ))
+        .expect("shipped ground-zero world");
+        let def = crate::terra::world_def::World::parse(&shipped).expect("parses");
+        let g = def.ground.as_ref().expect("declares its site");
+        let (site_lat, site_lon) = (g.lat, g.lon);
 
         let w = solve_drop_window(
             &bodies, planet, drop, r_contact, &spin, site_lat, site_lon, 60.0,
@@ -303,6 +312,16 @@ mod tests {
             "the simulated contact lands within 1° of the site's azimuth (got {:.3}°)",
             miss.to_degrees()
         );
+        // The declared site sits ON the fall's impact ring (the world file's derivation): the
+        // whole cast is in the orbital plane, so the reachable ring is the plane's great circle,
+        // and the site was placed on it - the polar offset timing can never fix reads ~0 here.
+        // A site off the ring (the old 45N 100W) measured 44 degrees of offset and could never
+        // be hit; azimuth AND plane must both close for the ball to stand at ground zero.
+        assert!(
+            w.plane_offset_rad.to_degrees() < 1.0,
+            "the declared site is on the impact ring (plane offset {:.2}°)",
+            w.plane_offset_rad.to_degrees()
+        );
     }
 
     /// **A site on the far side yields a LATER window, never a bent trajectory.** "Far side" to
@@ -322,7 +341,7 @@ mod tests {
         let (dir0, t0) =
             from_rest_fall_contact(&bodies, planet, drop, r_contact, 60.0, 0.0, 30.0 * 86_400.0)
                 .expect("an immediate drop contacts");
-        let (near_lat, near_lon) = (45.0, -100.0); // the declared Ground Zero site
+        let (near_lat, near_lon) = (45.0, 0.0); // the declared Ground Zero site
         let d_near = crate::geo::dir_from_lat_lon(near_lat, near_lon);
         let delta = 15.0_f64.to_radians();
         let spin = earth_spin(wrap_pi(

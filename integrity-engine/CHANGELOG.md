@@ -9,6 +9,27 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The materialized site enters dynamics: the event's arriving energy moves and breaks the
+  site's matter (docs/59).** Two pieces. The release gate resolved on real relief: a stalled
+  relax plateau is a true fixed point caused by the release criterion's own two smoothing
+  scales, so the rung now judges a PROVEN stall against the coarse field's measured
+  disagreement across exactly those scales and releases with the residual and the derived bound
+  both stated (`RelaxReport::release_bound`; the shipped site releases at 4.8e-2 under its own
+  9.1e-2 mismatch; the strict 5e-3 stays the criterion for every converging run, and an
+  unguarded truncation still refuses). The released parcels then step (`site::SiteDynamics`):
+  cohesive matter through the ground scene's own builder (`CohesiveBody::from_parcels`, one law
+  for the site's ball and the ground scene's), bonds, gravity and the one terrain-contact law,
+  driven during an event by the guard band's booked step-to-step delta through the one door
+  (`Aggregate::deposit_impact`), fate by `damage::classify` per parcel, the ball's verdict the
+  ground scene's word, the fold still gated by the docs/61 gauge and the release gate still
+  standing between an UNRELEASED patch and any stepping. The demo beat is a native test at the
+  seam: a moon-magnitude boundary pulse shatters the site's ball by classify alone (measured
+  fate 0 solid / 42 fractured / 171 molten / 60 vapor; mass conserved; a mid-event fold
+  refuses). The HUD's site line now carries the verdict word, the fate mix, the delivered
+  energy and the site's own clock. The declared ground-zero site moved onto the fall's own
+  impact ring (lat 45, lon 0): a from-rest lunar fall is confined to the orbital plane, release
+  timing fixes azimuth only, and a site off the ring's polar plane can never be hit - the
+  derivation is in the world file's comment and the solver test asserts the plane offset ~0.
 - **The drop arms for the launch window, not the instant.** On a world that declares a ground
   site, the Drop control now solves the intercept and ARMS: the new `intercept` module
   integrates the same fall the scene will run (verlet plus the swept first-contact forecast,

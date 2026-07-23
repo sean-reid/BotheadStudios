@@ -1052,6 +1052,10 @@ mod app {
         /// The event window the audit ledger books: boundary state at open, latest, and peak,
         /// so what arrived at the site is a measured delta on the HUD.
         site_window: crate::site::EventWindow,
+        /// The RELEASED site's dynamics (docs/59): the fine parcels as cohesive matter, stepped
+        /// each frame, driven by the guard band's boundary deltas during an event. `None` while
+        /// no site is materialized or the release gate refused dynamics.
+        site_dyn: Option<crate::site::SiteDynamics>,
         /// The pi-scaling prediction, frozen from the MEASURED contact state (rim metres,
         /// contact speed m/s) the moment the impact direction freezes. `None` until contact.
         pi_prediction: Option<(f64, f64)>,
@@ -1427,6 +1431,7 @@ mod app {
                 sph_snapshot_gen: 0,
                 site_sampled_gen: 0,
                 site_window: crate::site::EventWindow::default(),
+                site_dyn: None,
                 pi_prediction: None,
                 pi_line: String::new(),
                 arc_octave_s: None,
@@ -2195,6 +2200,7 @@ mod app {
                 .map_err(|e| JsValue::from_str(&e))?;
             self.site_trigger = crate::site::SiteTrigger::new();
             self.site = None;
+            self.site_dyn = None;
             self.site_buf = None;
             self.site_refused = false;
             self.site_window.reset();
@@ -2230,6 +2236,16 @@ mod app {
                     self.site_gauge.reset();
                     self.site_status =
                         format!("{} · pre-resolved at load, before any event", site_audit_line(&site));
+                    // The released site ENTERS DYNAMICS (docs/59); the release gate refusing
+                    // keeps the patch static, standing and stated.
+                    self.site_dyn =
+                        match crate::site::SiteDynamics::new(&site, &spec, &self.mats) {
+                            Ok(d) => Some(d),
+                            Err(r) => {
+                                self.site_status.push_str(&format!(" · dynamics gated: {r}"));
+                                None
+                            }
+                        };
                     self.site = Some(site);
                 }
                 Err(r) => {
@@ -2261,6 +2277,12 @@ mod app {
             if self.site_window.is_open() {
                 s.push_str(" · ");
                 s.push_str(&self.site_window.hud_line());
+            }
+            // The dynamics readout: the ball's verdict word, the classify fate mix, the
+            // boundary's delivered energy and the site clock.
+            if let Some(d) = &self.site_dyn {
+                s.push_str(" · ");
+                s.push_str(&d.hud_line(&self.mats));
             }
             if !self.pi_line.is_empty() {
                 s.push_str(" · ");
@@ -2564,9 +2586,18 @@ mod app {
                         up: spin_rot * up,
                         north: spin_rot * north,
                     };
+                    // The window's previous book is the baseline this coarse step's ARRIVAL is
+                    // measured against; the first book of an event is the baseline itself.
+                    let prev = self.site_window.is_open().then(|| self.site_window.last_state());
                     let state =
                         crate::site::resample_guards(site, &self.sph_snapshot, &frame);
                     self.site_window.book(state);
+                    // The arrival drives the site's dynamics through the one door (docs/59):
+                    // the guard band's step-to-step delta, delivered per aggregate by
+                    // Aggregate::deposit_impact - the ground scene's own operator.
+                    if let (Some(prev), Some(d)) = (prev, self.site_dyn.as_mut()) {
+                        d.deliver_boundary(&prev, &state, &self.mats);
+                    }
                     // The pi-scaling cross-check (docs/59): once contact froze the impact
                     // direction and the measured-state prediction, read the crater off the
                     // coarse field at the field's own quantum and gate it - or carry the
@@ -2595,6 +2626,12 @@ mod app {
                             }
                         };
                     }
+                }
+                // The site STEPS: its parcels evolve under the existing laws each frame, on the
+                // site's own real-second clock (a compute statement the HUD quotes; verdicts
+                // are deposit-driven and land at the coarse step regardless).
+                if let (Some(site), Some(d)) = (self.site.as_mut(), self.site_dyn.as_mut()) {
+                    d.step(site, dt, &self.mats);
                 }
                 let site = self.site.as_ref().expect("checked above");
                 // Feed the docs/61 gauge the site's own peak speed (the boundary now carries
@@ -2653,6 +2690,16 @@ mod app {
                             self.site_trigger.confirm(crate::site::SiteCrossing::Materialize);
                             self.site_gauge.reset();
                             self.site_status = site_audit_line(&site);
+                            // Released -> the site enters dynamics; gated -> static, stated.
+                            self.site_dyn =
+                                match crate::site::SiteDynamics::new(&site, spec, &self.mats) {
+                                    Ok(d) => Some(d),
+                                    Err(r) => {
+                                        self.site_status
+                                            .push_str(&format!(" · dynamics gated: {r}"));
+                                        None
+                                    }
+                                };
                             self.site = Some(site);
                             self.site_buf = None; // sized on first draw
                         }
@@ -2670,6 +2717,7 @@ mod app {
                         Ok(rep) => {
                             self.site_trigger.confirm(crate::site::SiteCrossing::Deresolve);
                             self.site = None;
+                            self.site_dyn = None;
                             self.site_buf = None;
                             self.site_status = format!(
                                 "site folded to the summary: {} particles, {:.4e} kg returned \
@@ -4251,9 +4299,14 @@ mod app {
         let l = &site.ledger;
         let release = match site.release {
             crate::site::SiteRelease::Released(r) => format!(
-                "released {:.1e} (bound {:.0e}) in {} iters",
+                "released {:.1e} (bound {:.1e}{}) in {} iters",
                 r.released_max_density_error,
-                crate::refine::RELEASE_DENSITY_ERROR,
+                r.release_bound,
+                if r.release_bound > crate::refine::RELEASE_DENSITY_ERROR {
+                    ", the field's own scale mismatch at the stall"
+                } else {
+                    ""
+                },
                 r.iterations
             ),
             crate::site::SiteRelease::Unreleased { achieved, bound, iterations } => format!(
