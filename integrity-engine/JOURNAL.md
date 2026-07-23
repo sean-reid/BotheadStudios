@@ -3,6 +3,40 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the live drop particalizes each body's own matter
+
+**What.** The definition-id stopgap at the live SPH hand-off is dissolved into `particalize`
+(docs/58 item 4). `start_live_drop_sph` no longer sets `impact_def` to `earth`/`moon` id strings:
+it reads the two colliding bodies' own layered matter (`BodyMeta.matter`, the planet resolved by
+declared role), builds each with `HydroBody::particalize` (per-layer catalogue EOS, specific heat
+and declared geotherm; mass from the declared in-situ densities), and stages the pair with the new
+`gpu_sph::far_apart_pair`, the composition-agnostic placement the declared birth path's
+`build_far_apart_from` now also delegates to. Resolution stays the engine's compute budget: the
+same 2400-particle target as the birth path, spent as ONE particle mass across the system, with
+the same 50-particle small-body floor. The `Approaching` phase's resolve distance for a live drop
+now reads the actual bodies' mass and radius, the same inputs the crossing detection used, so a
+live drop still assembles immediately; the declared birth impact keeps reading its impact
+definitions. Detection eligibility now requires a body (and the planet) to carry matter: a bare
+point mass cannot be particalized, so it stays a point mass on the CPU contact path instead of
+being rebuilt from a named definition. That retires the SPH hand-off in the un-migrated worldless
+default scene (whose `body_meta` is empty), which is the degraded world-fetch-failure path only;
+every shipped deorbit world declares profiles that carry matter. The GPU stepper still resolves
+the N-material matter onto its two EOS slots by reference density in `push_body`, a flagged
+resolution limit recorded at the hand-off site.
+
+**Why.** Robin's particalize (mirrored in the previous merge) made the name-free build possible:
+per-body matter now carries everything the SPH needs, so the live hand-off no longer needs the id
+strings that `ImpactDef` resolves definitions by, and the recorded stopgap could go. One collision
+path, driven by what the bodies ARE, not what they are called.
+
+**Verified.** New `a_particalized_pair_stages_far_apart_at_real_mass` pins the staging: both
+bodies at their matter's real mass (the under-massed EOS-reference build stays dead), the
+requested separation, at rest, and the target's iron core and rocky mantle both reaching the GPU
+material slots. `a_body_crossing_its_resolution_distance_is_reported_with_its_live_geometry` and
+`assemble_at_honours_a_given_live_geometry` stay green. Full native suite 337/337 green;
+`cargo check --target wasm32-unknown-unknown -p engine` clean (one warning fewer than before).
+fmt untouched (hand-edited).
+
 ## 2026-07-22: orbital debris self-gravity dispatches to the GPU above a measured knee
 
 **What.** The verified GPU direct-sum gravity kernel is now the live self-gravity path for large

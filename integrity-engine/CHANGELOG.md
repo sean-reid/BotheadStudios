@@ -9,6 +9,19 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The live drop particalizes each body's own matter; the definition-id stopgap is gone (docs/58).**
+  `start_live_drop_sph` no longer overwrites `impact_def` with `earth`/`moon` id strings: at the live
+  hand-off both colliding bodies are built by `HydroBody::particalize` from the layered matter the
+  scene declared per body (`BodyMeta.matter`), each layer carrying its own catalogue EOS, specific
+  heat and geotherm, and staged for GPU relaxation by the new composition-agnostic
+  `gpu_sph::far_apart_pair` (which the declared birth path now also stages through, so where a
+  relaxing pair sits is answered once). The resolution stays the engine's 2400-particle budget at one
+  particle mass across the system, with the birth builder's small-body floor. The `Approaching`
+  resolve distance for a live drop reads the colliding bodies' own mass and radius (the same inputs
+  the crossing detection used), not the birth definitions. A body that carries no matter (a bare
+  point mass, or the un-migrated default scene) is no longer eligible for the SPH hand-off and stays
+  a point mass on the CPU contact path, rather than being rebuilt from a named definition.
+
 - **Orbital debris self-gravity dispatches to the GPU above a measured knee.** The verified
   `cs_gravity_direct` direct sum (`gpu_gravity`, checked against the CPU brute-force sum) is wired
   into the live path instead of sitting dispatched-to by nothing: `Aggregate` carries an optional
