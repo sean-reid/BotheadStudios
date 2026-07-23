@@ -676,12 +676,14 @@ impl Ground {
         self.cam_eye += self.look_dir() * forward_m;
     }
 
-    /// The aim point projected to NORMALISED screen coordinates (`[x, y]`, 0..1, origin top-left) for the
-    /// HUD crosshair — where the camera is aimed at the ground, which is where a meteor will land. Returns
-    /// an EMPTY vec when the camera is not aimed at the ground (looking at the sky) or the point is behind
-    /// the near plane, so the crosshair hides.
+    /// The aim point projected to NORMALISED screen coordinates (`[x, y, on_body]`, 0..1, origin
+    /// top-left) for the HUD crosshair - the first matter the camera's look ray meets, which is where
+    /// a meteor will land. `on_body` is 1 when that matter is a solid body's parcel rather than the
+    /// bulk terrain, so the crosshair (and a verification rig) can tell "aimed at the ball" from
+    /// "aimed at the slope behind it". Returns an EMPTY vec when the ray meets nothing or the point
+    /// is behind the near plane, so the crosshair hides.
     pub fn aim_screen(&self) -> Vec<f32> {
-        let Some(hit) = self.aim_ground_point() else { return Vec::new() };
+        let Some((hit, on_body)) = self.aim_first_matter() else { return Vec::new() };
         let (vp, _) = self.view_proj();
         let clip = vp * glam::Vec4::new(hit.x, hit.y, hit.z, 1.0);
         if clip.w <= 0.0 {
@@ -691,7 +693,7 @@ impl Ground {
         if ndc.x.abs() > 1.2 || ndc.y.abs() > 1.2 {
             return Vec::new();
         }
-        vec![ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5]
+        vec![ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5, if on_body { 1.0 } else { 0.0 }]
     }
 
 
@@ -903,31 +905,70 @@ impl Ground {
         Vec3::new(cp * self.camera.yaw.sin(), self.camera.pitch.sin(), cp * self.camera.yaw.cos())
     }
 
-    /// **Where the camera is aimed at the ground** — the user-chosen impact point. March the view axis
-    /// from the eye until it crosses the bulk surface, then refine. `None` if it never meets the ground
-    /// (looking at or above the horizon), in which case there is nothing to aim at.
+    /// **Where the camera is aimed** - the user-chosen impact point: the FIRST MATTER the look ray
+    /// meets. That is the bulk terrain, or a solid body's parcels if they are nearer - the ball is
+    /// matter, so aiming at it must mean hitting it, not the slope behind its feet (which is exactly
+    /// how the first meteor sailed past a ball that filled the crosshair). `None` if the ray meets
+    /// nothing (looking at the sky with no body in the way).
     fn aim_ground_point(&self) -> Option<Vec3> {
+        self.aim_first_matter().map(|(p, _)| p)
+    }
+
+    /// [`Self::aim_ground_point`] plus WHAT was hit: `true` when the nearest matter on the ray is a
+    /// solid body's parcel, `false` when it is the bulk terrain.
+    fn aim_first_matter(&self) -> Option<(Vec3, bool)> {
         let (eye, _) = self.eye_and_target();
         let dir = self.look_dir();
-        if dir.y > -1.0e-3 {
-            return None; // not looking downward — the axis escapes to the sky
-        }
-        let (mut t, max_t, step) = (0.0f32, 4000.0f32, 0.5f32);
-        let mut above = eye.y - self.sim.world.bulk_height(eye.x, eye.z);
-        while t < max_t {
-            let nt = t + step;
-            let p = eye + dir * nt;
-            let below = p.y - self.sim.world.bulk_height(p.x, p.z);
-            if below <= 0.0 {
-                // Linear refine across the crossing (above > 0 >= below).
-                let f = above / (above - below);
-                let hit = eye + dir * (t + step * f);
-                return Some(Vec3::new(hit.x, self.sim.world.bulk_height(hit.x, hit.z), hit.z));
+        let mut best_t = f32::INFINITY;
+        let mut best: Option<(Vec3, bool)> = None;
+        if dir.y <= -1.0e-3 {
+            // March the view axis until it crosses the bulk surface, then refine.
+            let (mut t, max_t, step) = (0.0f32, 4000.0f32, 0.5f32);
+            let mut above = eye.y - self.sim.world.bulk_height(eye.x, eye.z);
+            while t < max_t {
+                let nt = t + step;
+                let p = eye + dir * nt;
+                let below = p.y - self.sim.world.bulk_height(p.x, p.z);
+                if below <= 0.0 {
+                    // Linear refine across the crossing (above > 0 >= below).
+                    let tf = t + step * (above / (above - below));
+                    let hit = eye + dir * tf;
+                    best_t = tf;
+                    best = Some((
+                        Vec3::new(hit.x, self.sim.world.bulk_height(hit.x, hit.z), hit.z),
+                        false,
+                    ));
+                    break;
+                }
+                above = below;
+                t = nt;
             }
-            above = below;
-            t = nt;
         }
-        None
+        // A body's parcels are matter on the same ray - nearest hit wins, terrain or parcel alike.
+        // Closed-form ray-sphere test per parcel, so a shattered ball's flying chunks still catch
+        // the aim where they actually are. The radius is the parcel cube's circumscribed sphere,
+        // so aiming anywhere on the drawn cube counts.
+        for b in self.sim.cohesive_bodies() {
+            let r = b.part_half as f32 * 3.0f32.sqrt();
+            for p in &b.agg.particles {
+                let c = Vec3::new(p.pos.x as f32, p.pos.y as f32, p.pos.z as f32);
+                let oc = c - eye;
+                let tca = oc.dot(dir);
+                if tca <= 0.0 || tca >= best_t {
+                    continue;
+                }
+                let d2 = oc.length_squared() - tca * tca;
+                if d2 > r * r {
+                    continue;
+                }
+                let t_hit = tca - (r * r - d2).sqrt();
+                if t_hit < best_t {
+                    best_t = t_hit;
+                    best = Some((eye + dir * t_hit, true));
+                }
+            }
+        }
+        best
     }
 
 
