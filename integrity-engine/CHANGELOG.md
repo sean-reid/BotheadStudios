@@ -9,6 +9,20 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The descent camera holds f32 precision from orbit to standing height (docs/59 item 2).** Terra
+  now renders under ONE camera-relative-eye convention (documented in `terra::fly_camera`): every
+  draw uses the eye-at-origin view·projection, the eye is subtracted in f64 (per-vertex for the
+  ground cap, as an f64-built model translation of −eye for the static globe/grain-shell meshes,
+  and a zero eye for the star billboards), and no absolute-eye matrix exists any more; `View`
+  no longer offers one. The relief textures stay glued to the surface across it via a triplanar
+  anchor (the eye folded modulo the 8 m tile, re-added in the shader). In the final metres the
+  coarse globe is skipped once the cap fully covers the view (`ground_cap::CAP_FULL_ALT_M`),
+  the cap's depth-separation lift scales with altitude so it can no longer sit ABOVE a camera
+  standing 2 m up (the old fixed 20 m lift showed its underside), and the near-plane floor drops
+  from ~6.4 m to ~3 cm so the ground underfoot is not clipped. Native tests pin the scheme's
+  bounds: sub-millimetre relative-eye round trip at planet radius, sub-pixel residual for the
+  model-relative globe, surface-fixed texture phase, and the lift staying below the eye.
+
 - **The zoom has a design (docs/59).** Celestial-to-local materialization gets its method, sourced:
   one-shot icosahedral particle splitting that conserves by construction (Feldman-Bonet, Vacondio),
   relax-then-release initialization against the coarse field, interface and contamination discipline

@@ -3,6 +3,51 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the descent camera holds precision from orbit to the ground
+
+**What.** Terra renders under one camera-relative-eye convention (docs/59 order-of-work item 2:
+the descent camera that holds f32 precision to 2 m). The convention lives in `terra::fly_camera`:
+`View` now carries ONLY the eye-at-origin view·projection (`vp_abs` is gone; an absolute-eye
+matrix at planet radius IS the precision bug, so the type no longer offers one), and everything
+Terra draws goes through it. The ground cap already subtracted the eye per-vertex in f64; the
+static globe and grain-shell meshes now draw with a model translation of −eye built in f64 and
+cast once, and the star billboards hang around the origin. The triplanar relief textures stay
+surface-fixed across the change through an anchor: the eye folded modulo the 8 m texture tile
+(tiny, so f32-safe) re-added in `globe.wgsl` before projection; this also ends the cap and globe
+disagreeing about texture phase across the cross-fade. In the final metres: the coarse globe is
+skipped entirely once the cap fully covers the view (`ground_cap::CAP_FULL_ALT_M`, 15 km; below
+that the depth buffer's ~50 m resolution at the horizon cannot separate two copies of the same
+surface, so one of them must not be there); the cap's depth-separation lift scales with altitude
+(`ground_cap::cap_lift_disp`; full 20 m wherever the globe is co-drawn, shrinking below so it
+can never reach the eye; the old fixed 20 m sat ABOVE a camera standing 2 m up, showing the cap's
+underside); and the near-plane floor drops from 1e-6 display units (~6.4 m; it clipped the
+ground underfoot at standing height) to 5e-9 (~3 cm).
+
+**Why.** One continuous camera from celestial view to standing at ground zero, no scene switch
+(Law IV: the camera changes representation, never existence). Raw f32 at Earth's radius has
+~0.4 m ULP; naive world-space rendering re-rolls that error every frame as the eye moves, which
+is ground-level jitter; the fix is representational, not physical, so it belongs entirely to the
+camera/render layer.
+
+**Verified.** Four new native tests pin the scheme's stated bounds: relative-eye round trip
+< 1 mm at planet radius with the naive absolute-f32 path measurably losing centimetres
+(`camera_relative_eye_round_trip_is_submillimetre_at_planet_radius`); the globe's model-relative
+residual < 1.5 m and < 0.1 pixel at its nearest visible distance
+(`globe_model_translation_stays_subpixel_where_the_coarse_globe_is_drawn`); texture phase
+surface-fixed to < 0.1 mm (`triplanar_anchor_restores_surface_fixed_texture_phase`); and the lift
+below the eye at every altitude while reaching full depth separation wherever the globe is
+co-drawn (`cap_lift_stays_below_the_eye_and_reaches_full_depth_separation_with_the_globe`). Full
+native suite 357/357 green; wasm32 check clean. Visually (headed Chromium on the Mac,
+`web/rig/mac_descent.mjs`, real Metal WebGPU): a stepped descent over the Himalaya at 12,000 km /
+2,000 km / 25 km (the cross-fade band where cap and globe co-draw) / 12 km / 100 m / 2 m, plus a
+2 m look-down over Sahara sand; no z-fighting bands in the blend band, no cap underside at 2 m,
+horizon and stars correct, sand relief texture resolving at standing height. Sub-metre smoothness
+probed by stepping the camera sideways 0.25 m at a time at 2 m altitude and diffing consecutive
+frames: per-step image change uniform to under 1% across seven steps (quantized eye handling
+would alternate no-change/double-change at ~0.4 m ULP). The stair-step horizon silhouette at low
+altitude is the elevation raster's own blockiness, present identically on main before this
+change (compared side by side), and is the known missing finer LOD tier, not a regression.
+
 ## 2026-07-23: the live drop joins the generic collision engine, and one IOU dies
 
 **What.** The live de-orbit hand-off is adapted to the generic N-body primitives (docs/58).
