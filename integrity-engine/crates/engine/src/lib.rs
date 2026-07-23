@@ -200,35 +200,41 @@ fn declared_body_radius(d: &crate::terra::world_def::BodyDef) -> f64 {
     d.radius_m.unwrap_or(0.0)
 }
 
-/// **The live resolution-crossing check** (the wiring the SPH assembly primitive exists for): the first orbiting body
-/// (index >= 2 in the [Sun, planet, moons…] layout) whose separation from the planet (index 1) is inside
-/// `accretion::resolution_distance` (the point where tidal stress makes "two point masses" a lie), plus
-/// its body-centric (offset, relative velocity) in f64 SI. That pair is exactly what
-/// `gpu_sph::assemble_from_relaxed_at` takes: TARGET-relative, never heliocentric (f32 collapses at
-/// 1.5e11 m). `eligible[i] == false` skips a body (already materialized, or already handed to the SPH).
+/// **The live resolution-crossing check** (the wiring the SPH assembly primitive exists for): the first
+/// eligible body whose separation from the planet is inside `accretion::resolution_distance` (the point
+/// where tidal stress makes "two point masses" a lie), plus its body-centric (offset, relative velocity)
+/// in f64 SI. That pair is exactly what `gpu_sph::assemble_from_relaxed_at` takes: TARGET-relative,
+/// never heliocentric (f32 collapses at 1.5e11 m).
+///
+/// `planet` is the index of the body the scene declared as its planet, found by ROLE by the caller
+/// (docs/58): no `bodies[1]=Earth` layout assumption, so a scene that ordered its bodies differently is
+/// not wrong here. Every other body is checked, the star included -- a star never gets near the
+/// threshold, and finding nothing is more honest than special-casing it out. `eligible[i] == false`
+/// skips a body (already materialized, or already handed to the SPH).
 ///
 /// Pure and kept OUT of the wasm-only `mod app` so it is natively tested, like the body-spec rules above.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn live_resolution_crossing(
     bodies: &[crate::orbit::Body],
+    planet: usize,
     planet_radius_m: f64,
     eligible: &[bool],
     tidal_fraction: f64,
 ) -> Option<(usize, glam::DVec3, glam::DVec3)> {
-    let planet = bodies.get(1)?;
-    for i in 2..bodies.len() {
-        if !eligible.get(i).copied().unwrap_or(true) {
+    let p = bodies.get(planet)?;
+    for i in 0..bodies.len() {
+        if i == planet || !eligible.get(i).copied().unwrap_or(true) {
             continue;
         }
         let resolve_at = crate::accretion::resolution_distance(
-            planet.mass,
+            p.mass,
             planet_radius_m,
             bodies[i].mass,
             tidal_fraction,
         );
-        let offset = bodies[i].pos - planet.pos;
+        let offset = bodies[i].pos - p.pos;
         if offset.length() <= resolve_at {
-            return Some((i, offset, bodies[i].vel - planet.vel));
+            return Some((i, offset, bodies[i].vel - p.vel));
         }
     }
     None
@@ -2201,8 +2207,10 @@ mod app {
             // Name the bodies actually colliding, or the relax builds the birth defaults (proto-Earth +
             // a Theia-sized impactor) for an Earth–Luna event. Every moon a system world places is an
             // instance of Luna (`assets/bodies/moon.json`, the docs/51 rule), so "moon" IS the
-            // impactor's definition; a world that drops some OTHER defined body needs the body id
-            // carried per-body (in `BodyMeta`) before this can name it.
+            // impactor's definition. Still literal names: per-body matter (docs/58) carries each body's
+            // COMPOSITION (`BodyMeta.matter`, a `LayeredBody`) but not the definition id, and `ImpactDef`
+            // names its bodies by id (`assets/bodies/<id>.json`), so a world that drops some OTHER
+            // defined body needs the id carried per-body before this can name it.
             self.impact_def = crate::terra::world_def::ImpactDef {
                 target: crate::terra::world_def::ImpactBody { body: "earth".into() },
                 impactor: crate::terra::world_def::ImpactBody { body: "moon".into() },
@@ -2352,7 +2360,8 @@ mod app {
                             // inside the threshold when the machine starts, so it assembles immediately;
                             // its impactor is whichever body crossed, not necessarily index 2.
                             let im = self.sph_live_drop.unwrap_or(2);
-                            let sep = (self.bodies[im].pos - self.bodies[1].pos).length();
+                            let sep =
+                                (self.bodies[im].pos - self.bodies[self.planet_idx()].pos).length();
                             if sep <= resolve_at {
                                 self.sph_phase = SphPhase::Assembling;
                                 break;
@@ -2376,15 +2385,19 @@ mod app {
                             let (particles, eos, softening, dt) = match self.sph_live_drop {
                                 Some(i) => {
                                     // Body-centric f64 SI, never heliocentric (f32 collapses at 1.5e11 m).
-                                    let offset = self.bodies[i].pos - self.bodies[1].pos;
-                                    let rel_vel = self.bodies[i].vel - self.bodies[1].vel;
-                                    // Earth's spin rate from its angular momentum, exactly as the CPU
-                                    // materialization does: omega = L/I, solid-sphere I = 2/5 M R². The
-                                    // primitive spins about +z, so the z component is the rate it takes.
-                                    let earth_i =
-                                        0.4 * self.bodies[1].mass * EARTH_RADIUS_M * EARTH_RADIUS_M;
+                                    // The target is the body the scene declared as its PLANET, by role.
+                                    let p = self.planet_idx();
+                                    let offset = self.bodies[i].pos - self.bodies[p].pos;
+                                    let rel_vel = self.bodies[i].vel - self.bodies[p].vel;
+                                    // The target's spin rate from its angular momentum: omega = L/I with
+                                    // the moment of inertia EMERGENT from the body's own layered matter
+                                    // (docs/58) -- the same inertia the rotation and the HUD read, so the
+                                    // spin handed to the SPH matches the day length the scene declared.
+                                    // The primitive spins about +z, so the z component is the rate it
+                                    // takes.
+                                    let target_i = self.spin_inertia();
                                     let target_spin =
-                                        if earth_i > 0.0 { self.spin_l.z / earth_i } else { 0.0 };
+                                        if target_i > 0.0 { self.spin_l.z / target_i } else { 0.0 };
                                     // impactor_spin = 0.0 is a Law V IOU: the engine keeps no per-body
                                     // spin state (only Earth's `spin_l`), so the moon's own rotation
                                     // cannot be handed over. The real computation this defers: per-body
@@ -2552,9 +2565,13 @@ mod app {
                 let eligible: Vec<bool> = (0..self.bodies.len())
                     .map(|i| self.body_meta.get(i).map_or(true, |m| !m.materialized))
                     .collect();
-                let r_planet = self.body_meta.get(1).map_or(EARTH_RADIUS_M, |m| m.radius_m);
+                // The planet by its declared ROLE (docs/58), never an index-1 layout assumption.
+                let planet = self.planet_idx();
+                let r_planet =
+                    self.body_meta.get(planet).map_or(EARTH_RADIUS_M, |m| m.radius_m);
                 if let Some((i, ..)) = crate::live_resolution_crossing(
                     &self.bodies,
+                    planet,
                     r_planet,
                     &eligible,
                     crate::accretion::RESOLVE_TIDAL_FRACTION,
@@ -4727,10 +4744,12 @@ mod tests {
     use crate::{body, gravity, materials, mesher, world};
 
     /// **A live body crossing its resolution distance is the engine's cue to resolve it as matter**
-    /// (the cue to resolve it as matter): the check must report the FIRST orbiting body inside
+    /// (the cue to resolve it as matter): the check must report the FIRST eligible body inside
     /// `accretion::resolution_distance` of the planet, together with the exact body-centric
     /// (offset, relative velocity) pair: the same f64 SI numbers `assemble_from_relaxed_at` will
-    /// receive. Body-centric, never heliocentric (f32 collapses at 1.5e11 m).
+    /// receive. Body-centric, never heliocentric (f32 collapses at 1.5e11 m). The planet is passed
+    /// by the index its declared ROLE resolves to (docs/58), never assumed to sit at index 1, and a
+    /// permuted body order must report the same crossing with the same geometry.
     #[test]
     fn a_body_crossing_its_resolution_distance_is_reported_with_its_live_geometry() {
         use crate::orbit::Body;
@@ -4760,23 +4779,33 @@ mod tests {
         let bodies = [sun, earth, outside, inside];
 
         let (i, offset, rel_vel) =
-            crate::live_resolution_crossing(&bodies, R_EARTH, &[true; 4], f)
+            crate::live_resolution_crossing(&bodies, 1, R_EARTH, &[true; 4], f)
                 .expect("a body inside the resolution distance must be reported");
         assert_eq!(i, 3, "the body OUTSIDE the threshold must not fire; the one INSIDE must");
         // EXACT equality: the pair is handed straight to the SPH assembly, so nothing may drift here.
         assert_eq!(offset, bodies[3].pos - bodies[1].pos, "body-centric offset, bit-exact");
         assert_eq!(rel_vel, bodies[3].vel - bodies[1].vel, "body-centric velocity, bit-exact");
 
+        // A PERMUTED body order reports the same crossing with the same geometry (docs/58: bodies
+        // are addressed by declared role, so the planet's slot in the list must not matter).
+        let permuted = [outside, sun, inside, earth];
+        let (pi, poffset, prel_vel) =
+            crate::live_resolution_crossing(&permuted, 3, R_EARTH, &[true; 4], f)
+                .expect("the same crossing must be found wherever the planet sits");
+        assert_eq!(pi, 2, "the inside body, at its permuted index");
+        assert_eq!(poffset, offset, "identical body-centric offset, bit-exact");
+        assert_eq!(prel_vel, rel_vel, "identical body-centric velocity, bit-exact");
+
         // Nobody inside ⇒ no crossing (the point-mass representation is still honest).
         assert!(
-            crate::live_resolution_crossing(&bodies[..3], R_EARTH, &[true; 3], f).is_none(),
+            crate::live_resolution_crossing(&bodies[..3], 1, R_EARTH, &[true; 3], f).is_none(),
             "a body above the threshold is still a body"
         );
         // An ineligible body (already materialized, or already handed to the SPH) is skipped.
         let mut eligible = [true; 4];
         eligible[3] = false;
         assert!(
-            crate::live_resolution_crossing(&bodies, R_EARTH, &eligible, f).is_none(),
+            crate::live_resolution_crossing(&bodies, 1, R_EARTH, &eligible, f).is_none(),
             "an ineligible body must not be reported twice"
         );
     }

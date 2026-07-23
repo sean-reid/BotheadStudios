@@ -3,6 +3,32 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-22: the live moon-drop wiring reads the generic body
+
+**What.** The live-drop path reconciled with the docs/58 realignment. `live_resolution_crossing`
+gains a `planet` parameter; its `step_substep` caller passes `planet_idx()`, the index the scene's
+declared role resolves to, so the check no longer assumes the `[Sun, planet, moons...]` layout. The
+scan covers every body except the planet itself (the star is checked and correctly finds nothing,
+matching how the swept detector treats it). The `Approaching` separation read and the `Assembling`
+offset/velocity/spin reads use the same role-resolved planet. The `Assembling` arm converts the
+target's spin angular momentum with `spin_inertia()`, the moment of inertia emergent from the body's
+own layered matter, in place of the uniform-sphere `2/5 M R^2` with a hardcoded Earth radius; that
+constant now survives only in the CPU debris materialization, which retires with the `Aggregate`.
+`start_live_drop_sph` still names `earth`/`moon` by definition id, with the reason recorded at the
+site: per-body matter (`BodyMeta.matter`) carries a body's composition, not the id that
+`ImpactDef`/`assets/bodies/<id>.json` resolve definitions by.
+
+**Why.** The wiring shipped assuming three things the generic-body realignment removes: the planet at
+index 1, the solid-sphere inertia, and named lookups. Keeping the old reads would leave two answers
+to "which body is the planet" and "what is its inertia" in the same code path, which is the exact
+fragmentation docs/58 exists to close. The spin handed to the SPH now uses the same inertia the
+rotation and the HUD read, so a declared day length survives the handoff.
+
+**Verified.** `a_body_crossing_its_resolution_distance_is_reported_with_its_live_geometry` extended
+with the docs/58 permutation check: a reordered body list (planet at index 3) reports the same
+crossing with bit-exact identical body-centric geometry. Full native suite 333/333 green;
+wasm32-unknown-unknown check clean. fmt untouched (hand-edited).
+
 ## 2026-07-22: v0.10.0 cut, ending a 13-day unreleased run
 
 **What.** Release cut: everything since v0.9.0 (2026-07-09) moves out of [Unreleased] into a dated
