@@ -73,11 +73,24 @@ async function main() {
   // of metres of eye height), so it crosses the patch in a few seconds rather than crawling or teleporting.
   const WALK_STEP = 0.8;
   let yaw = 0.6, pitch = -0.25, zoom = 1.0;
-  const cam = attachCameraInput(canvas, (dyaw, dpitch) => {
-    yaw += dyaw;
-    pitch = Math.max(-1.4, Math.min(0.4, pitch + dpitch));
-    g.set_orbit(yaw, pitch, zoom);
-  });
+  const cam = attachCameraInput(
+    canvas,
+    (dyaw, dpitch) => {
+      yaw += dyaw;
+      pitch = Math.max(-1.4, Math.min(0.4, pitch + dpitch));
+      g.set_orbit(yaw, pitch, zoom);
+    },
+    {
+      // PAN (shift-drag or middle-drag): the same gesture as every other scene, expressed in this
+      // free-fly rig: the eye translates laterally in the view plane, under the same movement law
+      // as walking (the matter shell still keeps it out of the ground). Deltas arrive in CSS
+      // pixels; the engine scales in its own device-pixel grid, so convert by the canvas's dpr.
+      onPan: (dx, dy) => {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        g.pan_view(dx * dpr, dy * dpr);
+      },
+    },
+  );
   // Wheel dollies the camera along its look direction — the same free movement as dragging forward,
   // just faster. No zoom clamp to get stuck against.
   canvas.addEventListener("wheel", (e) => {
@@ -168,7 +181,7 @@ async function main() {
         timeScale: 1,
         fps,
         metersPerPixel: 0,
-        controls: `${CAMERA_HINT} · wheel zoom · <b>M</b> or the button drops a meteor`,
+        controls: `${CAMERA_HINT} · shift-drag or middle-drag to pan · wheel zoom · <b>M</b> or the button drops a meteor`,
       });
     }
     requestAnimationFrame(frame);
