@@ -88,6 +88,30 @@ floor; releasing relief surfaces in the relax (the shipped site is the exact con
 with its density residual stated); the mid-event hand-down and any entry of the fine patch into
 dynamics; the pi-scaling gate still awaits its end-to-end consumer.
 
+## The hand-down, made concrete (after the trigger landed)
+
+The camera-driven trigger exists; what remains is the event's energy reaching the fine site. Three
+decisions, each following the sources already cited:
+
+1. **The demo site pre-resolves.** The demo opens at the ball, so the ground-zero world materializes
+   its declared site at load, before any shock exists. This is the literature's rule made structural:
+   no code hands off state mid-shock; refinement happens ahead of where the shock will arrive. The
+   descent trigger remains the general path for sites not declared in the world.
+2. **Ownership is single and the guard band is the interface.** Materialization debits the coarse
+   representation and the fold credits it back, exactly as the audit already books. During an event,
+   the guard band re-samples the coarse SPH field each coarse step: the guards ARE the coarse field
+   at the boundary, so the impact's energy arrives as real boundary state through the one contact and
+   deposition laws, not as a formula. No parcel is counted twice; the audit ledger's drift bound is
+   the conservation statement.
+3. **Cold mid-event materialization stays refused.** Creating a new resolution interface inside a
+   shock is the one act the interface discipline forbids; the refusal quotes the measured field
+   speeds, as the trigger does today. A site that wants to witness an event must exist before it.
+
+Validation is the next issue's test: conservation across the event window within the ledger's stated
+bound, and the crater cross-checked against the pi-scaling gate with the coefficient vintage named.
+Fidelity limit stated as an IOU: the coarse field carries two EOS materials, so the guard band's
+sampled state inherits that collapse until the N-material upload reaches the guards.
+
 ## IOUs this design leaves open, named
 
 - Melt, vapor, and comminution tracking in the fine patch (fractions per Gault and Heitowit 1963;

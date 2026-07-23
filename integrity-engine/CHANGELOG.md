@@ -9,6 +9,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The hand-down is designed (docs/59).** The demo site pre-resolves at world load (refinement
+  ahead of the shock, never inside it), ownership is single with the guard band as the interface
+  re-sampling the coarse field each step, and cold mid-event materialization stays refused with
+  measured speeds. Conservation across the event window and the pi-scaling crater check are the
+  closing tests.
+
 - **Crossing the camera's resolution distance materializes ground zero.** The space band now
   carries the first camera-driven resolution-by-necessity trigger (`crate::site`), deliberately
   mirroring the moon-drop's resolution-distance idiom so the engine has one materialization
