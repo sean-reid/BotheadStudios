@@ -50,6 +50,18 @@ because **we are our own first customers** and pin exact engine versions in our 
   The `Assembling` re-upload now reads that kept table on both the declared and the live path
   (the live relax staging stores its two-slot pair there unchanged for now); the legacy pair the
   two-body assembly returns is ignored. The disk geometry is unchanged, only the build.
+- **A settled impact site re-coheres into meshed ground (docs/61).** New `crate::recohere`: the
+  batch downward rung that returns a SETTLED region of any particle field to the voxel world, which
+  the existing surface-nets mesher then renders as standable ground. The criterion is physical, not
+  a frame count — quiescent speed `sqrt(2gΔ)` (below it a grain's kinetic energy cannot buy a
+  one-cell rise) sustained for one cell dynamical time `sqrt(2Δ/g)`, tracked by
+  `recohere::SettleGauge` in seconds of simulated time. Binning conserves mass (f64 accumulation of
+  real grain masses; whole voxel quanta `ρ·Δ³` out, sub-quantum remainder STAYS particles) and
+  material identity, and deposits through the one grain→voxel law (`matter::deposit_grain`, the
+  per-grain path's body now shared as a free function). A still-moving region is refused with the
+  world untouched. Production consumer: `Simulation::step` folds the quiet meteor aftermath back
+  into the world (`Simulation::recohered_voxels()` exposes the count); the SPH-remnant and
+  cohesive-wreck wirings are docs/61's flagged IOUs.
 
 - **The GPU SPH gains N-material upload and N-body assembly (docs/58 items 4/5/7).**
   `GpuSph::upload` now takes a material EOS table (`&[SphEos]`, up to `MAX_MATERIALS` = 16 entries,

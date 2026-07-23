@@ -151,6 +151,11 @@ pub struct Simulation {
     meteors: Vec<Meteor>,
     /// The declared solid bodies, as cohesive matter (docs/23 step 1).
     bodies: Vec<CohesiveBody>,
+    /// How long the impact aftermath has been continuously quiet (docs/61) — the trigger for the
+    /// batch downward rung that folds any remaining settled particles back into the world.
+    settle: crate::recohere::SettleGauge,
+    /// Voxels the batch rung has returned to the world since construction (matter accounting).
+    recohered_voxels: usize,
 }
 
 /// A meteor: real matter with a mass, a material, a place and a velocity.
@@ -215,6 +220,8 @@ impl Simulation {
             created_total: 0,
             meteors: Vec::new(),
             bodies,
+            settle: crate::recohere::SettleGauge::new(),
+            recohered_voxels: 0,
         };
         sim.apply_events();
         Ok(sim)
@@ -277,7 +284,43 @@ impl Simulation {
         self.fly_meteors(dt);
         self.matter.step(&mut self.world, &self.field, &[], dt);
         self.step_cohesive_bodies(dt);
+        self.recohere_when_settled(dt);
         resolved
+    }
+
+    /// **The impact site re-coheres into meshed ground** (docs/61): the production trigger for the
+    /// batch downward rung. Once the aftermath is quiet at the rung's own physical criterion —
+    /// nothing in flight and every remaining grain below the quiescent speed for one cell dynamical
+    /// time — whatever the per-grain settle path left behind is offered back to the voxel world in
+    /// one conserving pass, and `take_dirty()` drives the remesh that renders the result as ground.
+    /// The per-grain path usually empties the field first on this CPU container; this is the
+    /// REGION-level guarantee, and the trigger the particle-ball remnants of other containers wire
+    /// into next (the flagged docs/61 IOU).
+    fn recohere_when_settled(&mut self, dt: f32) {
+        if self.matter.particles.is_empty() || !self.meteors.is_empty() {
+            // Nothing left to demote, or more matter inbound: a fresh disturbance re-arms the gauge.
+            self.settle.reset();
+            return;
+        }
+        let peak = self
+            .matter
+            .particles
+            .iter()
+            .map(|p| p.vel.length())
+            .fold(0.0f32, f32::max);
+        self.settle.observe(peak, self.surface_g, dt);
+        if !self.settle.settled(self.surface_g) {
+            return;
+        }
+        if let Ok(voxels) =
+            self.matter
+                .recohere_settled(&mut self.world, &self.materials, self.surface_g, &self.settle, &[])
+        {
+            self.recohered_voxels += voxels;
+            // Re-arm: what remains (sub-quantum mass, law-refused columns) stays honest particles,
+            // and any new excitement starts its own settle window.
+            self.settle.reset();
+        }
     }
 
     /// Advance every cohesive body: its bonds + gravity settle it to a ground state
@@ -783,6 +826,12 @@ impl Simulation {
     pub fn resolved_total(&self) -> usize {
         self.resolved_total
     }
+
+    /// Voxels the batch downward rung (docs/61) has returned to the world — the matter-accounting
+    /// counterpart of `created_total`, so "the grains became ground" is measurable, not assumed.
+    pub fn recohered_voxels(&self) -> usize {
+        self.recohered_voxels
+    }
 }
 
 #[cfg(test)]
@@ -889,6 +938,45 @@ mod tests {
             .map(|x| rolling.world.surface_top_voxel(x, 0).unwrap_or(-1))
             .collect();
         assert!(tops.windows(2).any(|p| p[0] != p[1]), "the default world has real relief");
+    }
+
+    /// **The impact site re-coheres into meshed ground** (docs/61). After a thrown meteor's
+    /// aftermath settles — quiet at the rung's own physical criterion, not merely "the test waited
+    /// a while" — NO bare particles remain: every grain either deposited through the per-grain
+    /// settle path or was folded back by the batch rung, so the remnant is ground the mesher can
+    /// stand a camera on, not a frozen particle field. The world must hold the returned matter as
+    /// real voxels (excavated minus returned = only what left the patch, which the accounting
+    /// counters expose separately).
+    #[test]
+    fn a_settled_impact_aftermath_leaves_ground_not_bare_particles() {
+        let mut sim = Simulation::from_json(
+            r#"{"name":"g","type":"ground","ground":{"camera_m":[0,30,0],"view_radius_m":120}}"#,
+            mats(),
+        )
+        .expect("builds");
+        let c = sim.world.center();
+        let ground = sim.world.surface_top_voxel(c.x as i32, c.z as i32).unwrap() as f32 - c.y;
+        sim.throw_meteor(Meteor {
+            pos: Vec3::new(0.0, ground + 60.0, 0.0),
+            vel: Vec3::new(0.0, -80.0, 0.0),
+            mass_kg: 1500.0,
+            material: crate::materials::index_of(&mats(), "iron"),
+            radius_m: 0.5,
+        });
+        // A minute of simulated time: land, excavate, loft, settle, re-cohere.
+        for _ in 0..3600 {
+            sim.step(1.0 / 60.0);
+            if sim.meteors().is_empty() && sim.created_total() > 0 && sim.particle_count() == 0 {
+                break;
+            }
+        }
+        assert!(sim.created_total() > 0, "the meteor must excavate real matter");
+        assert_eq!(
+            sim.particle_count(),
+            0,
+            "a settled impact site must be GROUND again — {} grains left as a bare particle field",
+            sim.particle_count()
+        );
     }
 
     /// **A meteor is MATTER, and its energy EMERGES.** The caller throws a rock; it must not be able
@@ -1427,3 +1515,4 @@ mod gravity_audit_tests {
             "down points at the planet's centre: {a:?}");
     }
 }
+

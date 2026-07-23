@@ -66,6 +66,7 @@ mod planet;
 /// their helpers). Lifted out of `#[cfg(wasm32)] mod app`: all three scenes use these identically, so
 /// they were never scene code, and living there kept them out of every native build.
 mod render;
+pub mod recohere; // docs/61 — the batch downward rung: a settled particle field re-coheres to ground
 pub mod resolution; // docs/44 — resolution by necessity: the quasi-static admission test
 /// docs/49 — surface detail that follows the camera CONTINUOUSLY. The consumer
 /// `ResolutionController::camera_grain_radius` never had.
