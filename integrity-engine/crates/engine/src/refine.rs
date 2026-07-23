@@ -654,8 +654,11 @@ pub enum GateVerdict {
 }
 
 /// Compare a measured rim radius against the pi-scaling prediction. Factor-of-two passes; when
-/// the predicted rim radius exceeds half the body radius the check degrades, explicitly, to an
-/// order-of-magnitude sanity bound (docs/59: pi-scaling assumes a point source).
+/// the crater rivals the body - the PREDICTED or the MEASURED rim past half the body radius,
+/// whichever side the rivalry shows on - the check degrades, explicitly, to an
+/// order-of-magnitude sanity bound (docs/59: pi-scaling assumes a point source on a half-space,
+/// and a crater actually excavated across most of a hemisphere is no half-space crater whatever
+/// the point-source formula predicted).
 pub fn pi_scaling_gate(
     measured_rim_radius_m: f64,
     predicted_rim_radius_m: f64,
@@ -666,9 +669,9 @@ pub fn pi_scaling_gate(
     } else {
         predicted_rim_radius_m / measured_rim_radius_m
     };
-    // "Approaches the body's own radius": a predicted rim radius past half the body radius, the
-    // declared threshold at which the half-space assumption is visibly gone.
-    if predicted_rim_radius_m > 0.5 * body_radius_m {
+    // "Approaches the body's own radius": a rim radius past half the body radius, the declared
+    // threshold at which the half-space assumption is visibly gone.
+    if predicted_rim_radius_m.max(measured_rim_radius_m) > 0.5 * body_radius_m {
         if ratio <= 10.0 {
             GateVerdict::SanityPass { ratio }
         } else {
@@ -1429,6 +1432,14 @@ mod tests {
         match pi_scaling_gate(20.0 * predicted, predicted, body_r) {
             GateVerdict::SanityFail { allowed, .. } => assert_eq!(allowed, 10.0),
             other => panic!("20x is outside even the sanity bound, got {other:?}"),
+        }
+        // The MEASURED rim rivaling the body degrades the gate too: a crater actually excavated
+        // across most of a hemisphere is no half-space crater, whatever the point-source formula
+        // predicted (the moon-drop demo measured exactly this: rim 0.92 R against a 0.22 R
+        // prediction).
+        match pi_scaling_gate(0.9 * 6.371e6, 1.4e6, 6.371e6) {
+            GateVerdict::SanityPass { ratio } => assert!((ratio - 0.9 * 6.371 / 1.4).abs() < 1.0e-2),
+            other => panic!("a measured body-scale crater must degrade the gate, got {other:?}"),
         }
         // The same 3x ratio on a planet-sized body is a plain Fail: no quiet degradation.
         match pi_scaling_gate(3.0 * predicted, predicted, 6.371e6) {
