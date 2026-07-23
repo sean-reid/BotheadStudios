@@ -2662,7 +2662,7 @@ mod app {
                     let earth_i = 0.4 * self.bodies[1].mass * EARTH_RADIUS_M * EARTH_RADIUS_M;
                     let earth_omega =
                         if earth_i > 0.0 { self.spin_l / earth_i } else { glam::DVec3::ZERO };
-                    let (agg, acc0) = crate::impact::build_impact_debris_scaled(
+                    let (mut agg, acc0) = crate::impact::build_impact_debris_scaled(
                         &self.mats, site, earth_pos, earth_vel, moon_mass, v_contact,
                         &impactor_profile, &crate::planet::earth(), EARTH_MASS, EARTH_RADIUS_M,
                         SCENE_DEBRIS_N, SCENE_CAP_N, earth_omega,
@@ -2689,7 +2689,19 @@ mod app {
                     // the second impact delete the first one's matter.
                     match self.moon_debris.as_mut() {
                         Some(existing) => existing.absorb(agg),
-                        None => self.moon_debris = Some(agg),
+                        None => {
+                            // The cloud's self-gravity is a per-particle N-body force: the engine
+                            // shunts it to the GPU above the measured knee (aggregate::accelerations
+                            // decides per pass; gpu_gravity::DIRECT_SUM_KNEE records how the knee was
+                            // measured). Same shared device the renderer and gpu_sph already run on;
+                            // the dispatch rides the aggregate, so an absorbed second impact joins the
+                            // first cloud's field.
+                            agg.gpu_gravity = Some(crate::gpu_gravity::GravityField::new(
+                                &self.device,
+                                &self.queue,
+                            ));
+                            self.moon_debris = Some(agg);
+                        }
                     }
                     // The impactor IS the debris now — its matter exists exactly once. Reduce THIS
                     // impactor's parked point mass to nothing (a 1 kg marker keeps the body-array shape)
