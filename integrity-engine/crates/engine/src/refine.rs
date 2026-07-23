@@ -681,6 +681,131 @@ pub fn pi_scaling_gate(
     }
 }
 
+impl fmt::Display for GateVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GateVerdict::Pass { ratio } => {
+                write!(f, "PASS (ratio {ratio:.2}, factor-of-two gate)")
+            }
+            GateVerdict::Fail { ratio, allowed } => {
+                write!(f, "FAIL (ratio {ratio:.2} over the {allowed:.0}x gate)")
+            }
+            GateVerdict::SanityPass { ratio } => write!(
+                f,
+                "SANITY PASS (ratio {ratio:.2}; the crater rivals the body, so only the \
+                 order-of-magnitude bound is honest)"
+            ),
+            GateVerdict::SanityFail { ratio, allowed } => write!(
+                f,
+                "SANITY FAIL (ratio {ratio:.2} outside even the degraded {allowed:.0}x bound)"
+            ),
+        }
+    }
+}
+
+/// A crater rim read off a settled coarse field, at the field's own quantum. The measurement's
+/// resolution IS the quantum: the rim is quantized to one ring, and the refusals below say so
+/// when that resolution cannot carry a verdict.
+#[derive(Clone, Copy, Debug)]
+pub struct CraterMeasurement {
+    /// Geodesic rim radius (m) along the surface from ground zero.
+    pub rim_radius_m: f64,
+    /// Depth of the deepest measured ring below the original surface (m). When every crater
+    /// ring is empty of matter the depth reads the full surface radius: excavated past what the
+    /// bins can see, stated as such rather than guessed.
+    pub floor_depth_m: f64,
+    /// Rings of one quantum the depression spans.
+    pub rings: usize,
+}
+
+/// Why the crater could not be measured. A verdict the representation cannot carry is refused
+/// with the numbers stated, never approximated (docs/59).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CraterRefusal {
+    /// No particles at all: there is no field to measure.
+    NoField,
+    /// The surface at ground zero sits within half a quantum of the original radius: no
+    /// depression the field can resolve.
+    NoDepression { surface_m: f64 },
+    /// The depression spans fewer than two rings of the quantum: the rim lies within one
+    /// quantum of ground zero and a factor-of-two gate cannot bite on it.
+    SubQuantum { rings: usize, quantum_m: f64 },
+}
+
+impl fmt::Display for CraterRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CraterRefusal::NoField => write!(f, "no field to measure a crater in"),
+            CraterRefusal::NoDepression { surface_m } => write!(
+                f,
+                "no crater the field resolves: the surface at ground zero reads {:.0} km, \
+                 within half a quantum of the original radius",
+                surface_m / 1.0e3
+            ),
+            CraterRefusal::SubQuantum { rings, quantum_m } => write!(
+                f,
+                "crater spans {rings} ring of the {:.0} km quantum: the rim is inside one \
+                 quantum of ground zero, so a factor-of-two verdict is refused",
+                quantum_m / 1.0e3
+            ),
+        }
+    }
+}
+
+/// **Measure the crater rim from a coarse particle field** - the gate's measured input, at the
+/// field's own resolution. Rings of one quantum's angular width walk away from the impact
+/// direction; a ring whose surface (the top of its matter, flying ejecta above one quantum over
+/// the original surface excluded) sits more than half a quantum below the original radius is
+/// depressed, and the rim is where the leading run of depressed rings ends. The rim radius is
+/// the geodesic distance to that ring boundary, quantized to one ring by construction - which is
+/// exactly why fewer than two rings refuses ([`CraterRefusal::SubQuantum`]).
+pub fn measure_crater_rim(
+    field: &[SphParticle],
+    impact_dir: DVec3,
+    r_surface_m: f64,
+    quantum_m: f64,
+) -> Result<CraterMeasurement, CraterRefusal> {
+    if field.is_empty() {
+        return Err(CraterRefusal::NoField);
+    }
+    let dir = impact_dir.normalize_or_zero();
+    if dir == DVec3::ZERO || r_surface_m <= 0.0 || quantum_m <= 0.0 {
+        return Err(CraterRefusal::NoField);
+    }
+    let d_theta = quantum_m / r_surface_m;
+    let n_rings = (std::f64::consts::PI / d_theta).ceil() as usize;
+    let mut surface: Vec<Option<f64>> = vec![None; n_rings];
+    for p in field {
+        let x = DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+        let r = x.length();
+        if r <= 0.0 || r > r_surface_m + quantum_m {
+            continue; // matter more than a quantum above the original surface is ejecta in
+                      // flight, not the ground's top
+        }
+        let theta = (x.dot(dir) / r).clamp(-1.0, 1.0).acos();
+        let k = ((theta / d_theta) as usize).min(n_rings - 1);
+        surface[k] = Some(surface[k].map_or(r, |s: f64| s.max(r)));
+    }
+    let depressed =
+        |s: &Option<f64>| -> bool { s.map_or(true, |r| r < r_surface_m - 0.5 * quantum_m) };
+    let rings = surface.iter().take_while(|s| depressed(s)).count();
+    if rings == 0 {
+        return Err(CraterRefusal::NoDepression { surface_m: surface[0].unwrap_or(0.0) });
+    }
+    if rings < 2 {
+        return Err(CraterRefusal::SubQuantum { rings, quantum_m });
+    }
+    let floor = surface[..rings]
+        .iter()
+        .flatten()
+        .fold(f64::INFINITY, |a, &r| a.min(r));
+    Ok(CraterMeasurement {
+        rim_radius_m: r_surface_m * (rings as f64 * d_theta),
+        floor_depth_m: if floor.is_finite() { r_surface_m - floor } else { r_surface_m },
+        rings,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1171,6 +1296,123 @@ mod tests {
             GateVerdict::Fail { allowed, .. } => assert_eq!(allowed, 2.0),
             other => panic!("3x must fail the gate, got {other:?}"),
         }
+    }
+
+    /// **A crater measured from a coarse particle field feeds the gate, and a sub-quantum one
+    /// refuses with the quantum stated.** The gate's end-to-end consumer (docs/59): the rim is
+    /// read off the settled field at the field's own quantum by ring-walking away from the
+    /// impact direction, so the measurement's resolution is stated, never smoothed over. A bowl
+    /// the quantum cannot span refuses (a one-ring rim cannot meet a factor-of-two gate), and an
+    /// intact surface refuses as no-depression rather than measuring noise.
+    #[test]
+    fn a_measured_crater_feeds_the_gate_and_a_sub_quantum_one_refuses() {
+        let r0 = 100.0f64;
+        let q = 5.0f64; // the coarse quantum: rings of q/r0 = 0.05 rad
+        // A shell of ground sampled finer than the quantum, with a bowl of angular radius
+        // `theta_c` around +Z excavated to `depth`.
+        let shell = |theta_c: f64, depth: f64| -> Vec<SphParticle> {
+            let mut field = Vec::new();
+            let nt = 180usize;
+            for it in 0..=nt {
+                let th = it as f64 * std::f64::consts::PI / nt as f64;
+                let np = ((2.0 * std::f64::consts::PI * th.sin() * r0 / 2.0).ceil() as usize).max(1);
+                for ip in 0..np {
+                    let ph = ip as f64 * 2.0 * std::f64::consts::PI / np as f64;
+                    let r = if th < theta_c { r0 - depth } else { r0 };
+                    field.push(SphParticle {
+                        pos: [
+                            (r * th.sin() * ph.cos()) as f32,
+                            (r * th.sin() * ph.sin()) as f32,
+                            (r * th.cos()) as f32,
+                        ],
+                        h: 4.0,
+                        vel: [0.0; 3],
+                        u: 1.0e5,
+                        mass: 1.0,
+                        mat: 0,
+                        rho: 2700.0,
+                        prov: 0,
+                    });
+                }
+            }
+            field
+        };
+
+        // A real bowl: angular radius 0.3 rad (geodesic rim radius 30 m), 12 m deep (well past
+        // the half-quantum depression threshold). Six rings of the 0.05 rad quantum span it, so
+        // the measured rim lands within one quantum of the true 30 m.
+        let m = measure_crater_rim(&shell(0.3, 12.0), DVec3::Z, r0, q)
+            .expect("a bowl the quantum can span must measure");
+        assert!(
+            (m.rim_radius_m - 30.0).abs() <= q + 1.0e-9,
+            "rim within one quantum of the true 30 m: got {:.2}",
+            m.rim_radius_m
+        );
+        assert!(m.rings >= 2, "the gate needs at least two rings to bite");
+        assert!((m.floor_depth_m - 12.0).abs() <= 1.0, "floor depth measured: {:.2}", m.floor_depth_m);
+
+        // The measurement feeds the gate: against a matching prediction it passes plainly
+        // (predicted rim far under half this body's radius when the body is planet-sized).
+        match pi_scaling_gate(m.rim_radius_m, 30.0, 1.0e5) {
+            GateVerdict::Pass { ratio } => assert!(ratio <= 2.0),
+            other => panic!("a matching measurement must pass, got {other:?}"),
+        }
+
+        // A dimple one ring wide is SUB-QUANTUM: refused, with the quantum named - the honest
+        // answer when the representation cannot carry the verdict.
+        match measure_crater_rim(&shell(0.07, 12.0), DVec3::Z, r0, q) {
+            Err(r @ CraterRefusal::SubQuantum { rings: 1, .. }) => {
+                let msg = format!("{r}");
+                assert!(msg.contains("quantum"), "the refusal states the quantum: {msg}");
+            }
+            other => panic!("a one-ring dimple must refuse as sub-quantum, got {other:?}"),
+        }
+
+        // An intact surface is a stated no-depression, never a measured-noise crater.
+        match measure_crater_rim(&shell(0.0, 0.0), DVec3::Z, r0, q) {
+            Err(CraterRefusal::NoDepression { .. }) => {}
+            other => panic!("an intact shell must refuse as no-depression, got {other:?}"),
+        }
+
+        // And an empty field refuses rather than dividing by nothing.
+        match measure_crater_rim(&[], DVec3::Z, r0, q) {
+            Err(CraterRefusal::NoField) => {}
+            other => panic!("an empty field must refuse, got {other:?}"),
+        }
+    }
+
+    /// **The demo drop's prediction sits in the plain gate regime, hand-checked.** The
+    /// pi-scaling cross-check the live event runs: Luna into Earth's basalt crust at the mutual
+    /// escape speed at contact. By hand (moon radius 1.7374e6 m, mass 7.346e22 kg so
+    /// delta = 3344 kg/m^3; Earth outer layer 2900 kg/m^3, g = 9.82; hard rock row):
+    ///   U     = sqrt(2 G (M+m)/(R+r)) = sqrt(2 · 6.674e-11 · 6.045e24 / 8.108e6) = 9975 m/s
+    ///   pi2   = g a / U^2 = 9.82 · 1.7374e6 / 9.951e7 = 0.1714
+    ///   piV   = 0.012 · (pi2 · (2900/3344)^-0.0909)^(-0.647) = 0.0380
+    ///   V     = piV m / rho = 9.6e17 m^3, rim = 1.3 · 1.1 · V^(1/3) = 1.41e6 m
+    /// which is under half the Earth's radius, so the factor-of-two gate (not the degraded
+    /// sanity bound) is the check the event faces.
+    #[test]
+    fn the_moon_drop_prediction_sits_in_the_plain_gate_regime() {
+        let earth = crate::planet::earth();
+        let moon = crate::planet::body("moon");
+        let (m_e, r_e) = (earth.total_mass(), earth.radius());
+        let (m_m, r_m) = (moon.total_mass(), moon.radius());
+        let u = (2.0 * crate::orbit::G * (m_e + m_m) / (r_e + r_m)).sqrt();
+        assert!((9.0e3..1.1e4).contains(&u), "mutual escape at contact ~10 km/s, got {u:.0}");
+        let spec = ImpactSpec {
+            impactor_radius_m: r_m,
+            impactor_density: m_m / (4.0 / 3.0 * std::f64::consts::PI * r_m.powi(3)),
+            speed_ms: u,
+            target_density: earth.layers.last().unwrap().density,
+            gravity: earth.gravity_at(r_e),
+        };
+        let rim = rim_radius_gravity_m(&spec, &HARD_ROCK);
+        assert!(
+            (1.2e6..1.7e6).contains(&rim),
+            "hand-computed band 1.2e6..1.7e6 m, got {rim:.3e}"
+        );
+        assert!(rim < 0.5 * r_e, "under half the body radius: the plain gate applies");
+        assert!(HARD_ROCK.name.contains("v2.2.1"), "the coefficient vintage is named");
     }
 
     /// **The gate degrades, explicitly, when the crater rivals the body.** pi-scaling assumes a
