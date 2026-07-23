@@ -72,6 +72,28 @@ because **we are our own first customers** and pin exact engine versions in our 
   regolith rows) ships alongside for the future end-to-end crater check, unit-tested against a
   hand-computed Meteor Crater example. FLAGGED IOU: zero production consumers; the M4 zoom
   materialization milestone owns the camera trigger and the scene wiring (docs/46 ledger row 18).
+- **The CPU Aggregate debris path is deleted; the orbital scene has ONE collision resolution
+  (docs/58 item 7; docs/46 ledger rows 1 and 3 closed).** `OrbitDemo` no longer holds a
+  `moon_debris: Option<Aggregate>`: the swept-collision materialization block, the CPU debris
+  substep mode, the crater-wall/heal render machinery, the per-fragment snapshot plumbing and the
+  `start_birth` CPU birth scenario are all gone: a dropped moon resolves through the same GPU SPH
+  machine as birth (runtime-proven end to end, headed Chromium on Metal, zero console errors), and
+  a bare point mass that reaches contact now merges inelastically and momentum-conservingly into
+  the planet with its energy reported, never materialised twice. Public-API deltas: `start_birth`
+  removed (no caller since the birth scene moved to `start_gpu_impact`); `disk_stats_json`
+  delegates to the SPH read-back measurement outside geologic time; `debris_count` counts the SPH
+  snapshot; `nudge_aftermath_rate` nudges geologic time only. `impact::build_impact_debris` (the
+  moon-into-Earth wrapper) retired with its last caller; `build_impact_debris_between`/`_scaled`
+  and the furrow/plough physics stay, consumed by that module's own measurement tests. The retired
+  CPU physics pin is ported to the SPH seam:
+  `gpu_sph::a_dropped_moon_impact_leaves_most_matter_bound_on_the_sph_path` stages with
+  `build_far_apart_n`, assembles the energy-conserving drop geometry with
+  `assemble_from_relaxed_n`, steps the CPU KDK twin (`HydroBody::step`), and asserts most matter
+  stays bound (measured 100%) with emergent shock heating past the 800 K emission threshold
+  (impactor 1,977 K to 34,349 K). The SPH remnant measures 5,873 km live (5,601 km at the native
+  seam), an 85%-mass radius, and the declared Earth's own 85%-mass radius is 5,941 km, so the
+  remnant is within 1.2% of an intact Earth by the same yardstick; its re-coherence to a
+  standable surface remains docs/61's flagged IOU 1.
 
 - **The descent camera holds f32 precision from orbit to standing height (docs/59 item 2).** Terra
   now renders under ONE camera-relative-eye convention (documented in `terra::fly_camera`): every

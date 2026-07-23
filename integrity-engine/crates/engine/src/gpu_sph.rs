@@ -1372,4 +1372,185 @@ mod impact_geometry_tests {
         let max_vz = out.iter().filter(|p| p.prov == 0).map(|p| p.vel[2].abs()).fold(0.0f32, f32::max);
         assert!(max_vz > 1.0, "the off-axis spin component reaches the target (max vz {max_vz})");
     }
+
+    /// **The dropped-moon physics pin, ported from the retired CPU `Aggregate` path (docs/58 #7,
+    /// docs/46 rows 1/3): a Moon dropped from its real distance strikes at ~escape speed, and the
+    /// declared energy budget says most of the matter must stay gravitationally bound.** The impact
+    /// energy per unit cloud mass (~2e7 J/kg) is below the ~6.3e7 J/kg needed to unbind matter from
+    /// Earth's surface, so a model that launches a large fraction past escape has a dishonest energy
+    /// partition. And the shock must HEAT: contact dissipation past the ~800 K visible-emission
+    /// threshold is how the debris glows without paint (docs/20).
+    ///
+    /// SEAM, stated honestly: the SPH machine's GPU half (`GpuSph`, `sph_step.wgsl`) needs a WebGPU
+    /// device and cannot run headless in the native suite. So this asserts at the largest native
+    /// seam the live drop has: the SAME staging (`build_far_apart_n`), a CPU relax at the staged dt
+    /// (the damped settle `cs_relax` mirrors), the SAME assembly (`assemble_from_relaxed_n`, on a
+    /// drop geometry derived from energy conservation), and the CPU KDK twin of the dynamics
+    /// (`HydroBody::step`, the physics `sph_step.wgsl` is verified against out-of-process by
+    /// `tools/sph-verify`). Only the dispatch differs; every physical law exercised is shared.
+    /// f32-to-f64 round trips at the seam edges are the conversion cost, well inside the margins.
+    #[test]
+    fn a_dropped_moon_impact_leaves_most_matter_bound_on_the_sph_path() {
+        use crate::hydrostatic::HydroBody;
+        let (e_matter, m_matter) = (crate::planet::earth(), crate::planet::moon());
+        // The live hand-off's own staging (equal particle mass, the 50-particle small-body floor),
+        // at a coarser resolution than the browser's 2400 so the CPU-stepped pass stays affordable.
+        let n_t = 700usize;
+        let m_particle = e_matter.total_mass() / n_t as f64;
+        let n_i = ((m_matter.total_mass() / m_particle).round() as usize).max(50);
+        let (staged, eos_table, softening, relax_dt) =
+            build_far_apart_n(&[(&e_matter, n_t), (&m_matter, n_i)], 40.0);
+
+        // Each EOS slot's specific heat, from the catalogue via the layer materials that built the
+        // table, so a parcel's temperature is u over ITS material's c, not an assumed rock.
+        let mut sh_by_mat = vec![1000.0f64; eos_table.len()];
+        for matter in [&e_matter, &m_matter] {
+            for layer in &matter.layers {
+                let t = crate::eos::Tillotson::for_material(&layer.material)
+                    .unwrap_or_else(crate::eos::Tillotson::basalt);
+                let se = SphEos::from_tillotson(&t);
+                if let Some(k) = eos_table
+                    .iter()
+                    .position(|e| e.rho0 == se.rho0 && e.a == se.a && e.cap_a == se.cap_a)
+                {
+                    sh_by_mat[k] = crate::materials::catalogue()
+                        .iter()
+                        .find(|m| m.id == layer.material)
+                        .and_then(|m| m.specific_heat())
+                        .unwrap_or(1000.0);
+                }
+            }
+        }
+
+        // SphParticle field -> the CPU stepper, reconstructing each particle's own Tillotson EOS
+        // from the shared table its `mat` indexes (the exact reverse of `SphEos::from_tillotson`).
+        let to_hydro = |parts: &[SphParticle], soft: f32| -> HydroBody {
+            HydroBody {
+                pos: parts.iter().map(|p| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64)).collect(),
+                vel: parts.iter().map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64)).collect(),
+                mass: parts.iter().map(|p| p.mass as f64).collect(),
+                u: parts.iter().map(|p| p.u as f64).collect(),
+                eos: parts
+                    .iter()
+                    .map(|p| {
+                        let e = &eos_table[p.mat as usize];
+                        crate::eos::Eos::Tillotson(crate::eos::Tillotson {
+                            rho0: e.rho0 as f64, a: e.a as f64, b: e.b as f64,
+                            cap_a: e.cap_a as f64, cap_b: e.cap_b as f64, e0: e.e0 as f64,
+                            e_iv: e.e_iv as f64, e_cv: e.e_cv as f64,
+                            alpha: e.alpha as f64, beta: e.beta as f64,
+                        })
+                    })
+                    .collect(),
+                h: parts.iter().map(|p| p.h as f64).collect(),
+                softening: soft as f64,
+                rho: parts.iter().map(|p| p.rho.max(1.0) as f64).collect(),
+            }
+        };
+
+        // Damped relax at the staged dt: both bodies settle far apart, as `cs_relax` does live.
+        let mut field = to_hydro(&staged, softening);
+        for _ in 0..800 {
+            field.relax_step(relax_dt as f64, 0.94);
+        }
+        let relaxed: Vec<SphParticle> = staged
+            .iter()
+            .enumerate()
+            .map(|(i, p)| SphParticle {
+                pos: [field.pos[i].x as f32, field.pos[i].y as f32, field.pos[i].z as f32],
+                vel: [field.vel[i].x as f32, field.vel[i].y as f32, field.vel[i].z as f32],
+                u: field.u[i] as f32,
+                rho: field.rho[i] as f32,
+                ..*p
+            })
+            .collect();
+
+        // The DROP geometry, derived, never aimed: a Moon falling from its real distance has, by
+        // energy conservation, v^2 = 2*mu*(1/d - 1/d_lunar) at separation d. Start just above the
+        // relaxed bodies' own contact distance so the strike happens within the stepped window.
+        let (_, me, r_e) = body_bulk(&relaxed, 0);
+        let (_, mm, r_m) = body_bulk(&relaxed, 1);
+        let contact = r_e + r_m;
+        let mu = crate::orbit::G * (me + mm);
+        let d0 = 1.35 * contact;
+        let v0 = (2.0 * mu * (1.0 / d0 - 1.0 / 3.844e8)).sqrt();
+        let placements = [
+            BodyPlacement { offset: DVec3::ZERO, vel: DVec3::ZERO, spin: DVec3::ZERO },
+            BodyPlacement { offset: DVec3::new(0.0, d0, 0.0), vel: DVec3::new(0.0, -v0, 0.0), spin: DVec3::ZERO },
+        ];
+        let (assembled, soft2, _shock_dt) = assemble_from_relaxed_n(&relaxed, &placements);
+
+        let temp_of = |p: &SphParticle| p.u as f64 / sh_by_mat[p.mat as usize];
+        let t_moon_before = assembled.iter().filter(|p| p.prov == 1).map(&temp_of).fold(0.0, f64::max);
+
+        // The collision plays out on the CPU KDK twin with the adaptive Courant dt (the shock
+        // compresses, c rises, dt shrinks; same discipline as every native impact run here).
+        let mut body = to_hydro(&assembled, soft2);
+        let mut sim_t = 0.0f64;
+        while sim_t < 6_000.0 {
+            body.compute_density();
+            let dt = body.courant_dt(0.1);
+            body.step(dt);
+            sim_t += dt;
+        }
+
+        // Back to the snapshot form the scene's HUD consumers read, and measure with the SAME
+        // yardsticks: per-particle boundness about the system COM, and the disk/remnant stats.
+        let snap: Vec<SphParticle> = assembled
+            .iter()
+            .enumerate()
+            .map(|(i, p)| SphParticle {
+                pos: [body.pos[i].x as f32, body.pos[i].y as f32, body.pos[i].z as f32],
+                vel: [body.vel[i].x as f32, body.vel[i].y as f32, body.vel[i].z as f32],
+                u: body.u[i] as f32,
+                rho: body.rho[i] as f32,
+                ..*p
+            })
+            .collect();
+        let pos = |p: &SphParticle| DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64);
+        let vel = |p: &SphParticle| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
+        let m_total: f64 = snap.iter().map(|p| p.mass as f64).sum();
+        let com: DVec3 = snap.iter().map(|p| pos(p) * p.mass as f64).sum::<DVec3>() / m_total;
+        let v_com: DVec3 = snap.iter().map(|p| vel(p) * p.mass as f64).sum::<DVec3>() / m_total;
+        let mu_t = crate::orbit::G * m_total;
+        let bound_m: f64 = snap
+            .iter()
+            .filter(|p| crate::orbit::is_bound(pos(p) - com, vel(p) - v_com, mu_t))
+            .map(|p| p.mass as f64)
+            .sum();
+        let f_bound = bound_m / m_total;
+        let t_moon_after = snap.iter().filter(|p| p.prov == 1).map(&temp_of).fold(0.0, f64::max);
+        let stats = disk_stats_json(&snap);
+        println!(
+            "SPH drop: bound {:.0}% · impactor hottest {t_moon_before:.0} K -> {t_moon_after:.0} K · v0 {v0:.0} m/s · {stats}",
+            100.0 * f_bound
+        );
+
+        // (1) The pinned energy partition: most of the matter stays gravitationally bound.
+        assert!(
+            f_bound > 0.6,
+            "most matter must stay gravitationally bound after a moon drop (got {:.0}%)",
+            100.0 * f_bound
+        );
+        // (2) Emergent shock heating: the impactor's hottest parcel must exceed its own declared
+        // geotherm (nothing assigns heat) and pass the ~800 K visible-emission threshold.
+        assert!(
+            t_moon_after > 800.0 && t_moon_after > 1.2 * t_moon_before,
+            "the shock must heat impactor matter past visible emission ({t_moon_before:.0} K -> {t_moon_after:.0} K)"
+        );
+        // (3) The converged consumer seam: the read-back measurement the HUD uses answers, and its
+        // remnant is a body, not a dispersal (radius pinned loosely; the exact figure is printed
+        // above and recorded in the JOURNAL against Earth's 6,371 km).
+        assert_ne!(stats, "null", "the SPH disk measurement must answer on this snapshot");
+        let remnant_km: f64 = stats
+            .split("\"remnant_km\":")
+            .nth(1)
+            .and_then(|s| s.split(',').next())
+            .and_then(|s| s.trim().parse().ok())
+            .expect("remnant_km in the stats JSON");
+        assert!(
+            (2_000.0..12_000.0).contains(&remnant_km),
+            "the remnant must be a coherent body on the order of the planet (got {remnant_km} km)"
+        );
+    }
 }
