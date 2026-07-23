@@ -112,13 +112,17 @@ pub const SPLIT_SEPARATION_OVER_H: f32 = 0.3051;
 /// Child smoothing as a fraction of the parent's h. Derived offline together with the separation.
 pub const SPLIT_CHILD_H_OVER_H: f32 = 0.7915;
 
-/// The release criterion of the relax: every child's relative density error against the coarse
-/// field must be within this bound before the patch may enter the dynamics. A bound, not an
-/// iteration count: shifting continues exactly until the worst child is inside it. Half a percent
-/// is an order below the raw split blip the native tests measure (7.5e-2 on a uniform basalt
-/// field, 9.5e-2 across a basalt/iron interface) and is the stated density fidelity of the
-/// hand-down; the corresponding Tillotson pressure error at the release bound is the flagged
-/// residual the energy ledger of the future end-to-end test will show.
+/// The release criterion of the relax: every child's density error against the coarse field,
+/// denominated by `max(target, the child's own in-situ density)`, must be within this bound
+/// before the patch may enter the dynamics. In the interior (target ~ rho0) that is the plain
+/// relative error; at a FREE SURFACE, where the coarse field's own kernel decays toward vacuum,
+/// the denominator floors at the matter's declared density so the criterion stays meaningful
+/// (a plain relative error diverges there — the first consumer's slab geometry measured it).
+/// A bound, not an iteration count: shifting continues exactly until the worst child is inside
+/// it. Half a percent is an order below the raw split blip the native tests measure (7.5e-2 on
+/// a uniform basalt field, 9.5e-2 across a basalt/iron interface) and is the stated density
+/// fidelity of the hand-down; the corresponding Tillotson pressure error at the release bound
+/// is the flagged residual the energy ledger of the future end-to-end test will show.
 pub const RELEASE_DENSITY_ERROR: f64 = 5.0e-3;
 
 /// One refinement rung's mass ratio: 13 equal children per parent.
@@ -138,6 +142,17 @@ const RELAX_MAX_STEP_OVER_H: f64 = 0.05;
 /// Divergence guard ONLY. The release criterion is [`RELEASE_DENSITY_ERROR`]; hitting this cap is
 /// a stated [`Refusal::NotConverged`], never a silent release.
 const RELAX_MAX_ITERS: usize = 5000;
+
+/// Stall guard, the cap's companion: if the worst error improves by less than
+/// [`RELAX_STALL_IMPROVEMENT`] (relative) over this many iterations, the shifting has reached a
+/// force-balanced fixed point short of the bound (measured on relief surfaces:
+/// `a_relief_surface_stalls_into_a_prompt_stated_refusal`) and grinding on only delays the same
+/// refusal. Solver guards like [`RELAX_ZETA`]: they may change how fast an answer arrives, never
+/// which patches release — the thresholds are set an order below the slowest window of the
+/// slowest RELEASING run in the suite (the basalt/iron interface, whose flattest 200-iteration
+/// stretch still improves a few percent), while a true plateau improves by ~nothing.
+const RELAX_STALL_WINDOW: usize = 200;
+const RELAX_STALL_IMPROVEMENT: f64 = 1.0e-3;
 
 /// The committed zoom region: a sphere in the SPH field's own frame.
 #[derive(Clone, Copy, Debug)]
@@ -441,8 +456,15 @@ pub fn refine_patch(field: &[SphParticle], region: &Region) -> Result<Refined, R
     let mut am_bound = 0.0f64;
     let mut initial_err = 0.0f64;
     let mut last_err = f64::INFINITY;
+    let mut window_ref = f64::INFINITY;
     for iter in 0..=RELAX_MAX_ITERS {
         // The target is a FIELD: the coarse density interpolated at each child's current site.
+        // The error is denominated by max(target, the particle's own in-situ density): identical
+        // to a plain relative error in the interior (target ~ rho0 there), and BOUNDED at a free
+        // surface, where the coarse field's own kernel decays toward zero — a child at that
+        // fringe otherwise divides by a vanishing target and the criterion reads infinite
+        // (measured by `relax_releases_a_free_floating_slab`, the first consumer's geometry).
+        // No new constant: the floor is the density the particle itself declares its matter has.
         let child_target: Vec<f64> = (fine_start..particles.len())
             .map(|i| density_at(Vec3::from(particles[i].pos), particles[i].h, field))
             .collect();
@@ -450,7 +472,7 @@ pub fn refine_patch(field: &[SphParticle], region: &Region) -> Result<Refined, R
             .zip(&child_target)
             .map(|(i, &t)| {
                 let rho = density_at(Vec3::from(particles[i].pos), particles[i].h, &particles);
-                (rho - t) / t
+                (rho - t) / t.max(particles[i].rho as f64)
             })
             .collect();
         let max_err = child_err.iter().fold(0.0f64, |a, e| a.max(e.abs()));
@@ -462,8 +484,9 @@ pub fn refine_patch(field: &[SphParticle], region: &Region) -> Result<Refined, R
             // RELEASE: the stated density bound is met. Record the measured density on each
             // child (the engine recomputes it every step; this is the honest value at release).
             for (k, i) in (fine_start..particles.len()).enumerate() {
-                let t = child_target[k] * (1.0 + child_err[k]);
-                particles[i].rho = t as f32;
+                let rho = child_target[k]
+                    + child_err[k] * child_target[k].max(particles[i].rho as f64);
+                particles[i].rho = rho as f32;
             }
             let after_relax = audit(&particles);
             return Ok(Refined {
@@ -481,14 +504,25 @@ pub fn refine_patch(field: &[SphParticle], region: &Region) -> Result<Refined, R
         if iter == RELAX_MAX_ITERS {
             break;
         }
+        if iter % RELAX_STALL_WINDOW == 0 {
+            if max_err > window_ref * (1.0 - RELAX_STALL_IMPROVEMENT) {
+                return Err(Refusal::NotConverged {
+                    achieved: max_err,
+                    bound: RELEASE_DENSITY_ERROR,
+                    iterations: iter,
+                });
+            }
+            window_ref = max_err;
+        }
 
-        // Guard errors this iteration (guards are fixed but their density feels the children).
+        // Guard errors this iteration (guards are fixed but their density feels the children),
+        // denominated the same way as the children's.
         let guard_err: Vec<f64> = guard
             .iter()
             .zip(&guard_target)
             .map(|(&i, &t)| {
                 let rho = density_at(Vec3::from(particles[i].pos), particles[i].h, &particles);
-                (rho - t) / t
+                (rho - t) / t.max(particles[i].rho as f64)
             })
             .collect();
 
@@ -507,7 +541,11 @@ pub fn refine_patch(field: &[SphParticle], region: &Region) -> Result<Refined, R
                     let r = (d2 as f64).sqrt();
                     let dw = crate::atmosphere::sph_dw(r, hij as f64);
                     let dir = DVec3::new(d.x as f64, d.y as f64, d.z as f64) / r;
-                    acc += (pj.mass as f64 / tj) * (ei + ej) * dw * dir;
+                    // The neighbour's effective volume, floored by its own declared density for
+                    // the same fringe reason as the error metric (a vanishing target otherwise
+                    // reads as an unbounded volume and flings the child).
+                    let vol = pj.mass as f64 / tj.max(pj.rho as f64);
+                    acc += vol * (ei + ej) * dw * dir;
                 }
             };
             for (k2, j) in (fine_start..particles.len()).enumerate() {
@@ -946,6 +984,150 @@ mod tests {
         match split_patch(&field, &empty).map(|_| ()) {
             Err(Refusal::EmptyRegion) => {}
             other => panic!("an empty region must be refused as such, got {other:?}"),
+        }
+    }
+
+    /// **A patch with a FREE SURFACE releases too.** The first production consumer (the docs/59
+    /// site) splits a ground slab whose top is vacuum — no guard band exists above it, because
+    /// there IS no matter above it. The rung's release criterion must be meaningful there: a
+    /// child near the surface sits where the coarse field's own kernel decays toward zero, and
+    /// an error RELATIVE TO THAT TARGET alone diverges (measured: `achieved: inf` — a child
+    /// shifted past the fringe divides by a vanishing target). The criterion is therefore
+    /// denominated by `max(target, the particle's own in-situ density)`: identical in the
+    /// interior (where target ~ rho0), bounded at the fringe, no new constant.
+    #[test]
+    fn relax_releases_a_patch_with_a_free_surface() {
+        // A half-space slab: 12x5x12 lattice, vacuum above. Region tight to the TOP surface so
+        // the split children sit against the free boundary with coarse matter only below.
+        let mut field = Vec::new();
+        for i in 0..12 {
+            for k in 0..12 {
+                for j in 0..5 {
+                    let pos = Vec3::new(i as f32 - 5.5, -0.5 - j as f32, k as f32 - 5.5);
+                    field.push(SphParticle {
+                        pos: pos.to_array(),
+                        h: 2.0,
+                        vel: [0.0; 3],
+                        u: 1.0e5,
+                        mass: BASALT_RHO,
+                        mat: crate::gpu_sph::MAT_BASALT,
+                        rho: BASALT_RHO,
+                        prov: 0,
+                    });
+                }
+            }
+        }
+        let region = Region { center: Vec3::new(0.0, -1.0, 0.0), radius: 2.0 };
+        let refined = refine_patch(&field, &region)
+            .expect("a free-surface patch must release, not diverge at the fringe");
+        println!(
+            "free-surface blip: initial {:.4e}, released {:.4e} after {} iterations, max shift {:.3} m",
+            refined.relax.initial_max_density_error,
+            refined.relax.released_max_density_error,
+            refined.relax.iterations,
+            refined.relax.max_shift_m,
+        );
+        assert!(refined.relax.released_max_density_error <= RELEASE_DENSITY_ERROR);
+        // Conservation holds at the boundary exactly as in the interior.
+        let l = refined.ledger;
+        assert!((l.after_relax.mass - l.before.mass).abs() <= l.before.mass * 1.0e-6);
+        assert!((l.after_relax.internal - l.before.internal).abs() <= l.before.internal * 1.0e-6);
+    }
+
+    /// **An UNGUARDED truncation refuses with a finite, stated error.** Splitting a whole finite
+    /// parent set (no guards on any side) is not a legal refinement configuration — the
+    /// buffer-shell discipline exists precisely because a fine patch needs coarse matter to
+    /// relax against. With the error denominated by the target alone this configuration
+    /// diverged to a meaningless infinity (fringe children chase a target that decays to
+    /// vacuum); the rho0-floored denominator keeps the fringe error bounded, so
+    /// the divergence guard now states a real number a caller can reason about. The measured
+    /// plateau (~5e-2, the raw blip's order) is the honest answer: this geometry cannot reach
+    /// the release bound, so it is refused, never released.
+    #[test]
+    fn an_unguarded_truncation_refuses_with_a_finite_stated_error() {
+        // A small slab, one metre spacing, nothing around it in any direction.
+        let mut field = Vec::new();
+        for i in 0..4 {
+            for k in 0..4 {
+                let pos = Vec3::new(i as f32 - 1.5, -0.5, k as f32 - 1.5);
+                field.push(SphParticle {
+                    pos: pos.to_array(),
+                    h: 2.0,
+                    vel: [0.0; 3],
+                    u: 1.0e5,
+                    mass: BASALT_RHO,
+                    mat: crate::gpu_sph::MAT_BASALT,
+                    rho: BASALT_RHO,
+                    prov: 0,
+                });
+            }
+        }
+        // The region swallows the whole slab: no guards exist anywhere.
+        let region = Region { center: Vec3::new(0.0, -0.5, 0.0), radius: 10.0 };
+        match refine_patch(&field, &region) {
+            Err(Refusal::NotConverged { achieved, bound, .. }) => {
+                assert!(
+                    achieved.is_finite(),
+                    "the refusal must state a REAL error, not the fringe division blow-up"
+                );
+                assert!(achieved > bound, "refused because the bound was not met");
+                assert!(achieved < 1.0, "fringe errors stay bounded by the matter's own density");
+            }
+            Ok(r) => {
+                // If the flow ever converges here that is fine too — but it must be under the
+                // bound, not a silent release.
+                assert!(r.relax.released_max_density_error <= RELEASE_DENSITY_ERROR);
+            }
+            Err(other) => panic!("expected NotConverged or release, got {other:?}"),
+        }
+    }
+
+    /// **A RELIEF surface stalls, and the stall is a fast, stated refusal.** Columns whose tops
+    /// carry per-column vertical offsets (ground relief at the parents' own resolution — the
+    /// docs/59 site's real geometry) reach a force-balanced fixed point of the shifting at
+    /// ~5e-2, an order above the release bound: near a rough free surface the target (read at
+    /// the child's h) and the children's own sum (at theirs) disagree by a smoothing-scale
+    /// mismatch no repositioning removes. The stall guard turns what was a full
+    /// [`RELAX_MAX_ITERS`] grind into a prompt [`Refusal::NotConverged`] with the plateau
+    /// stated, so a caller can fall back to the exact split and REPORT the residual instead of
+    /// hanging. Releasing relief surfaces (a fringe-corrected density estimate) is the named
+    /// deferred computation.
+    #[test]
+    fn a_relief_surface_stalls_into_a_prompt_stated_refusal() {
+        let mut field = Vec::new();
+        for i in 0..12 {
+            for k in 0..12 {
+                let off = 0.45 * ((i as f32 * 1.7 + k as f32 * 2.3).sin());
+                for j in 0..5 {
+                    let pos = Vec3::new(i as f32 - 5.5, off - 0.5 - j as f32, k as f32 - 5.5);
+                    field.push(SphParticle {
+                        pos: pos.to_array(),
+                        h: 2.0,
+                        vel: [0.0; 3],
+                        u: 1.0e5,
+                        mass: BASALT_RHO,
+                        mat: crate::gpu_sph::MAT_BASALT,
+                        rho: BASALT_RHO,
+                        prov: 0,
+                    });
+                }
+            }
+        }
+        let region = Region { center: Vec3::new(0.0, -1.0, 0.0), radius: 2.0 };
+        match refine_patch(&field, &region) {
+            Err(Refusal::NotConverged { achieved, bound, iterations }) => {
+                assert!(achieved.is_finite() && achieved > bound && achieved < 1.0);
+                assert!(
+                    iterations < RELAX_MAX_ITERS / 4,
+                    "the stall guard must refuse promptly, not grind to the cap ({iterations})"
+                );
+            }
+            Ok(r) => {
+                // If a better relax ever releases relief, that closes the IOU — but only under
+                // the bound, never silently.
+                assert!(r.relax.released_max_density_error <= RELEASE_DENSITY_ERROR);
+            }
+            Err(other) => panic!("expected NotConverged or release, got {other:?}"),
         }
     }
 
