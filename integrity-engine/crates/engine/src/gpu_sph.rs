@@ -170,18 +170,33 @@ pub fn build_impact_bodies(n_earth: usize, _n_theia: usize) -> (crate::hydrostat
 /// milliseconds — no CPU chunking), reads it back, then [`assemble_from_relaxed`] positions the collision.
 /// Returns (particles, softening, relax_dt).
 pub fn build_far_apart_from(def: &crate::terra::world_def::ImpactDef, n_earth: usize, n_theia: usize) -> (Vec<SphParticle>, f32, f32) {
+    let _ = n_theia; // the impactor's count follows from equal particle mass, not a caller knob
     let (earth, theia) = build_impact_bodies_from(def, n_earth);
     let far = def.relax_separation * (def.target.radius_m() + def.impactor.radius_m());
-    let ec = com(&earth);
-    let tc = com(&theia);
-    let mut out = Vec::with_capacity(earth.pos.len() + theia.pos.len());
-    push_body(&mut out, &earth, 0, -ec, glam::DVec3::ZERO);
-    push_body(&mut out, &theia, 1, -tc + glam::DVec3::new(far, 0.0, 0.0), glam::DVec3::ZERO);
-    let softening = earth.softening.min(theia.softening) as f32;
+    far_apart_pair(&earth, &theia, far)
+}
+
+/// Stage two ALREADY-BUILT bodies for GPU relaxation: the target (prov 0) at the origin, the impactor
+/// (prov 1) at `separation_m` along +x, both at rest, each recentred on its own COM. This is the
+/// composition-agnostic placement both relax starts share: the declared birth path stages the bodies it
+/// built from its `ImpactDef`, and the LIVE hand-off stages the two bodies it PARTICALIZED from their own
+/// matter (`HydroBody::particalize`, docs/58), so where a relaxing pair sits is answered once. Returns
+/// (particles, softening, relax_dt).
+pub fn far_apart_pair(
+    target: &crate::hydrostatic::HydroBody,
+    impactor: &crate::hydrostatic::HydroBody,
+    separation_m: f64,
+) -> (Vec<SphParticle>, f32, f32) {
+    let tc = com(target);
+    let ic = com(impactor);
+    let mut out = Vec::with_capacity(target.pos.len() + impactor.pos.len());
+    push_body(&mut out, target, 0, -tc, glam::DVec3::ZERO);
+    push_body(&mut out, impactor, 1, -ic + glam::DVec3::new(separation_m, 0.0, 0.0), glam::DVec3::ZERO);
+    let softening = target.softening.min(impactor.softening) as f32;
     // Relaxation Courant dt (cfl·min h / max c, as the working CPU relax used). Stable at cfl 0.2 PROVIDED the
     // caller zeroes the artificial viscosity during relax (`set_av(0,0)`) — AV stiffens the transient and would
     // otherwise force a ~4× smaller dt (and 4× more steps).
-    let relax_dt = earth.relax_dt(0.2).min(theia.relax_dt(0.2)) as f32;
+    let relax_dt = target.relax_dt(0.2).min(impactor.relax_dt(0.2)) as f32;
     (out, softening, relax_dt)
 }
 
@@ -1036,5 +1051,47 @@ mod impact_geometry_tests {
         // Impactor carries EXACTLY the requested live offset and relative velocity — no synthesized approach.
         assert!((mc - ec - offset).length() < 0.02 * r_e, "impactor on the live offset ({:.3e} off)", (mc - ec - offset).length());
         assert!((mv - ev - rel_vel).length() < 1.0, "impactor carries the live relative velocity");
+    }
+
+    /// **The live hand-off stages two PARTICALIZED bodies with no definition id.** The bodies are built
+    /// from their own layered matter (`HydroBody::particalize`, docs/58) and staged by `far_apart_pair`:
+    /// real masses (the declared in-situ densities, not the under-massed EOS reference), the requested
+    /// staging separation, both at rest, and the target's real differentiation reaching the GPU's
+    /// material slots. Earth and Luna here are test FIXTURES, not names the staging reads.
+    #[test]
+    fn a_particalized_pair_stages_far_apart_at_real_mass() {
+        use crate::hydrostatic::HydroBody;
+        let e_matter = crate::planet::earth();
+        let m_matter = crate::planet::moon();
+        // One particle mass across the system (the impactor's count follows from its real mass, with
+        // the same small-body floor the birth builder uses).
+        let n_t = 800usize;
+        let m_particle = e_matter.total_mass() / n_t as f64;
+        let n_i = ((m_matter.total_mass() / m_particle).round() as usize).max(50);
+        let target = HydroBody::particalize(&e_matter, n_t);
+        let impactor = HydroBody::particalize(&m_matter, n_i);
+        let sep = 40.0 * (e_matter.radius() + m_matter.radius());
+        let (out, softening, relax_dt) = far_apart_pair(&target, &impactor, sep);
+
+        let (tc, tm, _) = body_bulk(&out, 0);
+        let (ic, im, _) = body_bulk(&out, 1);
+        assert!(
+            (tm - e_matter.total_mass()).abs() / e_matter.total_mass() < 0.02,
+            "target mass is its matter's real mass (got {tm:.3e} vs {:.3e})",
+            e_matter.total_mass()
+        );
+        assert!(
+            (im - m_matter.total_mass()).abs() / m_matter.total_mass() < 0.03,
+            "impactor mass is its matter's real mass (got {im:.3e} vs {:.3e})",
+            m_matter.total_mass()
+        );
+        let d = (ic - tc).length();
+        assert!((d - sep).abs() / sep < 0.02, "staged at the requested separation (got {d:.3e} vs {sep:.3e})");
+        assert!(out.iter().all(|p| p.vel == [0.0; 3]), "both bodies staged at rest");
+        // The target's real differentiation reaches the GPU's material slots: an iron core AND a
+        // rocky mantle, not one assumed material.
+        let target_mats: Vec<u32> = out.iter().filter(|p| p.prov == 0).map(|p| p.mat).collect();
+        assert!(target_mats.contains(&MAT_IRON) && target_mats.contains(&MAT_BASALT));
+        assert!(softening > 0.0 && relax_dt > 0.0, "usable relax parameters");
     }
 }
