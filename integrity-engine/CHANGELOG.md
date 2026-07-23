@@ -9,6 +9,21 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The impact's energy reaches ground zero as boundary state (docs/59).** The Ground Zero
+  world's declared site now pre-resolves at world load, before any event exists, with the
+  conservation audit on the HUD from the first frame; the descent trigger stays as the general
+  path, and the only one when a mid-event load refuses with its measured speeds. During a live
+  impact the site's guard band re-samples the coarse SPH field once per coarse step: the guards
+  are the coarse field at the boundary, so the event's energy arrives as real boundary state,
+  and an event window books it on the HUD (arrived kinetic and internal energy, peak boundary
+  speed, uncovered guards counted, drift against an independent audit bounded at 1e-6). Ownership
+  stays single: guards mirror state, never matter, and the fine patch stays out of dynamics
+  behind the release gate. The stated fidelity IOU rides the same line: the sampled state
+  inherits the coarse field's collapsed EOS material set until the N-material upload reaches the
+  guards. The pi-scaling gate gained its end-to-end consumer: the prediction freezes from the
+  measured contact state (barycentric closing speed, measured impactor mass), the crater rim is
+  measured from the field at the field's own quantum, and the verdict, or the honest sub-quantum
+  refusal, renders next to the window with the coefficient vintage named.
 - **The hand-down is designed (docs/59).** The demo site pre-resolves at world load (refinement
   ahead of the shock, never inside it), ownership is single with the guard band as the interface
   re-sampling the coarse field each step, and cold mid-event materialization stays refused with

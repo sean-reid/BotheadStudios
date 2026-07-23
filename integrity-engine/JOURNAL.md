@@ -3,6 +3,54 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the event reaches ground zero as boundary state, booked
+
+**What.** The hand-down design's three decisions, implemented. (1) The Ground Zero world's
+declared site pre-resolves in `load_site_world`, before any event exists, and the HUD carries
+the audit from the first frame; the descent trigger stays as the general path, and the only one
+when a mid-event load refuses with its measured speeds. (2) During a live impact the guard band
+re-samples the coarse SPH field once per coarse readback (`site::resample_guards`): each guard's
+velocity, specific internal energy and density become the field's own Shepard interpolation at
+the guard's position, positions and masses untouched, so the guards ARE the coarse field at the
+boundary and no parcel is counted twice; `site::EventWindow` books the boundary state at open,
+latest and peak, drift against an independent audit bounded at 1e-6, and the docs/61 gauge now
+sees the boundary's real speeds, so a hot site refuses to fold. The sampled state inheriting the
+coarse field's collapsed EOS set is the stated IOU on the window's own line. (3) Cold mid-event
+materialization keeps refusing with measured speeds, unchanged. The pi-scaling gate gained its
+end-to-end consumer: the prediction freezes from the measured contact state (barycentric closing
+speed, measured impactor mass), `refine::measure_crater_rim` reads the rim off the field in
+rings of the field's own quantum, and the verdict, or the stated refusal when the quantum cannot
+carry one, renders next to the window with the coefficient vintage named.
+
+**Why.** The trigger half landed a site that could exist; the event's energy never reached it,
+and the literature's rule (no refinement inside a shock) means the energy must arrive as
+boundary state at a site that already exists, not as a mid-shock hand-off. The window's booked
+drift bound is the conservation statement the LOD bridge owed, and the crater cross-check is the
+validation gate docs/59 prescribed instead of eyeballing.
+
+**Verified.** 391 native tests green (388 baseline plus 3). The window book: a quiet-hot-quiet
+pulse across the shipped site's 477-guard boundary books arrived KE/IE equal to an independent
+f64 audit within 1e-6, returns to zero when the pulse leaves, guards carry exactly the uniform
+field's state, fine children bitwise untouched, mass single-owner at 1.313357e8 kg through the
+whole window. The rim measurement: a synthetic bowl of angular radius 0.3 rad measures its rim
+within one quantum of the true 30 m and passes the gate; a one-ring dimple refuses sub-quantum
+with the quantum named; an intact shell refuses as no-depression; the demo drop's prediction
+(Luna into basalt crust at the mutual escape speed, hand-computed rim 1.41e6 m) sits in the
+plain factor-of-two regime. Headed on the Mac (mac_shot pattern, port 6899,
+`web/rig/mac_event_handdown.mjs` on the Ground Zero page): at load the HUD reads the full audit
+line plus "pre-resolved at load, before any event" with the camera at 646,242 km inside the
+952,220 km threshold; after Drop Moon the event window opens on the HUD with all 477 guards
+covered and books the boundary energy arriving, from an early arrived KE -6.6e10 J / IE +6.8e10 J
+at peak 304 m/s through to KE +7.7e12 J / IE +8.0e14 J at peak 1,088 m/s after 337 coarse steps,
+the EOS-collapse IOU on the same line; the pi gate renders live and lands on its honest verdict,
+"rim 5838 km measured at the 1168 km quantum vs 1396 km predicted from the 9.7 km/s contact:
+SANITY PASS (ratio 4.18; the crater rivals the body, so only the order-of-magnitude bound is
+honest)" (the first run of the rig measured this exact case as a plain 2x FAIL, which is what
+widened the gate's degrade condition to the measured rim; the quantum itself balloons to 1,168 km
+mid-event because decompressed ejecta are the widest thing one particle answers for - measured,
+stated, not smoothed); zero console errors across the run; screenshots in the rig's output
+directory, viewed.
+
 ## 2026-07-23: wasm size baseline recorded
 
 **What.** Recorded the release wasm baseline and made it a release-checklist step (docs/03), with a

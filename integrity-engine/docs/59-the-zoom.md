@@ -82,11 +82,20 @@ with item 3's entry point: `crate::site` derives the view-necessity threshold (o
 particle's matter share against the docs/49 angular budget, measured from the live field when one
 exists) and the space band materializes the Ground Zero world's declared ball and strata patch
 through `crate::refine` on the descending crossing, folding back through the docs/61 gauge on the
-ascending one, bidirectional for the out-and-back demo arc, ledger and refusals on the HUD. Open
-within items 2 and 3, carried by docs/46 row 18: the descent camera below the orbit camera's
-floor; releasing relief surfaces in the relax (the shipped site is the exact conserving split
-with its density residual stated); the mid-event hand-down and any entry of the fine patch into
-dynamics; the pi-scaling gate still awaits its end-to-end consumer.
+ascending one, bidirectional for the out-and-back demo arc, ledger and refusals on the HUD.
+
+The hand-down section below then landed (2026-07-23): the declared site pre-resolves in
+`load_site_world`, before any event, with the descent trigger kept as the general path (and the
+only one when a mid-event load refuses with its measured speeds); during a live event the guard
+band re-samples the coarse field once per coarse step (`site::resample_guards`), so the impact's
+energy arrives as boundary state and `site::EventWindow` books the window on the HUD; and the
+pi-scaling gate gained its end-to-end consumer (`refine::measure_crater_rim` reads the rim off
+the field at the field's own quantum, prediction frozen from the measured contact state, verdict
+or the stated sub-quantum refusal on the same line). Open within items 2 and 3, carried by
+docs/46 row 18: the descent camera below the orbit camera's floor; releasing relief surfaces in
+the relax (the shipped site is the exact conserving split with its density residual stated); any
+entry of the fine patch into dynamics (the release gate stands); and the N-material upload
+reaching the guards (the sampled state inherits the coarse field's EOS collapse until then).
 
 ## The hand-down, made concrete (after the trigger landed)
 
