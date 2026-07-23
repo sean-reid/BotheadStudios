@@ -9,6 +9,12 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The zoom has a design (docs/59).** Celestial-to-local materialization gets its method, sourced:
+  one-shot icosahedral particle splitting that conserves by construction (Feldman-Bonet, Vacondio),
+  relax-then-release initialization against the coarse field, interface and contamination discipline
+  from zoom-in practice, a Holsapple-Housen pi-scaling gate on the refined crater, and a per-event
+  energy ledger. Order of work and named IOUs included.
+
 - **The live de-orbit hand-off runs on the generic N-body primitives; its two-EOS collapse is dead
   (docs/58).** `start_live_drop_sph` stages the colliding pair with `build_far_apart_n`, the same
   builder the declared birth path uses, so each body's layers reach the GPU with their own catalogue
