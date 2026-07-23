@@ -703,6 +703,188 @@ pub fn fold_site(
     })
 }
 
+// -----------------------------------------------------------------------------------------------
+// The mid-event hand-down (docs/59 "The hand-down, made concrete", decision 2): during a live
+// event the guard band re-samples the coarse field each coarse step. The guards ARE the coarse
+// field at the boundary, so the impact's energy arrives at the fine patch as real boundary state,
+// not as a formula. Ownership stays single: a guard mirrors the field's STATE (velocity, specific
+// internal energy, density) and never its matter - positions and masses are untouched, so no
+// parcel is counted twice - and the event window books what arrived so the crossing is audited.
+// -----------------------------------------------------------------------------------------------
+
+/// The window ledger's stated bound: the booked guard-band energy against an independent f64
+/// audit of the same guards. The resample interpolates in f64 and stores f32 state, so the drift
+/// is f32 rounding accumulated over the band - bounded well inside 1e-6 relative.
+pub const WINDOW_BOOK_BOUND: f64 = 1.0e-6;
+
+/// Places the site's local coordinates (metres, origin at the ball column's ground top, x east,
+/// y up, z north) into the Earth-relative frame the coarse field lives in - the same tangent
+/// frame the renderer uses to seat the site on the crust.
+#[derive(Clone, Copy, Debug)]
+pub struct SiteFrame {
+    /// The site origin in Earth-relative metres (`site_dir * body_radius`).
+    pub origin_rel_m: DVec3,
+    pub east: DVec3,
+    pub up: DVec3,
+    pub north: DVec3,
+}
+
+impl SiteFrame {
+    /// A site-local position in the field's frame.
+    pub fn to_field_m(&self, local: [f32; 3]) -> DVec3 {
+        self.origin_rel_m
+            + self.east * local[0] as f64
+            + self.up * local[1] as f64
+            + self.north * local[2] as f64
+    }
+
+    /// A field-frame vector expressed on the site's basis (a rotation: length-preserving).
+    pub fn field_vec_to_site(&self, v: DVec3) -> [f32; 3] {
+        [v.dot(self.east) as f32, v.dot(self.up) as f32, v.dot(self.north) as f32]
+    }
+}
+
+/// What one boundary resample measured: the guard band's state totals after the guards became
+/// the coarse field. Energies are in the site frame; `uncovered` guards (no live particle's
+/// support reaches them) kept their previous state and are counted, not smoothed over.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BoundaryState {
+    pub covered: usize,
+    pub uncovered: usize,
+    /// Guard-band kinetic energy (J), site frame.
+    pub kinetic_j: f64,
+    /// Guard-band internal energy (J).
+    pub internal_j: f64,
+    /// Fastest guard speed (m/s) after the resample.
+    pub peak_speed_ms: f64,
+}
+
+/// **Re-sample the guard band from the live coarse field** (module section doc). Each guard's
+/// velocity, specific internal energy and density become the SPH interpolation of the coarse
+/// field at the guard's own position (Shepard-normalized volume weights over the particles whose
+/// support covers it, the scatter convention `sample_hand_down` uses); positions and masses are
+/// never touched. Fidelity IOU, stated where the HUD can see it (`EventWindow::hud_line`): the
+/// coarse field carries its collapsed EOS material set, so the sampled state inherits that
+/// collapse until the N-material upload reaches the guards (docs/59).
+pub fn resample_guards(
+    site: &mut MaterializedSite,
+    field: &[SphParticle],
+    frame: &SiteFrame,
+) -> BoundaryState {
+    // Contributors whose support can reach ANY part of the site: one pass over the field so the
+    // per-guard loop touches only the handful of coarse particles that matter.
+    let near: Vec<&SphParticle> = field
+        .iter()
+        .filter(|p| {
+            let d = DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64)
+                - frame.origin_rel_m;
+            d.length() < p.h as f64 + site.extent_m
+        })
+        .collect();
+    let mut out = BoundaryState::default();
+    for g in &mut site.particles[..site.fine_start] {
+        let x = frame.to_field_m(g.pos);
+        let (mut w_sum, mut u_w, mut rho_w) = (0.0f64, 0.0f64, 0.0f64);
+        let mut v_w = DVec3::ZERO;
+        for p in &near {
+            let r = (DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64) - x).length();
+            let h = p.h as f64;
+            if r < h {
+                // Volume-weighted Shepard interpolation: w = (m/rho) W(r, h), the field's own
+                // scatter-convention estimate of its state at this site.
+                let w = p.mass as f64 / (p.rho.max(1.0) as f64) * crate::atmosphere::sph_w(r, h);
+                w_sum += w;
+                u_w += w * p.u as f64;
+                rho_w += w * p.rho as f64;
+                v_w += w * DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64);
+            }
+        }
+        if w_sum > 0.0 {
+            g.u = (u_w / w_sum) as f32;
+            g.rho = (rho_w / w_sum) as f32;
+            g.vel = frame.field_vec_to_site(v_w / w_sum);
+            out.covered += 1;
+        } else {
+            out.uncovered += 1;
+        }
+        let sp = Vec3::from(g.vel).length() as f64;
+        out.kinetic_j += 0.5 * g.mass as f64 * sp * sp;
+        out.internal_j += g.mass as f64 * g.u as f64;
+        out.peak_speed_ms = out.peak_speed_ms.max(sp);
+    }
+    out
+}
+
+/// **The event window the audit ledger books** (decision 2): opened by the first boundary
+/// resample of a live event, it carries the boundary state at open, the latest, and the booked
+/// peak, so what arrived (and what left again) is a measured delta, never an assumption. The
+/// drift of the book against the guards themselves is bounded by [`WINDOW_BOOK_BOUND`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EventWindow {
+    steps: usize,
+    opened: Option<BoundaryState>,
+    last: BoundaryState,
+    peak_speed_ms: f64,
+}
+
+impl EventWindow {
+    /// A new event: forget the previous window entirely.
+    pub fn reset(&mut self) {
+        *self = EventWindow::default();
+    }
+
+    /// Book one coarse step's boundary state. The first book opens the window.
+    pub fn book(&mut self, s: BoundaryState) {
+        if self.opened.is_none() {
+            self.opened = Some(s);
+        }
+        self.last = s;
+        self.steps += 1;
+        self.peak_speed_ms = self.peak_speed_ms.max(s.peak_speed_ms);
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.opened.is_some()
+    }
+
+    pub fn steps(&self) -> usize {
+        self.steps
+    }
+
+    /// Kinetic energy that arrived at the boundary since the window opened (J; negative when
+    /// the field took energy back out - both are the honest book).
+    pub fn arrived_kinetic_j(&self) -> f64 {
+        self.last.kinetic_j - self.opened.map_or(0.0, |o| o.kinetic_j)
+    }
+
+    /// Internal energy that arrived at the boundary since the window opened (J).
+    pub fn arrived_internal_j(&self) -> f64 {
+        self.last.internal_j - self.opened.map_or(0.0, |o| o.internal_j)
+    }
+
+    /// The fastest boundary speed booked anywhere in the window (m/s).
+    pub fn peak_speed_ms(&self) -> f64 {
+        self.peak_speed_ms
+    }
+
+    /// The honest one-line readout the HUD renders, IOU included: the guard state inherits the
+    /// coarse field's collapsed EOS material set (docs/59 names this the hand-down's fidelity
+    /// limit until the N-material upload reaches the guards).
+    pub fn hud_line(&self) -> String {
+        format!(
+            "boundary: {} guards on the coarse field ({} uncovered) · window {} steps · \
+             arrived KE {:+.2e} J, IE {:+.2e} J · peak {:.0} m/s · state rides the coarse \
+             field's collapsed EOS set (IOU)",
+            self.last.covered,
+            self.last.uncovered,
+            self.steps,
+            self.arrived_kinetic_j(),
+            self.arrived_internal_j(),
+            self.peak_speed_ms
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,6 +1205,129 @@ mod tests {
         let site = materialize_site(&spec, &hand, &mats).expect("materializes");
         for p in &site.particles {
             assert!((p.u - 7.7e5).abs() < 1.0, "the sampled u carries down to every particle");
+        }
+    }
+
+    /// **The guards ARE the coarse field at the boundary, and the window books the event.**
+    /// The docs/59 hand-down made concrete, decision 2: during a live event the guard band
+    /// re-samples the coarse field each coarse step, so the impact's energy arrives at the fine
+    /// patch as real boundary state. Ownership stays single: guards mirror state (never mass,
+    /// never position), the fine children stay bitwise untouched (the release gate still stands
+    /// between the patch and any dynamics), and the window's booked energy agrees with an
+    /// independent audit of the guards within the stated bound - the conservation statement
+    /// across the event window.
+    #[test]
+    fn the_guards_carry_the_coarse_field_and_the_window_books_the_event() {
+        let spec = SiteSpec::from_ground_world(&shipped_ground_world()).expect("spec");
+        let mats = materials::load();
+        let mut site = materialize_site(&spec, &HandDown::Declared, &mats).expect("materializes");
+        let before: Vec<SphParticle> = site.particles.clone();
+        let m_guard: f64 = site.particles[..site.fine_start].iter().map(|p| p.mass as f64).sum();
+        assert!(site.fine_start > 0, "the site carries a guard band to be the boundary");
+
+        // An orthonormal frame like the wired one: the site sits on +x of the field frame.
+        let frame = SiteFrame {
+            origin_rel_m: DVec3::new(6.371e6, 0.0, 0.0),
+            east: DVec3::new(0.0, 1.0, 0.0),
+            up: DVec3::new(1.0, 0.0, 0.0),
+            north: DVec3::new(0.0, 0.0, 1.0),
+        };
+        // A coarse field in ONE uniform state whose support covers the whole site:
+        // interpolating a uniform field returns that field, so every covered guard must carry
+        // exactly this state - the guards ARE the coarse field at the boundary.
+        let coarse = |u: f32, vel: [f32; 3]| -> Vec<SphParticle> {
+            vec![
+                SphParticle { pos: [6.371e6, 0.0, 0.0], h: 1.0e6, vel, u, mass: 2.5e21, mat: 0, rho: 2900.0, prov: 0 },
+                SphParticle { pos: [6.0e6, 8.0e5, 0.0], h: 1.0e6, vel, u, mass: 2.5e21, mat: 0, rho: 2900.0, prov: 0 },
+            ]
+        };
+
+        let mut window = EventWindow::default();
+        assert!(!window.is_open(), "no event yet, no window");
+
+        // Coarse step 1 - the quiet field before the shock.
+        let s1 = resample_guards(&mut site, &coarse(3.0e5, [0.0; 3]), &frame);
+        window.book(s1);
+        assert!(window.is_open());
+        assert_eq!(s1.uncovered, 0, "the coarse Earth covers its own ground");
+        assert_eq!(s1.covered, site.fine_start);
+        for g in &site.particles[..site.fine_start] {
+            assert_eq!(g.u, 3.0e5, "a covered guard carries exactly the field's u");
+            assert_eq!(g.vel, [0.0; 3]);
+            assert_eq!(g.rho, 2900.0, "and the field's density");
+        }
+
+        // Coarse step 2 - the shock arrives at the boundary: the field is hot and moving.
+        let vel = [1200.0f32, -300.0, 400.0];
+        let v_len = (1200.0f64 * 1200.0 + 300.0 * 300.0 + 400.0 * 400.0).sqrt();
+        let s2 = resample_guards(&mut site, &coarse(9.0e5, vel), &frame);
+        window.book(s2);
+        for g in &site.particles[..site.fine_start] {
+            assert_eq!(g.u, 9.0e5);
+            let sp = Vec3::from(g.vel).length() as f64;
+            assert!(
+                (sp - v_len).abs() <= v_len * 1.0e-6,
+                "the basis change preserves the field speed: {sp} vs {v_len}"
+            );
+        }
+        // The booked energy agrees with an independent audit of the guard band, within the
+        // window's stated bound (f32 state rounding) - energy across the event window.
+        let expect_ie = m_guard * 9.0e5;
+        let expect_ke = 0.5 * m_guard * v_len * v_len;
+        assert!((s2.internal_j - expect_ie).abs() <= expect_ie * WINDOW_BOOK_BOUND);
+        assert!((s2.kinetic_j - expect_ke).abs() <= expect_ke * WINDOW_BOOK_BOUND);
+        let d_ie = m_guard * (9.0e5 - 3.0e5);
+        assert!(
+            (window.arrived_internal_j() - d_ie).abs() <= d_ie * WINDOW_BOOK_BOUND,
+            "the window books what arrived: {:.4e} vs {:.4e}",
+            window.arrived_internal_j(),
+            d_ie
+        );
+        assert!((window.arrived_kinetic_j() - expect_ke).abs() <= expect_ke * WINDOW_BOOK_BOUND);
+        assert!(window.peak_speed_ms() >= v_len * (1.0 - 1.0e-6));
+
+        // Coarse step 3 - the shock passes and the field returns to the quiet state: the
+        // boundary returns with it. Nothing invented, nothing silently kept.
+        let s3 = resample_guards(&mut site, &coarse(3.0e5, [0.0; 3]), &frame);
+        window.book(s3);
+        assert!(window.arrived_internal_j().abs() <= expect_ie * WINDOW_BOOK_BOUND);
+        assert!(window.arrived_kinetic_j().abs() <= expect_ke * WINDOW_BOOK_BOUND);
+        assert_eq!(window.steps(), 3);
+        assert!(window.peak_speed_ms() >= v_len * (1.0 - 1.0e-6), "the peak stays booked");
+
+        // OWNERSHIP STAYS SINGLE. Guards mirror state only: no particle moved, gained or lost
+        // mass, or changed material; the fine children (patch + ball) are bitwise untouched.
+        for (a, b) in before.iter().zip(&site.particles) {
+            assert_eq!(a.pos, b.pos, "the resample never moves matter");
+            assert_eq!(a.mass, b.mass, "and never re-owns it");
+            assert_eq!(a.mat, b.mat);
+        }
+        for (a, b) in before[site.fine_start..].iter().zip(&site.particles[site.fine_start..]) {
+            assert_eq!(a.vel, b.vel, "the fine patch enters no dynamics");
+            assert_eq!(a.u, b.u);
+            assert_eq!(a.rho, b.rho);
+        }
+        let audit = refine::audit(&site.particles);
+        assert!(
+            (audit.mass - site.declared_mass_kg).abs() <= site.declared_mass_kg * 1.0e-6,
+            "no parcel is counted twice: the site still holds exactly the declared mass"
+        );
+
+        // The line the HUD renders names the numbers and the two-EOS collapse IOU.
+        let line = window.hud_line();
+        assert!(line.contains("EOS"), "the guard band's EOS collapse is a stated IOU: {line}");
+
+        // A field whose support no longer reaches the site leaves the boundary as it was, and
+        // says so: uncovered guards are counted, not smoothed over.
+        let mut far = coarse(7.7e5, [5000.0, 0.0, 0.0]);
+        for p in &mut far {
+            p.pos[0] += 3.0e7;
+        }
+        let s4 = resample_guards(&mut site, &far, &frame);
+        assert_eq!(s4.covered, 0);
+        assert_eq!(s4.uncovered, site.fine_start);
+        for g in &site.particles[..site.fine_start] {
+            assert_eq!(g.u, 3.0e5, "an uncovered guard keeps its last honest state");
         }
     }
 
