@@ -379,11 +379,26 @@ async function main(): Promise<void> {
     // This band's camera is anchored to the focus BODY (it frames Earth, or the Moon), so "forward" is a
     // dolly toward what you are looking at rather than free flight. Same gesture, same meaning — move
     // toward what is in front of you — expressed in the rig this scene actually has.
-    const camInput = attachCameraInput(canvas, (dyaw, dpitch) => {
-      cam.yaw -= dyaw;
-      cam.pitch = Math.max(-1.4, Math.min(1.4, cam.pitch + dpitch));
-      userInteracted = true;
-    });
+    const camInput = attachCameraInput(
+      canvas,
+      (dyaw, dpitch) => {
+        cam.yaw -= dyaw;
+        cam.pitch = Math.max(-1.4, Math.min(1.4, cam.pitch + dpitch));
+        userInteracted = true;
+      },
+      {
+        // PAN (shift-drag or middle-drag): slide the look target off the focused body, so the
+        // debris disk or an off-centre framing can be composed. The offset lives in the engine,
+        // in the focused body's frame, so the framing rides the body's orbital motion; the
+        // Earth/Luna focus buttons snap it back. Deltas arrive in CSS pixels; the engine pans in
+        // its own device-pixel grid, so scale by the same dpr the canvas is sized with.
+        onPan: (dx, dy) => {
+          const dpr = Math.min(window.devicePixelRatio || 1, 2);
+          demo.pan_view(dx * dpr, dy * dpr);
+          userInteracted = true;
+        },
+      },
+    );
 
     // Multi-touch pinch-zoom stays with the scene (it is not part of the shared look/move grammar).
     canvas.addEventListener("pointerdown", (e) => {
@@ -536,7 +551,7 @@ async function main(): Promise<void> {
         timeScale: demo.time_scale_value(),
         fps,
         metersPerPixel: demo.meters_per_pixel(),
-        controls: `${CAMERA_HINT} · pinch / wheel zoom · buttons ↖`,
+        controls: `${CAMERA_HINT} · shift-drag or middle-drag to pan · pinch / wheel zoom · buttons ↖`,
         events,
       });
     };
