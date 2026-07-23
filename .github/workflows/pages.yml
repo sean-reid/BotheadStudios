@@ -1,0 +1,56 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build the site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: integrity-engine
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: integrity-engine/web/package-lock.json
+      - name: install web deps
+        working-directory: integrity-engine/web
+        run: npm ci
+      - name: production build under the repo subpath
+        working-directory: integrity-engine/web
+        run: BASE_PATH="/${{ github.event.repository.name }}/" npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: integrity-engine/web/dist
+
+  deploy:
+    name: deploy to github pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
