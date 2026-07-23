@@ -3,6 +3,42 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the GPU SPH goes N-material and N-body
+
+**What.** Three additions to `gpu_sph` (docs/58 items 4/5/7), merged from the collision-unify
+mirror branch onto main. First, the GPU EOS path is generalized from the fixed `[basalt, iron]`
+pair to an N-material table: `eos_buf` is sized for `MAX_MATERIALS` (16), `GpuSph::upload` takes
+`&[SphEos]`, and `SphEos::from_tillotson` mirrors any engine Tillotson EOS to the GPU (the shader
+already indexes `eos[mat]` as a runtime array, so this is Rust-only). `SphAssembly` builds the
+particle set plus the shared EOS table for a collision of any number of bodies: each body is
+particalized and appended with its own source index as `prov`, and materials dedup across all
+bodies into one table of at most 16 entries. Second, `assemble_from_relaxed_n(particles,
+placements)` places each source body (prov k) at its own `placements[k] = {offset, vel, spin}`,
+where spin is a vector (any axis) applied as `v = vel + omega x (r - com)`; the two-body
+`assemble_from_relaxed_at` now delegates to it byte-identically (the +z scalar becomes
+`omega = (0, 0, spin)`), so the existing geometry tests pass unchanged. Third,
+`build_far_apart_n(bodies, separation)` particalizes each `(matter, resolution)` and places the
+bodies far apart on a line for the GPU relax, returning particles plus the shared deduped EOS
+table plus softening and the relaxation Courant dt: the generic relax input for any number of
+bodies, the replacement `build_far_apart_from` and `build_impact_bodies_from` converge onto. The
+only merge conflict was the tail of the test module, where main had appended the particalized
+far-apart staging test; all tests from both sides are kept.
+
+**Why.** Robin: only two is not robust, and spin is a vector, not a scalar about +z. A
+three-moon impact and a two-body impact must be the same path, and a particalized body's own
+materials must reach the shader instead of collapsing onto two assumed slots. These are the
+primitives the live hand-off needs to shed its flagged IOUs (the two-EOS collapse and the
+scalar spin).
+
+**Verified.** New `sph_assembly_builds_an_n_material_field_across_bodies` (an Earth+Moon field
+dedups to at least three materials, every `mat` a valid index, distinct provenance, iron core
+indexing iron, mass conserved) and `assemble_n_places_every_body_and_spins_about_any_axis`
+(three bodies each land at their own offset and velocity; an X-axis spin gives the target a vz
+a +z-only path could never produce), and `build_far_apart_n_particalizes_and_separates_the_bodies`
+(Earth and Moon build to a shared N-material table, placed far apart). Full native suite 348/348
+green;
+`cargo check --target wasm32-unknown-unknown -p engine` clean. fmt untouched (hand-edited).
+
 ## 2026-07-23: the live drop particalizes each body's own matter
 
 **What.** The definition-id stopgap at the live SPH hand-off is dissolved into `particalize`

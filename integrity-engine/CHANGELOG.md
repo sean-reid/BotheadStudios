@@ -9,6 +9,22 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The GPU SPH gains N-material upload and N-body assembly (docs/58 items 4/5/7).**
+  `GpuSph::upload` now takes a material EOS table (`&[SphEos]`, up to `MAX_MATERIALS` = 16 entries,
+  the buffer sized to match) instead of the fixed `[basalt, iron]` pair, and `SphEos::from_tillotson`
+  mirrors any engine-side Tillotson EOS to the GPU, so a particalized body's own catalogue materials
+  can reach the shader rather than being collapsed onto two slots. The new `SphAssembly` builds the
+  particle set plus the shared EOS table for a collision of any number of bodies: each body is
+  appended with its own source index as provenance, and materials dedup across all bodies into one
+  table. `assemble_from_relaxed_n(particles, placements)` places each source body at its own
+  `{offset, vel, spin}` where spin is a vector (any axis, applied as omega cross (r - com)); the
+  two-body `assemble_from_relaxed_at` now delegates to it, byte-identical (the +z scalar becomes
+  `omega = (0, 0, spin)`). `build_far_apart_n(bodies, separation)` particalizes each
+  `(matter, resolution)` and places the bodies far apart on a line for the GPU relax, returning
+  particles plus the shared deduped EOS table plus softening and relax dt: the generic relax input
+  for any number of bodies. The declared birth path is unchanged: it passes its `[basalt, iron]`
+  pair as a two-entry slice.
+
 - **The live drop particalizes each body's own matter; the definition-id stopgap is gone (docs/58).**
   `start_live_drop_sph` no longer overwrites `impact_def` with `earth`/`moon` id strings: at the live
   hand-off both colliding bodies are built by `HydroBody::particalize` from the layered matter the
