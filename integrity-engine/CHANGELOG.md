@@ -31,6 +31,24 @@ because **we are our own first customers** and pin exact engine versions in our 
   wired into at least one scene or carrying a flagged IOU naming the milestone that wires it;
   "built and verified" counts as inventory, not done.
 
+- **The GPU gravity dispatch gains the LBVH Barnes-Hut tree above a second measured knee (docs/37).**
+  The banked tree pipeline in `bh_gravity.wgsl` (Karras build, bottom-up COM, theta=0.5 traversal, the
+  kernels `tools/gpu-bh-verify` verified stage by stage) is now live: `GravityField` routes any dispatch
+  of `gpu_gravity::TREE_KNEE` (24000) or more particles to the O(N log N) tree instead of the exact
+  O(N^2) direct sum, which keeps every smaller dispatch because there it is faster AND exact. The knee
+  is read off the new `gpu_tree_speedup` sweep on an Apple M4 Max (Metal), full per-call cost on both
+  sides: dead heat at N=12k, tree 1.2x at 24k, ~2x at 48k, ~5x at 96k, 9-12x at 192k (35-46 ms vs
+  413 ms direct and 2.6 s single-thread CPU tree). The Morton sort stays on the CPU (the GPU radix sort
+  remains unbuilt; the codes must transit the CPU either way, and the sort leg is inside the measured
+  tree column). Enabling the path on Metal exposed that `cs_com`'s single-pass climb relies on
+  release/acquire ordering WGSL's relaxed atomics never promised: internal COMs came back
+  nondeterministic, so the dispatch builds moments with new race-free level-synchronous sweep kernels
+  (`cs_com_sweep`/`cs_com_resolve`), pinned by determinism and theta-bound tests on Metal; the climb
+  kernel remains for the Vulkan verifier. `GpuHost` now requests the WebGPU baseline limits instead of
+  the stricter downlevel set, since the tree binds seven storage buffers and the browser scenes already
+  get eight.
+>>>>>>> 556cd4c (docs: record the metal tree crossover and the com climb coherence finding (docs/37))
+
 - **Orbital debris self-gravity dispatches to the GPU above a measured knee.** The verified
   `cs_gravity_direct` direct sum (`gpu_gravity`, checked against the CPU brute-force sum) is wired
   into the live path instead of sitting dispatched-to by nothing: `Aggregate` carries an optional

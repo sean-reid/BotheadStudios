@@ -37,6 +37,55 @@ material slots. `a_body_crossing_its_resolution_distance_is_reported_with_its_li
 `cargo check --target wasm32-unknown-unknown -p engine` clean (one warning fewer than before).
 fmt untouched (hand-edited).
 
+## 2026-07-22: the GPU gravity dispatch grows its second knee, and the LBVH tree goes live
+
+**What.** The GPU Barnes-Hut tree banked by docs/36/37 is enabled in the live gravity dispatch.
+`GpuGravity` builds the tree pipelines from the same verified `bh_gravity.wgsl`, and `GravityField`
+routes within the GPU by a SECOND measured knee: below `TREE_KNEE` the exact direct sum (the ideal GPU
+workload, and exact), at or above it the theta=0.5 LBVH tree, whose O(N log N) eventually beats the
+quadratic sum even counting its full per-call build. The dispatch order is the verifier's, with two
+deliberate deviations, both recorded at the site: (1) bbox+Morton+sort run on the CPU, bit-identically
+to `cs_bbox`/`cs_morton` (the verifier pinned that equality), because the GPU radix sort was never
+built, so the codes must visit the CPU anyway and a mid-pipeline blocking read-back would be illegal in
+the browser; (2) the single-pass `cs_com` climb is replaced by new level-synchronous ping-pong sweep
+kernels (`cs_com_sweep` xR, `cs_com_resolve`), because enabling the climb on Metal produced
+NONDETERMINISTIC internal COMs: the climb needs release/acquire ordering around its `ready` atomic, and
+WGSL atomics are relaxed with no device-scope fence, so its coherence on the Vulkan/NVIDIA verifier box
+was hardware grace, not a guarantee. The sweep's only cross-invocation ordering is the pass boundary,
+the one ordering WGSL does guarantee; R is the root-height bound (32 plus duplicate-run levels), and
+each sweep costs microseconds. Theta stays 0.5 and K stays 1 particle per leaf, both the values the
+measurements justify; `Aggregate` needed no wiring change, since the routing lives inside the field.
+`GpuHost` now requests the WebGPU baseline limits (8 storage buffers per stage) instead of the
+downlevel set (4): the tree binds 7, and the browser scenes already run with the adapter's full limits,
+so the stricter native host was rejecting pipelines the shipping page accepts.
+
+**Why.** The direct-sum dispatch bought the moon-drop its frame back, but a quadratic sum has an
+expiry date, and docs/37 predicted Apple silicon would pull the tree's crossover far below the 2070's
+128k. Measured, it did: into the range a large debris cloud actually reaches. Above the knee the tree
+is the most physical thing the budget buys (same bounded multipole the CPU tree already accepts, at a
+fraction of the wall time); below it the exact sum keeps both fidelity and speed, so each range keeps
+its honest winner.
+
+**Verified.** On this box (Apple M4 Max, Metal): new `gpu_tree_speedup` (both columns full per-call
+cost, K in {1,8,32} swept, three runs) reads the knee off the table: dead heat at N=12000
+(0.98x/1.02x/1.19x), tree wins every 24000 measurement (direct 5.5-6.6 ms vs tree 4.8-5.3 ms), then
+~2x at 48k, ~5x at 96k (72 ms vs 15 ms), 9-12x at 192k (413 ms vs 35-46 ms, against 2.6 s for the
+single-thread CPU tree); K=1 fastest at every N, matching the 2070 finding. `TREE_KNEE = 24000` sits at
+the first DECIDED N, with the dead heat kept by the exact sum because fidelity breaks ties. A parallel
+session used the GPU intermittently; runs were repeated and the crossover location held in every run.
+Correctness on Metal, in-crate: `the_gpu_tree_matches_the_cpu_tree_within_the_theta_bound` (RMS rel
+5.8e-3 vs the CPU octree and 5.4e-3 vs the exact f64 sum at N=6000, inside the 1e-2 verifier bound,
+plus bitwise-repeatability, which the racy climb measurably failed);
+`the_gpu_tree_opened_fully_recovers_the_direct_sum` (theta 1e-4: RMS 2.1e-6, every particle reached
+exactly once); `at_the_tree_knee_the_field_dispatches_the_tree` (at N=24000 the dispatched field
+carries the tree's nonzero multipole signature against the exact sum AND matches the CPU tree, RMS
+3.9e-3, so the routing is pinned by physics, not inspection). Before the sweep fix the tree-vs-exact
+error GREW with N (6.4e-2 at 24k, 2.2e-1 on a uniform box) and differed run to run; after it, 3.4e-3
+and bit-stable. Full native suite 338/338 green; wasm32-unknown-unknown check clean;
+`tools/gpu-bh-verify` still compiles untouched in behaviour (its Vulkan box cannot be reached from this
+Mac, noted in docs/37). fmt untouched (hand-edited).
+>>>>>>> 556cd4c (docs: record the metal tree crossover and the com climb coherence finding (docs/37))
+
 ## 2026-07-22: orbital debris self-gravity dispatches to the GPU above a measured knee
 
 **What.** The verified GPU direct-sum gravity kernel is now the live self-gravity path for large

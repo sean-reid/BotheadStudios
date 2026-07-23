@@ -156,11 +156,13 @@ pub struct Aggregate {
     /// and lets the disk's composition be measured and tinted by origin (the real Moon is Earth-like, so
     /// "the disk is 100% impactor" is a bug the tag makes visible).
     pub source: Vec<u8>,
-    /// The GPU direct-sum self-gravity dispatch (docs/30): when attached, and the pass's gravity-active
-    /// count is at or above the measured [`crate::gpu_gravity::DIRECT_SUM_KNEE`], the exact
-    /// parallel sum replaces the CPU tree in `accelerations`; the engine shunts a per-particle N-body
-    /// force to the processor that handles it best. `None` (every constructor's default) keeps the CPU
-    /// path; a scene attaches the field from its shared device when it materialises a debris cloud.
+    /// The GPU self-gravity dispatch (docs/30): when attached, and the pass's gravity-active count is
+    /// at or above the measured [`crate::gpu_gravity::DIRECT_SUM_KNEE`], the GPU replaces the CPU tree
+    /// in `accelerations` (the exact parallel sum, or from the second measured knee
+    /// [`crate::gpu_gravity::TREE_KNEE`] the GPU's own LBVH Barnes-Hut tree); the engine shunts a
+    /// per-particle N-body force to the processor that handles it best. `None` (every constructor's
+    /// default) keeps the CPU path; a scene attaches the field from its shared device when it
+    /// materialises a debris cloud.
     pub gpu_gravity: Option<crate::gpu_gravity::GravityField>,
 }
 
@@ -547,9 +549,12 @@ impl Aggregate {
         let masses: Vec<f64> = p.iter().map(|b| b.mass).collect();
         // N-body SELF-GRAVITY, shunted to the processor that handles it best, by the measured knee and
         // never by guess (docs/30). At or above `gpu_gravity::DIRECT_SUM_KNEE`, with a GPU field
-        // attached, the EXACT softened direct sum runs on the GPU (embarrassingly parallel; no theta
-        // multipole error, so higher fidelity AND faster than the single-thread tree it replaces,
-        // measured in `gpu_gravity_speedup`). Below the knee, with no field attached, or while a
+        // attached, the GPU takes the pass: the EXACT softened direct sum (embarrassingly parallel; no
+        // theta multipole error, so higher fidelity AND faster than the single-thread tree it replaces,
+        // measured in `gpu_gravity_speedup`), until at `gpu_gravity::TREE_KNEE` the quadratic sum loses
+        // to the GPU's own LBVH Barnes-Hut tree, the second measured knee (`gpu_tree_speedup`; theta
+        // 0.5, the same bounded multipole this CPU tree already accepts). The routing between the two
+        // GPU forms lives inside the field. Below the first knee, with no field attached, or while a
         // browser dispatch is still in flight, the CPU path stands: Barnes–Hut → O(N log N) (docs/30
         // stage 1c), θ=0.5 (RMS error <1%, unbiased, below the FP/chaos noise the disk tolerates),
         // softened exactly like the direct sum; brute-force below ~1k bodies. Only for a
