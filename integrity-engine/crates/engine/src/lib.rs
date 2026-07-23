@@ -653,11 +653,16 @@ mod app {
     }
 
     /// Per-body metadata the engine renders and collides from. Indexed identically to `OrbitDemo::bodies`.
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     struct BodyMeta {
         radius_m: f64,
         tint: [f32; 4],
         role: BodyRole,
+        /// **This body's matter** — its layered material composition (`docs/58`). The engine keeps each
+        /// body's own matter so mass, radius, moment of inertia and particalization all DERIVE from it,
+        /// with no named `planet::earth()` lookup and no `EARTH_RADIUS_M`: a body is a body. `None` for a
+        /// bare point mass with no defined composition.
+        matter: Option<crate::planet::LayeredBody>,
         /// The engine has resolved this body into the debris field — its matter is particles now, so it
         /// is no longer drawn as an intact body. Set by collision detection, never by the scene.
         materialized: bool,
@@ -1379,6 +1384,7 @@ mod app {
                     radius_m: body_radius(d),
                     tint: this_tint,
                     role,
+                    matter: crate::body_definition(d.profile.as_deref()),
                     materialized: false,
                 });
                 match d.role.as_str() {
@@ -2361,9 +2367,9 @@ mod app {
             let strength = self.mats[materials::index_of(&self.mats, "basalt")].fracture_strength as f64;
             // Each body's radius comes from its OWN metadata — no shared `impactor_radius`, so two moons
             // of different sizes would collide at their own contact distances.
-            let meta = self.body_meta.clone();
+            let radii: Vec<f64> = self.body_meta.iter().map(|m| m.radius_m).collect();
             let body_state = |i: usize| {
-                let r = meta.get(i).map(|m| m.radius_m).unwrap_or(EARTH_RADIUS_M);
+                let r = radii.get(i).copied().unwrap_or(EARTH_RADIUS_M);
                 crate::interaction::BodyState {
                     pos: self.bodies[i].pos,
                     vel: self.bodies[i].vel,
