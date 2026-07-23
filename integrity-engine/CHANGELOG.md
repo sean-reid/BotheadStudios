@@ -9,6 +9,18 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The drop arms for the launch window, not the instant.** On a world that declares a ground
+  site, the Drop control now solves the intercept and ARMS: the new `intercept` module
+  integrates the same fall the scene will run (verlet plus the swept first-contact forecast,
+  never an analytic stand-in) from the current N-body state, and picks the next release time at
+  which the site rotates under the impact azimuth - the ball never moves and the trajectory is
+  never bent; only the release time is chosen. The HUD carries the countdown in sim time
+  ("DROP ARMED · window in T-...") and the release fires itself at the window, quantized to the
+  live substep (a stated ±dt/2). Measured end to end at the Ground Zero world's own
+  fast-forward: the contact lands 0.086° of spin-axis azimuth from the site; the fall's fixed
+  44.1° polar offset from the 45N site ring is reported by the solver, not hidden. A site on
+  the far side of the spin waits about half a sidereal day for its window with the same
+  trajectory. Worlds without a site keep the instant drop; Reset disarms.
 - **The impact's energy reaches ground zero as boundary state (docs/59).** The Ground Zero
   world's declared site now pre-resolves at world load, before any event exists, with the
   conservation audit on the HUD from the first frame; the descent trigger stays as the general
