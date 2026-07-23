@@ -186,6 +186,56 @@ impl HydroBody {
         }
     }
 
+    /// **Particalize a body's matter into SPH particles — the generic, name-free builder (docs/58 #4).**
+    /// Given a body's ACTUAL layered composition and a resolution (target particle count), seed equal-mass
+    /// particles across its real layers, each carrying its layer material's EOS and specific heat FROM THE
+    /// CATALOGUE (the Tillotson-to-`materials.json` work, docs/04, is what makes this possible) and the
+    /// layer's declared temperature. No iron-core/basalt-mantle assumption, no "Earth": a five-layer planet,
+    /// a pure-ice moon and a homogeneous rock all build through this one function. Mass (real — from the
+    /// declared in-situ densities, not the uncompressed EOS reference), radius and the geotherm all come from
+    /// the matter. This is the generic replacement for the Earth/Theia-shaped `gpu_sph::build_impact_bodies_from`
+    /// (hardcoded iron/basalt + `TARGET_CORE_LOD` + target/impactor asymmetry); the collision routing (docs/58
+    /// #7) calls this instead.
+    pub fn particalize(matter: &crate::planet::LayeredBody, resolution: usize) -> HydroBody {
+        let cat = crate::materials::catalogue();
+        let total_mass = matter.total_mass();
+        let m_i = (total_mass / resolution.max(1) as f64).max(1.0); // equal particle mass
+        let (mut pos, mut mass, mut eos, mut h, mut u, mut rho) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut inner_r = 0.0_f64;
+        for (li, layer) in matter.layers.iter().enumerate() {
+            let (ri3, ro3) = (inner_r.powi(3), layer.outer_r.powi(3));
+            let m_layer = layer.density * FOUR_THIRDS_PI * (ro3 - ri3); // DECLARED density → the real mass
+            let n = (m_layer / m_i).round().max(1.0) as usize;
+            // Each layer's OWN EOS + specific heat, looked up by material from the catalogue. A material with
+            // no characterized condensed-matter EOS falls back to basalt (a flagged approximation — a
+            // planet's layers are rock/metal/ice, which all carry one; a soil layer would be the honest gap).
+            let l_eos = crate::eos::Tillotson::for_material(&layer.material)
+                .unwrap_or_else(crate::eos::Tillotson::basalt);
+            let sh = cat
+                .iter()
+                .find(|m| m.id == layer.material)
+                .and_then(|m| m.specific_heat())
+                .unwrap_or(1000.0);
+            let h_i = smoothing_for(m_i, layer.density);
+            for i in 0..n {
+                // Equal-volume radii through the shell, on a per-layer-decorrelated Fibonacci spiral.
+                let rr = (ri3 + (ro3 - ri3) * (i as f64 + 0.5) / n as f64).cbrt();
+                pos.push(fib_dir(i, n, li as f64 * 0.7) * rr);
+                mass.push(m_i);
+                eos.push(Eos::Tillotson(l_eos));
+                h.push(h_i);
+                u.push(sh * matter.temperature_at(rr)); // the DECLARED geotherm (u = c·T)
+                rho.push(layer.density);
+            }
+            inner_r = layer.outer_r;
+        }
+        let n = pos.len();
+        // Softening = half the finest particle spacing (the densest layer's). h = 2·spacing ⇒ ¼h = ½ spacing.
+        let softening = 0.25 * h.iter().cloned().fold(f64::INFINITY, f64::min);
+        HydroBody { vel: vec![DVec3::ZERO; n], mass, u, eos, h, softening, rho, pos }
+    }
+
     /// SPH density ρ_i = Σ_j m_j W(r_ij, h_ij) + self, with a symmetric per-pair smoothing length
     /// h_ij = ½(h_i+h_j) (so variable-resolution regions couple momentum-conservingly). Cached in `self.rho`.
     pub fn compute_density(&mut self) {
@@ -1353,5 +1403,39 @@ mod tests {
         let (p_center, _, _) = shell(&b, c, 0.12 * mean, 0.12 * mean);
         println!("central P {:.3e} Pa (Earth ≈ 3.64e11)", p_center);
         assert!(p_center > 5.0e10 && p_center < 2.0e12, "central pressure must be ~100s of GPa, got {p_center:.2e}");
+    }
+
+    /// **`particalize` reads the body's REAL layers and ANY material — no iron/basalt, no "Earth" (docs/58
+    /// #4).** Earth builds to its real mass from more than two distinct material EOS; a pure-ice body builds
+    /// with the ICE EOS. The Law-II proof that one particalizer serves every composition.
+    #[test]
+    fn particalize_reads_real_layers_and_any_material() {
+        // Earth's five real layers → the real mass (declared densities, not the uncompressed EOS reference),
+        // and ≥3 distinct material EOS (iron / peridotite / basalt) → NOT the hardcoded 2-material build.
+        let earth = crate::planet::earth();
+        let hb = HydroBody::particalize(&earth, 2000);
+        let m: f64 = hb.mass.iter().sum();
+        assert!(
+            (m - earth.total_mass()).abs() / earth.total_mass() < 0.02,
+            "real Earth mass conserved (got {m:.3e} vs {:.3e})",
+            earth.total_mass()
+        );
+        let mut rho0s: Vec<i64> = hb.eos.iter().map(|e| e.rho0().round() as i64).collect();
+        rho0s.sort_unstable();
+        rho0s.dedup();
+        assert!(rho0s.len() >= 3, "≥3 distinct material EOS from the real layers (got {rho0s:?})");
+        assert!(hb.eos[0].rho0() > 7000.0, "the deepest particles carry the iron-core EOS");
+        assert!(hb.u[0] > *hb.u.last().unwrap(), "u follows the declared geotherm (core hotter than crust)");
+
+        // ANY material: a pure-ice body builds with the ICE EOS (ρ₀ 917), not a defaulted rock.
+        let ice: crate::planet::LayeredBody = serde_json::from_str(
+            r#"{"name":"iceball","layers":[{"material":"ice","outer_r":1000000,"density":917,"t_inner":120,"t_outer":120}],"atmosphere_mass_kg":0}"#,
+        )
+        .expect("parses");
+        let hi = HydroBody::particalize(&ice, 400);
+        assert!(hi.eos.iter().all(|e| (e.rho0() - 917.0).abs() < 30.0), "an ice body is ice EOS, not basalt");
+        let mi: f64 = hi.mass.iter().sum();
+        let real = 917.0 * 4.0 / 3.0 * std::f64::consts::PI * 1.0e6_f64.powi(3);
+        assert!((mi - real).abs() / real < 0.03, "ice body mass conserved (got {mi:.3e} vs {real:.3e})");
     }
 }
