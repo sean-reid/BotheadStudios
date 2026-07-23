@@ -20,6 +20,13 @@ because **we are our own first customers** and pin exact engine versions in our 
   retires with the `Aggregate`. The live handoff still names `earth`/`moon` by definition id: per-body
   matter carries composition, not the id `ImpactDef` resolves definitions by (recorded at the site).
 
+- **The public pitch claims the discipline, not the absolute.** The READMEs and the landing hero no
+  longer assert outcomes the conformance ledger (docs/46) disproves: the four pillars are framed as
+  the goal, pillar 3 describes the ground scene's real craters instead of the deleted terrain
+  slice, the prior-art absolute is qualified, and the hero pitches the auditable discipline (fudges
+  are bugs on a public ledger, with the test that closes each one) and links the ledger as proof.
+  Birth of the Moon stays the hook.
+
 ## [0.10.0] — 2026-07-22
 
 - **A de-orbited moon now enters the SPH machine at its resolution distance.** When the engine detects
