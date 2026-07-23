@@ -56,8 +56,14 @@ where matter may return (water displaces upward, dynamic bodies block, full colu
 - Mass in = voxels out × the material's own quantum + a remainder that STAYS particles. Matter is
   never deleted to lower a count.
 - Material identity survives: gravel comes back as gravel voxels, never as generic "terrain".
-- FLAGGED (the same IOU `Aggregate::drain_settled` carries): binned mass drops its heat — the
-  voxel store holds no temperature yet. Remainder grains keep theirs.
+- Energy at the crossing is MEASURED, not zeroed (docs/46 row 17). The voxel store holds no
+  thermal state, so a binned grain's remaining kinetic energy (settling is dissipation; bounded
+  per grain by `m g Δ`, the criterion's own quantum) and its carried heat above ambient have no
+  receiving sink yet. `Recohered::binned_kinetic_j` and `binned_heat_j` book both per column as
+  energy-in minus remainder-out, with heat counted only where the material's specific heat is
+  sourced (an unknown c stays unknown). Remainder grains keep their own motion and temperature.
+  The deferred computation is the voxel-side thermal field itself; `Aggregate::drain_settled`
+  and the per-grain settle path share the debt, unmeasured.
 - The mesh is not this module's business: the surface-nets mesher renders whatever the world now
   holds, on the same dirty-flag remesh the per-grain path uses. Physics decides the demotion; the
   picture only reports it.
@@ -66,7 +72,10 @@ Native tests: a settled synthetic mound folds with mass conserved to f32 accumul
 material preserved (including a deliberately sub-quantum grain that must survive as remainder); a
 still-moving region is refused with the world untouched; the criterion is seconds-of-quiet, not
 frames (same simulated quiet at 0.1 s and 0.001 s steps settles identically, a mid-window jolt
-resets the clock).
+resets the clock); and the energy ledger holds across the crossing
+(`the_crossing_measures_the_binned_kinetic_energy_and_carried_heat`: energy in = energy still on
+particles + energy measured into the audit, both parts checked against independently computed
+expectations, within f32 accumulation).
 
 ## The production consumer
 
@@ -74,7 +83,10 @@ resets the clock).
 scene and `bin/run-definition`): once no meteors are in flight and the whole remaining field has
 been quiet for one `t_q`, everything the per-grain path left behind is offered back to the world
 in one conserving pass; `take_dirty()` then drives the surface-nets remesh that renders the site
-as ground again. `Simulation::recohered_voxels()` exposes the count, matter-accounting style.
+as ground again. `Simulation::recohered_voxels()` exposes the count, matter-accounting style,
+and `recohered_kinetic_j()` / `recohered_heat_j()` accumulate the crossing's measured energy the
+same way; `bin/run-definition` prints a `recohered` line with all three whenever the rung ran,
+so the loss is a number a definition author sees, never a silent zero.
 
 Honest scope note: on this CPU container the per-grain deposit usually empties the field first —
 its grains are voxel-quantized by construction, so one-grain-one-voxel is exact for them. The
@@ -97,6 +109,15 @@ particle-ball remnants below wire into.
    `accretion::representation` says it is no longer a body and its particles pass this rung's
    criterion, they should fold the same way (lattice grains are voxel-quantized already). Not
    wired in this increment to keep the consumer surface minimal.
+3. **The three physics debts, ledgered (docs/46 row 17).** Status as of 2026-07-23: the dropped
+   binned heat (a) and the zeroed settle kinetic energy (b) are MEASURED at the crossing
+   (`Recohered::binned_kinetic_j` / `binned_heat_j`, accumulated by `Simulation`, reported by
+   `bin/run-definition`) because the sink they need, a voxel-side thermal field, does not exist;
+   building it is the deferred computation, and the closing test is the conservation test flipped
+   from measuring the loss to asserting the deposit. Instant consolidation (c) is DESIGN ONLY: a
+   consolidation state (porosity and strength fraction) on re-cohered matter relaxing toward
+   intact over a physical timescale, with the closing test named in the row. Nothing here is
+   closed yet; the row exists so the loss is visible while it waits.
 
 Related: docs/22 (de-resolution), docs/39 (bake-back at planetary scale), docs/44 §6 (demote on
 quiescence), docs/46 row 6 (the ledger row this narrows), docs/57 #4 (settling made physical).
