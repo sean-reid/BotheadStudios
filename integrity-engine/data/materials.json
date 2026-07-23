@@ -66,6 +66,20 @@
         "molar_mass": 0.06,
         "decomposition_suppressed_pa": 0.0
       },
+      "tillotson": {
+        "rho0": 2680.0,
+        "a": 0.5,
+        "b": 1.3,
+        "A": 1.8e10,
+        "B": 1.8e10,
+        "E0": 1.6e7,
+        "E_iv": 3.5e6,
+        "E_cv": 1.8e7,
+        "alpha": 5.0,
+        "beta": 5.0,
+        "status": "provisional",
+        "source": "Melosh 1989, Impact Cratering, Appendix II (transcribed; UNVERIFIED against the primary table)"
+      },
       "ranges": {
         "density": [
           2600,
@@ -138,6 +152,20 @@
         "molar_mass": 0.06,
         "decomposition_suppressed_pa": 0.0
       },
+      "tillotson": {
+        "rho0": 2700.0,
+        "a": 0.5,
+        "b": 1.5,
+        "A": 2.67e10,
+        "B": 2.67e10,
+        "E0": 4.87e8,
+        "E_iv": 4.72e6,
+        "E_cv": 1.82e7,
+        "alpha": 5.0,
+        "beta": 5.0,
+        "status": "verified",
+        "source": "Benz & Asphaug 1999, Icarus 142, Table 2 (A=B=26.7 GPa, E0=487 MJ/kg, E_iv=4.72, E_cv=18.2 MJ/kg, alpha=beta=5)"
+      },
       "ranges": {
         "density": [
           2700,
@@ -205,6 +233,21 @@
         "simon_c": 2.0,
         "molar_mass": 0.06,
         "decomposition_suppressed_pa": 0.0
+      },
+      "tillotson": {
+        "rho0": 3320.0,
+        "a": 0.5,
+        "b": 1.4,
+        "A": 1.31e11,
+        "B": 4.9e11,
+        "E0": 5.5e7,
+        "E_iv": 4.5e6,
+        "E_cv": 1.4e7,
+        "alpha": 5.0,
+        "beta": 5.0,
+        "status": "provisional",
+        "source": "dunite/olivine analog; rho0 Chau et al. 2018; moduli/energies transcribed (Melosh-family) & UNVERIFIED against the primary table",
+        "notes": "Peridotite is modeled with dunite (olivine) Tillotson params, the standard giant-impact mantle material. B (nonlinear modulus) is flagged suspect: a differentiated body using it puffed up."
       },
       "ranges": {
         "density": [
@@ -473,6 +516,21 @@
         "simon_c": 1.9,
         "molar_mass": 0.055845,
         "decomposition_suppressed_pa": 0.0
+      },
+      "tillotson": {
+        "rho0": 7850.0,
+        "a": 0.5,
+        "b": 1.28,
+        "A": 1.28e11,
+        "B": 1.815e11,
+        "E0": 1.425e7,
+        "E_iv": 2.4e6,
+        "E_cv": 8.67e6,
+        "alpha": 5.0,
+        "beta": 5.0,
+        "status": "partial",
+        "source": "compressed branch (rho0, a, b, A, B, E0): Wissing & Hobbs 2020, A&A 635 A21, Table 2 (refit to Brown et al. 2000 shock data); vapor branch (E_iv, E_cv, alpha, beta): Melosh-family PROVISIONAL",
+        "notes": "Planetary core iron. Compressed branch verified; vapor branch (E_iv/E_cv/alpha/beta) provisional and only bites at impact energies."
       },
       "ranges": {
         "density": [
