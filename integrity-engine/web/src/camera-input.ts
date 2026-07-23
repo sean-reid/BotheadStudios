@@ -41,8 +41,10 @@ export interface CameraInputOptions {
    * scene, mapped to each camera's own semantics: the orbit band slides its look target off the
    * focused body; the free-fly scenes translate laterally in the view plane through the same mover
    * as their strafe keys. A scene that supplies no handler keeps the plain grammar, where
-   * shift + left-button means move backward. While a pan drag is active the movement keys are not
-   * engaged, so the two meanings never fire together.
+   * shift + left-button means move backward. When a handler IS supplied, shift + left-button
+   * always means pan, no matter whether shift or the button landed first, and reverse movement
+   * lives on shift + ctrl; while a pan drag is active the movement keys are not engaged, so the
+   * two meanings never fire together.
    */
   onPan?: PanHandler;
 }
@@ -81,32 +83,52 @@ export function attachCameraInput(
   let ctrlHeld = false;
   let shiftHeld = false;
 
-  const down = (e: PointerEvent) => {
-    if (isPan(e)) {
-      // A pan drag owns the pointer: the left button (if any) drives the pan, not the walk.
-      panning = true;
-      lastX = e.clientX;
-      lastY = e.clientY;
-      pointerId = e.pointerId;
-      canvas.setPointerCapture(e.pointerId);
-      e.preventDefault();
-      return;
-    }
-    if ((e.buttons & 1) !== 0 && !e.altKey) leftHeld = true;
-    shiftHeld = e.shiftKey;
-    if (!isLook(e)) return;
-    looking = true;
+  // Anchor a drag on this pointer: remember where it is and capture it, so the gesture keeps
+  // tracking outside the canvas and a later event can measure a delta from here.
+  const anchor = (e: PointerEvent) => {
     lastX = e.clientX;
     lastY = e.clientY;
     pointerId = e.pointerId;
     canvas.setPointerCapture(e.pointerId);
+  };
+
+  const down = (e: PointerEvent) => {
+    if (isPan(e)) {
+      // A pan drag owns the pointer: the left button (if any) drives the pan, not the walk.
+      panning = true;
+      anchor(e);
+      e.preventDefault();
+      return;
+    }
+    if ((e.buttons & 1) !== 0 && !e.altKey) {
+      leftHeld = true;
+      // Anchor even though this begins as a walk: a real hand often lands the button a beat
+      // before shift registers, and the drag must be able to BECOME a pan mid-hold.
+      anchor(e);
+    }
+    shiftHeld = e.shiftKey;
+    if (!isLook(e)) return;
+    looking = true;
+    anchor(e);
     e.preventDefault();
   };
   const move = (e: PointerEvent) => {
+    // Shift may arrive AFTER the button (the common human ordering race). The moment a
+    // left-drag that started on the canvas shows the pan chord, it upgrades to a pan,
+    // measuring from here so there is no jump. Without this, the gesture fell into the
+    // shift+left = reverse-walk meaning and pan looked dead to a real user.
+    if (!panning && !looking && pointerId === e.pointerId && isPan(e)) {
+      panning = true;
+      leftHeld = false;
+      lastX = e.clientX;
+      lastY = e.clientY;
+    }
     if (!looking && !panning) return;
-    // Releasing the modifier/button mid-drag ends the gesture rather than leaving it stuck on.
+    // Releasing the modifier/button mid-drag ends the gesture rather than leaving it stuck on;
+    // a still-held left button falls back to its plain meaning (walk forward).
     if (panning && !isPan(e)) {
       panning = false;
+      leftHeld = (e.buttons & 1) !== 0 && !e.altKey;
       return;
     }
     if (looking && !isLook(e)) {
@@ -124,13 +146,13 @@ export function attachCameraInput(
   };
   const up = (e: PointerEvent) => {
     if ((e.buttons & 1) === 0) leftHeld = false;
-    if (!looking && !panning) return;
+    // Gestures only ever ride the anchored pointer; another pointer lifting (a second touch)
+    // must not end them.
+    if (pointerId === null || e.pointerId !== pointerId) return;
+    if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId);
+    pointerId = null;
     looking = false;
     panning = false;
-    if (pointerId !== null && canvas.hasPointerCapture(pointerId)) {
-      canvas.releasePointerCapture(pointerId);
-    }
-    pointerId = null;
   };
   // Without this, right-dragging opens the context menu over the canvas mid-look.
   const menu = (e: Event) => e.preventDefault();
@@ -158,6 +180,12 @@ export function attachCameraInput(
 
   return {
     forward: () => {
+      if (panning) return 0;
+      // DECISION: in a scene with a pan handler, shift + left BUTTON is the pan chord and never
+      // the reverse walk. The same two inputs cannot mean both, and which one fired used to
+      // depend on which finger won a millisecond race at pointerdown. Reverse stays fully
+      // available on the keyboard side of the grammar (shift + ctrl).
+      if (onPan && leftHeld && shiftHeld && !ctrlHeld) return 0;
       const moving = leftHeld || ctrlHeld;
       if (!moving) return 0;
       return shiftHeld ? -1 : 1;
