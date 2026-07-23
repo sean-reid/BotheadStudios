@@ -3,6 +3,65 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the site enters dynamics, and the drop breaks its ball
+
+**What.** The remaining core of the zoom hand-down (docs/59): the materialized fine site now
+STEPS, and a landed drop's arriving energy moves and breaks its matter. Three pieces. (1) The
+release gate resolved on real relief with a DERIVED bound, not a declared one. Measured first:
+the site's relax plateau is a true fixed point (oscillates around 4.9e-2 all the way to the
+5000-iteration cap, never converging toward the strict 5e-3), and the cause is the release
+criterion's own reference - the children's sum smooths at the child scale h_c while the target
+is the coarse field read at the interface scale (h_c + h_p)/2, and near rough relief the coarse
+field genuinely answers the density question differently at those two scales. The rung now
+judges a PROVEN stall against that disagreement, measured from the coarse field at the
+children's own sites with the same denominator as the release error (`refine::scale_mismatch`),
+and releases with the residual and the derived bound both stated (`RelaxReport::release_bound`).
+Measured: the relief lattice's 5.1e-2 plateau under its 1.2e-1 mismatch; the site's 4.8e-2 under
+9.1e-2; a uniform interior reads ~4.5e-2 across the same interval (the coarse lattice's own
+discreteness at the finer read scale - stated as the floor it is); the strict bound remains the
+criterion for every converging run and an unguarded truncation still refuses. (2) The released
+parcels are cohesive matter through the ground scene's own machinery: a new
+`CohesiveBody::from_parcels` carries the ONE builder law (bond k = E*L capped, break strain,
+restitution-derived damping, catalogue specific heat, planet gravity) for both the ground
+scene's lattice balls and the site's split children; `site::SiteDynamics` steps them under
+bonds, gravity and the one terrain-contact law (the ball rests on the declared surface exactly
+as the ground scene's ball rests on its voxels; buried patch matter meets the bowl wall through
+the same non-injecting resolve in the wall's local frame). During a live event the guard band's
+booked step-to-step delta - the coarse field's per-kilogram statement of what arrived at this
+sub-resolution ground - is delivered through the one door (`Aggregate::deposit_impact`,
+entering from the up-shock side); fate is `damage::classify`'s per parcel, the ball's verdict
+is the ground scene's word, the fold stays gated by the docs/61 gauge, and the release gate
+still keeps an UNRELEASED patch out of dynamics. (3) The declared site moved onto the fall's
+own impact ring (lat 45, lon 0): the whole cast starts in the orbital plane, so a from-rest
+lunar fall is confined to it and release timing can fix azimuth but never the polar plane; the
+old 45N 100W site sat 44 degrees off the ring and could never be hit. The derivation is in the
+world file's comment and the solver test asserts the declared site's plane offset reads ~0.
+
+**Why.** The demo's final beat is the declared ball shattering from the drop seen from space -
+one event read from one file at two scales. Everything upstream existed (trigger, guards,
+window, gate); what was missing was the site actually being matter that moves. Law II bound the
+build: no new laws, the ground scene's contact, deposition, fracture, settle and re-cohere
+machinery reused with the site as its second consumer.
+
+**Verified.** Red first at the seams: the relief test was rewritten to expect release under the
+derived bound and failed against the refusing rung; the dynamics tests were written against the
+missing API and driven green. Native: the quiescent site's ball falls, rests and stays intact
+with every parcel classifying Intact, the gauge settles and the fold returns the declared mass;
+the demo beat at the seam - a moon-magnitude boundary pulse (u jump 4.8e6 J/kg, bulk 2.2 km/s)
+- shatters the ball by classify alone (fate 0 solid / 42 fractured / 171 molten / 60 vapor,
+delivered J equal to the booked arrival to 1e-9, mass conserved, mid-event fold refused); an
+artificially unreleased site is refused dynamics with the rung's own residual quoted. Full
+suite 403 green, wasm32 check clean at the baseline warning count. Watched headed on the Mac
+(mac_shot pattern, port 7199, `web/rig/mac_site_dynamics.mjs` on the Ground Zero page,
+screenshots viewed): at load the HUD reads the audit plus "released 4.8e-2 (bound 9.1e-2, the
+field's own scale mismatch at the stall)" and "ball INTACT (72/72 bonds) · parcels 273 solid";
+Drop arms for the launch window and fires itself; the boundary window opens as the shock
+reaches the site (measured on the HUD: arrived IE +1.67e15 J at the band, peak boundary 6019
+m/s); the verdict flips to "ball SHATTERED (0/72 bonds)" with the fate mix running to
+"272 vapor" and "boundary delivered 1.12e14 J over 18 steps" - the moon-drop's energy density
+vaporizes the whole patch, which is the honest outcome, reported as such. Zero console errors
+across the arc.
+
 ## 2026-07-23: the drop arms for the launch window, not the instant
 
 **What.** The launch-window intercept (`crates/engine/src/intercept.rs`), pure and natively
