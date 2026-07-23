@@ -3,6 +3,28 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: birth builds through the generic engine
+
+**What.** The declared birth path consumes the generic collision engine (docs/58 item 7),
+merged from the collision-unify mirror branch. `start_gpu_impact` particalizes the target and
+impactor from their declared matter via `build_far_apart_n` (equal particle mass across the
+bodies, with the same 50-particle small-body floor) instead of building the Earth/Theia
+iron-basalt pair through `build_far_apart_from`, and keeps the shared N-material EOS table in
+the new `sph_eos` field so the `Assembling` and dynamics uploads carry the same table the
+particles' `mat` indices point into. The two-body assembly's returned `[basalt, iron]` pair is
+ignored at the assemble site on both paths; the live relax staging now also parks its table (its
+unchanged two-slot pair, for now) in `sph_eos`, which is the merge resolution that keeps the
+fork's live hand-off byte-identical while adopting the upstream birth change.
+
+**Why.** Robin: this is the ONE collision engine consuming its first scene. The bodies reach
+the GPU as their own matter (real mass, per-material catalogue EOS), not as a named
+definition's two-slot approximation.
+
+**Verified.** Upstream rig-verified before the mirror: birth lofts a proto-lunar disk and
+accretes a ~1.08 lunar-mass Moon (disk 1.73 lunar masses, 43 percent Earth) with no dispersal
+under the real-mass init. Here: full native suite 348/348 green,
+`cargo check --target wasm32-unknown-unknown -p engine` clean. fmt untouched (hand-edited).
+
 ## 2026-07-23: the GPU SPH goes N-material and N-body
 
 **What.** Three additions to `gpu_sph` (docs/58 items 4/5/7), merged from the collision-unify
