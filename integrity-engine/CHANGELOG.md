@@ -9,6 +9,10 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **Wasm download weight is now tracked.** The release `engine_bg.wasm` baseline is recorded in
+  the versioning doc (811,915 bytes raw, 322,386 bytes gzipped on 2026-07-23), measuring it is a
+  release-checklist step alongside the `wgpu` version note, and the CI wasm job prints the raw and
+  gzipped sizes on every PR so growth lands attributed. No behaviour change.
 - **Pan input works for real hands and trackpads.** Shift plus left-drag now pans no matter
   whether shift or the button lands first: a left-drag upgrades to a pan the moment the modifier
   is seen, and in a scene with a pan handler that chord never means reverse walk (reverse stays

@@ -43,3 +43,8 @@ jobs:
       - name: production build
         working-directory: integrity-engine/web
         run: npm run build
+      - name: wasm size
+        working-directory: integrity-engine/web
+        run: |
+          echo "engine_bg.wasm raw bytes:    $(stat -c%s src/wasm/engine_bg.wasm)"
+          echo "engine_bg.wasm gzip-9 bytes: $(gzip -9 -c src/wasm/engine_bg.wasm | wc -c)"
