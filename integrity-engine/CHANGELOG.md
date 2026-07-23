@@ -9,6 +9,21 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The re-coherence rung's energy debts are measured, and all three of its physics debts are
+  on the ledger (docs/61, docs/46 row 17).** None is closed; two are measured, one is designed.
+  Measured: the batch grain-to-voxel rung books the binned mass's remaining kinetic energy
+  (settling is dissipation, bounded per grain by `m g Δ`) and its carried heat at the crossing
+  (`Recohered::binned_kinetic_j` / `binned_heat_j`, energy-in minus remainder-out per column;
+  heat counted only where the material's specific heat is sourced, an unknown stays unknown),
+  because the voxel store carries no thermal state to receive them and inventing a fake sink was
+  refused. `MatterSim::recohere_settled` returns the full audit instead of a bare voxel count,
+  `Simulation` accumulates it (`recohered_kinetic_j()` / `recohered_heat_j()`), and
+  `run-definition` prints a `recohered` line whenever the rung ran. A native conservation test
+  holds the ledger identity (energy in = remainder out + audit) against independently computed
+  expectations. Designed only: consolidation. Re-cohered rubble is still instantly
+  bedrock-competent; docs/46 row 17c names the deferred state (porosity and strength fraction
+  relaxing toward intact over a physical timescale) and the test that would close it.
+
 - **The descent camera holds f32 precision from orbit to standing height (docs/59 item 2).** Terra
   now renders under ONE camera-relative-eye convention (documented in `terra::fly_camera`): every
   draw uses the eye-at-origin view·projection, the eye is subtracted in f64 (per-vertex for the
