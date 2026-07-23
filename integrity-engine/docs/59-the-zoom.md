@@ -97,12 +97,37 @@ The out-and-back arc landed the same day (`crate::arc`): one continuous camera p
 from the manual rig's celestial framing down to ~1.4 km over the site, the view-resolution
 distance of the site's finest materialized quantum, the deepest framing the current rung
 honestly serves, with sim-time compression proportional to camera distance, flying the trigger
-in both directions from one control on the Ground Zero page. Open within items 2 and 3, carried
-by docs/46 row 18: the camera below the arc's derived floor (needs the next rung down, and with
-it Terra's camera-relative-eye convention in the space band); releasing relief surfaces in the
-relax (the shipped site is the exact conserving split with its density residual stated); any
-entry of the fine patch into dynamics (the release gate stands); and the N-material upload
-reaching the guards (the sampled state inherits the coarse field's EOS collapse until then).
+in both directions from one control on the Ground Zero page.
+
+The site entered dynamics 2026-07-23, closing the hand-down's core. Two pieces. First, the
+release gate resolved on real relief: the stall is a true fixed point (the site's relax
+oscillates around 4.9e-2 to the 5000-iteration cap) caused by the release criterion's own two
+smoothing scales - the children's sum reads at the child scale while the target is the coarse
+field at the interface scale, and near rough relief the coarse field genuinely answers
+differently at those two scales. The rung now judges a PROVEN stall against that measured
+disagreement (`refine::scale_mismatch`, the same sites, the same denominator) and releases with
+the residual and the derived bound both stated: the site releases at 4.8e-2 under its own 9.1e-2
+mismatch; the strict 5e-3 remains the criterion for every converging run. Second, the released
+parcels are cohesive matter through the ground scene's own builder (`CohesiveBody::from_parcels`
+- one law for the site's ball and the ground scene's), stepped under bonds, gravity and the one
+terrain-contact law (`site::SiteDynamics`); during an event the guard band's booked step-to-step
+delta is delivered through the one door (`Aggregate::deposit_impact`), fate is
+`damage::classify`'s per parcel, the ball's verdict is the ground scene's word, and the fold
+stays gated by the docs/61 gauge. The demo beat is a native test at the seam: a moon-magnitude
+boundary pulse shatters the site's ball by classify alone (measured: 0 solid / 42 fractured /
+171 molten / 60 vapor, mass conserved, mid-event fold refused). The declared site also moved
+onto the fall's own impact ring (lat 45, lon 0): a from-rest lunar fall is confined to the
+orbital plane, so release timing fixes azimuth only, and a site off the ring's polar plane could
+never be hit - the derivation lives in the world file's comment and the solver test asserts the
+plane offset is ~0.
+
+Open within items 2 and 3, carried by docs/46 row 18: the camera below the arc's derived floor
+(needs the next rung down, and with it Terra's camera-relative-eye convention in the space
+band); the N-material upload reaching the guards (the sampled state inherits the coarse field's
+EOS collapse until then); site-local excavation of the floor law (the parcels carry the
+crater's truth; the declared surface stays the standing floor); and the site clock's
+real-second rate against the scaled celestial clock (a stated compute bound - verdicts are
+deposit-driven and land at the coarse step).
 
 ## The hand-down, made concrete (after the trigger landed)
 

@@ -62,25 +62,25 @@
 //!   tests verify), guard shell one interaction reach beyond, one rung of 13 - sized so the
 //!   one-shot relax stays around a second of compute, far inside the 2400-particle celestial
 //!   statement it rides.
-//! - The relax could not RELEASE this site's patch today: ground relief at the parents' own
-//!   resolution stalls the shifting at a measured ~5e-2 plateau (an order over the bound;
-//!   `refine::tests::a_relief_surface_stalls_into_a_prompt_stated_refusal`). The site then
-//!   carries the EXACT split with the residual stated ([`SiteRelease::Unreleased`]) - legal
-//!   only because the patch enters no dynamics yet; the release gate stands between the site
-//!   and any future stepping. The named deferred computation is a fringe-corrected density
-//!   estimate in the rung.
+//! - This site's relief stalls the strict relax at a measured ~4.8e-2 plateau; the rung now
+//!   RELEASES it under the field's own measured scale-mismatch bound (~9.1e-2 here) with the
+//!   residual stated (`refine`, "Release on a stalled plateau") - so the patch ENTERS DYNAMICS
+//!   ([`SiteDynamics`], the module section below). A patch the rung still refuses carries the
+//!   exact split with the residual stated ([`SiteRelease::Unreleased`]) and the release gate
+//!   keeps it OUT of dynamics.
 //! - The 1 m grass skin is SUB-QUANTUM at this rung (a parent is ~4.5 m of basalt) and does not
 //!   materialize; it needs the next rung down, exactly as recohere's sub-quantum remainder stays
 //!   particles. Stated, not smoothed over.
-//! - The ball materializes at its DECLARED initial position; the site's local dynamics (its fall,
-//!   its rest, an impact's effect on it) are the deferred computation - the fine patch does not
-//!   enter any dynamics this milestone.
+//! - The ball materializes at its DECLARED initial position and then LIVES: under
+//!   [`SiteDynamics`] it falls, rests on the ground through the one terrain-contact law, and an
+//!   event's arriving energy decides its fate through the same door and `damage::classify` the
+//!   ground scene's ball answers to, verdict word included.
 //! - The ball's children are split EXACTLY but not relaxed, and the status says so: an isolated
 //!   sub-resolution body has no uniform coarse environment to relax against (relaxing its 13
 //!   children toward its own kernel smear in vacuum was measured divergent - the target decays
-//!   to nothing as the children chase it), and the relax exists to protect entry into stiff
-//!   dynamics, which the site does not do yet. The split alone conserves by construction and is
-//!   audited like everything else.
+//!   to nothing as the children chase it). Its bonds forge at the stencil's own rest lengths, so
+//!   the split alone conserves by construction, is audited, and enters the bond dynamics with no
+//!   stored prestress.
 //! - Energy hand-down from a live celestial field lands as the smallest honest version: a
 //!   QUIESCENT field's specific internal energy is sampled at the site (mass-weighted over the
 //!   particles whose support covers it) and carried into the patch; a MID-EVENT field refuses
@@ -422,6 +422,13 @@ pub struct MaterializedSite {
     pub hand_down: HandDown,
     /// Radius (m) of the site's own footprint about the origin - the contamination-check region.
     pub extent_m: f64,
+    /// Radius (m) of the FINE region (the bowl the children fill); beyond it, below the surface,
+    /// is coarse rock - the boundary the dynamics treat as immovable crust.
+    pub fine_radius_m: f64,
+    /// The ball column's position in the declared surface's voxel coordinates (x, z) and its
+    /// ground-top height (voxel y) - the site frame's anchor, kept so the dynamics ask the SAME
+    /// height law the builder used for the ground outside the bowl.
+    pub col_voxel: [f64; 3],
 }
 
 /// The fold's paperwork: what went back into the summary, measured.
@@ -572,12 +579,13 @@ pub fn materialize_site(
         center: Vec3::ZERO,
         radius: (FINE_RADIUS_DX * dx_col) as f32,
     };
-    // The full rung first. When the relax STALLS (a relief surface reaches its force-balanced
-    // plateau - `refine::tests::a_relief_surface_stalls_into_a_prompt_stated_refusal`), the site
+    // The full rung first. A stalled relief plateau now RELEASES under the field's own measured
+    // scale-mismatch bound with the residual stated (refine, "Release on a stalled plateau" -
+    // this site: 4.8e-2 under ~9.1e-2); if the rung still refuses (a genuine failure), the site
     // falls back to the EXACT conserving split with the unreleased residual REPORTED
-    // ([`SiteRelease::Unreleased`]): the release is the gate a patch must pass before entering
-    // stiff dynamics, which this site does not do yet (module doc), so what is lost is fidelity
-    // that is stated, never conservation. Every other refusal refuses the materialization.
+    // ([`SiteRelease::Unreleased`]), and the release gate keeps that patch out of dynamics -
+    // what is lost is fidelity that is stated, never conservation. Every other refusal refuses
+    // the materialization.
     let (particles, fine_start, mut ledger, release) =
         match refine::refine_patch(&parents, &region) {
             Ok(t) => {
@@ -605,8 +613,8 @@ pub fn materialize_site(
     // STAGE 2 - the declared ball: the exact conserving split, UNRELAXED, and stated as such
     // (module doc): an isolated sub-resolution body has no uniform coarse environment to relax
     // against - relaxing its children toward its own kernel smear in vacuum was measured
-    // divergent - and the site's fine patch enters no dynamics this milestone, which is what
-    // the relax exists to protect. The split alone is conservation by construction, audited.
+    // divergent. The split alone is conservation by construction, audited; its bonds forge at
+    // the stencil's own rest lengths, so it enters the dynamics with no stored prestress.
     let (mut particles, fine_start) = terrain;
     let mut ball_children = 0usize;
     if ball.is_some() {
@@ -653,6 +661,8 @@ pub fn materialize_site(
         declared_mass_kg,
         hand_down: *hand,
         extent_m,
+        fine_radius_m: region.radius as f64,
+        col_voxel: [vx_b, top_b, vz_b],
     })
 }
 
@@ -774,6 +784,12 @@ pub struct BoundaryState {
     pub internal_j: f64,
     /// Fastest guard speed (m/s) after the resample.
     pub peak_speed_ms: f64,
+    /// Mass-weighted guard-band bulk velocity (m/s), site frame - the direction and magnitude of
+    /// the ground's motion the coarse field reports at the boundary.
+    pub bulk_vel_ms: [f64; 3],
+    /// Total guard-band mass (kg) - the denominator that turns the booked totals into the
+    /// per-kilogram state the dynamics deliver to the fine matter.
+    pub mass_kg: f64,
 }
 
 /// **Re-sample the guard band from the live coarse field** (module section doc). Each guard's
@@ -828,6 +844,16 @@ pub fn resample_guards(
         out.kinetic_j += 0.5 * g.mass as f64 * sp * sp;
         out.internal_j += g.mass as f64 * g.u as f64;
         out.peak_speed_ms = out.peak_speed_ms.max(sp);
+        out.mass_kg += g.mass as f64;
+        let mv = DVec3::new(g.vel[0] as f64, g.vel[1] as f64, g.vel[2] as f64) * g.mass as f64;
+        out.bulk_vel_ms[0] += mv.x;
+        out.bulk_vel_ms[1] += mv.y;
+        out.bulk_vel_ms[2] += mv.z;
+    }
+    if out.mass_kg > 0.0 {
+        for c in &mut out.bulk_vel_ms {
+            *c /= out.mass_kg;
+        }
     }
     out
 }
@@ -864,6 +890,12 @@ impl EventWindow {
         self.opened.is_some()
     }
 
+    /// The latest booked boundary state - what the caller diffs against the next resample to
+    /// hand this coarse step's ARRIVAL to the fine matter ([`SiteDynamics::deliver_boundary`]).
+    pub fn last_state(&self) -> BoundaryState {
+        self.last
+    }
+
     pub fn steps(&self) -> usize {
         self.steps
     }
@@ -898,6 +930,411 @@ impl EventWindow {
             self.arrived_kinetic_j(),
             self.arrived_internal_j(),
             self.peak_speed_ms
+        )
+    }
+}
+
+// -----------------------------------------------------------------------------------------------
+// The site in DYNAMICS (docs/59, the remaining core of the hand-down): once the rung RELEASES the
+// patch, the fine parcels stop being a static exhibit and evolve under the engine's existing laws,
+// with the ground scene's machinery as the precedent - cohesive bonds from the material's own
+// modulus, the one granular contact law, the one deposition door, damage::classify deciding fate,
+// the docs/61 settle gauge, and the fold as re-coherence. NO NEW LAWS: the ball at the site is
+// simulation::CohesiveBody - the SAME type, builder and verdict word as the ground scene's ball -
+// and the terrain parcels are the same cohesive matter per stratum material.
+//
+// What drives it: the guard band's boundary state. During a live event the guards mirror the
+// coarse field each coarse step (resample_guards), and the STEP-TO-STEP DELTA of that booked
+// state - specific internal energy, specific kinetic energy, bulk velocity - is delivered into
+// the fine matter through the one door operator (`Aggregate::deposit_impact`, the same call the
+// ground scene's ball receives a meteor through), entering from the up-shock side. At the coarse
+// quantum (~1e6 m) the whole 30 m site is sub-resolution, so the field's per-kilogram state delta
+// IS the honest statement of what arrived at this ground; the door then spreads it, classifies
+// each parcel against its own material's thresholds, breaks the bonds fate ends, and converts
+// superheat to expansion - exactly as it does for the ground scene. Quiescent otherwise: with no
+// arrivals the site just settles under gravity, contact and its own bonds.
+//
+// Boundary geometry: below the surface, beyond the fine bowl, is coarse rock. A fine parcel
+// reaching that interface is resolved by THE terrain-contact law (`granular::terrain_contact_
+// resolve`) evaluated in the local frame of the bowl wall - the same non-injecting projection
+// the ground scene's ball uses against its voxel ground; parcels thrown clear of the bowl land
+// on the declared surface through the same law via the same height function the builder used.
+//
+// Honest limits, stated: (a) energy that LEAVES the boundary between books stays booked at the
+// window but cannot be un-deposited from the fine matter - the door only deposits arrivals; (b)
+// the door's kernel is isotropic (the standing deposit_event IOU, inherited); (c) in the browser
+// the site integrates in real seconds while the celestial clock runs scaled - the site clock is
+// reported, and the lag is a compute statement, not physics (verdicts are deposit-driven and land
+// at the coarse step; only the visible scatter unfolds on the site clock).
+// -----------------------------------------------------------------------------------------------
+
+/// Per-substep position-projection cap (m) at the bowl wall and the outside ground - the same
+/// bound `simulation::Simulation` uses for a body particle against the terrain (its
+/// BODY_MAX_SURFACE_CORRECTION), for the same stack-safety reason.
+const SITE_MAX_SURFACE_CORRECTION: f64 = 0.01;
+
+/// Substep ceiling per `step` call - the ground scene's own clamp. When the stability need
+/// exceeds it, the site advances less time than asked (never understeps stability) and the
+/// shortfall shows on the site clock.
+const SITE_MAX_SUBSTEPS: usize = 256;
+
+/// One cohesive body of the site's fine matter: the parcels of ONE material, with the map back
+/// into `MaterializedSite::particles` so the rendered/audited field stays the same matter.
+struct SiteBody {
+    body: crate::simulation::CohesiveBody,
+    /// Catalogue material index.
+    mat: usize,
+    /// site.particles index per aggregate particle.
+    map: Vec<usize>,
+}
+
+/// **The released site, stepping** (module section above). Owns the fine parcels as cohesive
+/// matter; the guards stay in `MaterializedSite` (they are the coarse field's, not the site's).
+pub struct SiteDynamics {
+    /// Terrain-patch matter, one body per stratum material present among the children.
+    patch: Vec<SiteBody>,
+    /// The declared ball - the ground scene's own type, so `verdict()` is the same word.
+    ball: Option<SiteBody>,
+    surface: GroundSurface,
+    /// Ball column anchor in surface voxel coordinates: [x, ground-top y, z].
+    col_voxel: [f64; 3],
+    fine_radius_m: f64,
+    /// J the boundary has delivered through the door since the window opened.
+    pub delivered_j: f64,
+    /// Coarse steps that actually deposited (arrivals, not departures).
+    pub delivered_steps: usize,
+    /// Site seconds actually integrated - the site's own clock (module section, limit c).
+    pub clock_s: f64,
+}
+
+impl SiteDynamics {
+    /// Build the dynamics from a RELEASED site. The release gate stands: an unreleased patch
+    /// refuses with the rung's own stated residual - fidelity that may not enter stiff dynamics
+    /// unbounded.
+    pub fn new(
+        site: &MaterializedSite,
+        spec: &SiteSpec,
+        mats: &[Material],
+    ) -> Result<SiteDynamics, SiteRefusal> {
+        if let SiteRelease::Unreleased { achieved, bound, iterations } = site.release {
+            return Err(SiteRefusal::Refine(Refusal::NotConverged {
+                achieved,
+                bound,
+                iterations,
+            }));
+        }
+        let fine_end = site.particles.len() - site.ball_children;
+        let build = |idxs: &[usize], spacing: f64| -> Result<SiteBody, SiteRefusal> {
+            let mat = site.particles[idxs[0]].mat as usize;
+            let m = mats
+                .get(mat)
+                .ok_or_else(|| SiteRefusal::UnknownMaterial { material: format!("#{mat}") })?;
+            let c_heat = m
+                .specific_heat()
+                .ok_or_else(|| SiteRefusal::UnsourcedHeat { material: m.id.clone() })?;
+            let parcels: Vec<crate::orbit::Body> = idxs
+                .iter()
+                .map(|&i| {
+                    let p = &site.particles[i];
+                    crate::orbit::Body {
+                        pos: DVec3::new(p.pos[0] as f64, p.pos[1] as f64, p.pos[2] as f64),
+                        vel: DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64),
+                        mass: p.mass as f64,
+                    }
+                })
+                .collect();
+            let mut body = crate::simulation::CohesiveBody::from_parcels(
+                parcels,
+                mat,
+                spacing,
+                mats,
+                spec.g_ms2 as f32,
+            )
+            .map_err(|_| SiteRefusal::UnknownMaterial { material: m.id.clone() })?;
+            // Thermal state carried across the representation: the parcel's u = c*T, so T = u/c
+            // (the same law materialize_site wrote it with) - nothing invented at the crossing.
+            for (k, &i) in idxs.iter().enumerate() {
+                body.agg.temps[k] = (site.particles[i].u as f64 / c_heat) as f32;
+            }
+            Ok(SiteBody { body, mat, map: idxs.to_vec() })
+        };
+
+        // Terrain parcels, grouped by material; spacing is each material's own child extent
+        // (equal child mass, the rung's law).
+        let mut groups: Vec<(u32, Vec<usize>)> = Vec::new();
+        for i in site.fine_start..fine_end {
+            let mat = site.particles[i].mat;
+            match groups.iter_mut().find(|(g, _)| *g == mat) {
+                Some((_, v)) => v.push(i),
+                None => groups.push((mat, vec![i])),
+            }
+        }
+        let mut patch = Vec::new();
+        for (mat, idxs) in &groups {
+            let rho = mats
+                .get(*mat as usize)
+                .map(|m| m.density as f64)
+                .unwrap_or(1.0)
+                .max(1.0);
+            let child_mass = site.particles[idxs[0]].mass as f64;
+            patch.push(build(idxs, coarse_particle_extent_m(child_mass, rho))?);
+        }
+        // The ball: its children sit exactly on the split stencil, so its bond spacing is the
+        // stencil separation the split placed them at (derived from the child h, no new number).
+        let ball = if site.ball_children > 0 {
+            let idxs: Vec<usize> = (fine_end..site.particles.len()).collect();
+            let h_c = site.particles[idxs[0]].h as f64;
+            let sep = h_c * (refine::SPLIT_SEPARATION_OVER_H / refine::SPLIT_CHILD_H_OVER_H) as f64;
+            Some(build(&idxs, sep)?)
+        } else {
+            None
+        };
+        Ok(SiteDynamics {
+            patch,
+            ball,
+            surface: spec.surface.clone(),
+            col_voxel: site.col_voxel,
+            fine_radius_m: site.fine_radius_m,
+            delivered_j: 0.0,
+            delivered_steps: 0,
+            clock_s: 0.0,
+        })
+    }
+
+    /// The ball's one-word structural verdict - literally `CohesiveBody::verdict()`, the ground
+    /// scene's own word from the same bond state.
+    pub fn ball_verdict(&self) -> Option<&'static str> {
+        self.ball.as_ref().map(|b| b.body.verdict())
+    }
+
+    /// **Deliver one coarse step's boundary arrival through the one door.** `prev` and `now` are
+    /// consecutive booked states of the SAME guards; their per-kilogram delta is the coarse
+    /// field's statement of what arrived at this sub-resolution ground. Positive deltas deposit
+    /// (`Aggregate::deposit_impact` per body, entering from the up-shock side); departures stay
+    /// booked at the window (module section, limit a). Returns the J delivered.
+    pub fn deliver_boundary(
+        &mut self,
+        prev: &BoundaryState,
+        now: &BoundaryState,
+        mats: &[Material],
+    ) -> f64 {
+        if now.mass_kg <= 0.0 {
+            return 0.0;
+        }
+        let d_ie = (now.internal_j - prev.internal_j) / now.mass_kg;
+        let d_ke = (now.kinetic_j - prev.kinetic_j) / now.mass_kg;
+        let d_v = DVec3::from(now.bulk_vel_ms) - DVec3::from(prev.bulk_vel_ms);
+        let e_per_kg = d_ie.max(0.0) + d_ke.max(0.0);
+        if e_per_kg <= 0.0 && d_v.length_squared() <= 0.0 {
+            return 0.0;
+        }
+        // The shock's propagation direction: the way the boundary's bulk motion jumped; a pure
+        // heat arrival (no momentum) enters from below - through the crust the guards are.
+        let dir = d_v.try_normalize().unwrap_or(DVec3::Y);
+        let mut delivered = 0.0;
+        for b in self.patch.iter_mut().chain(self.ball.iter_mut()) {
+            let agg = &mut b.body.agg;
+            if agg.particles.is_empty() {
+                continue;
+            }
+            let m_a: f64 = agg.particles.iter().map(|p| p.mass).sum();
+            let com = agg.com();
+            let r = agg
+                .particles
+                .iter()
+                .map(|p| (p.pos - com).length())
+                .fold(0.0, f64::max)
+                + b.body.part_half;
+            let entry = com - dir * r;
+            let energy = e_per_kg * m_a;
+            agg.deposit_impact(mats, entry, d_v * m_a, energy);
+            delivered += energy;
+        }
+        if delivered > 0.0 {
+            self.delivered_j += delivered;
+            self.delivered_steps += 1;
+        }
+        delivered
+    }
+
+    /// **One frame of site time.** Substepped to the stiffest body's own stability need (the
+    /// ground scene's clamp); when the need exceeds the ceiling the site advances what the
+    /// budget affords and the clock says so. Cross-body contact and the bowl/ground boundary run
+    /// per substep through the same laws as everything else; the synced `site.particles` stay
+    /// the rendered, audited, foldable matter. Returns the seconds actually advanced.
+    pub fn step(&mut self, site: &mut MaterializedSite, dt: f64, mats: &[Material]) -> f64 {
+        if dt <= 0.0 {
+            return 0.0;
+        }
+        let need = self
+            .patch
+            .iter()
+            .chain(self.ball.iter())
+            .map(|b| b.body.agg.stable_substeps(dt))
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let sub = need.min(SITE_MAX_SUBSTEPS);
+        let eff = dt * sub as f64 / need as f64;
+        let pdt = eff / sub as f64;
+        let mu_of = |mat: usize| -> f64 {
+            mats.get(mat).map(|m| m.friction_coefficient as f64).unwrap_or(0.0)
+        };
+        for _ in 0..sub {
+            for b in self.patch.iter_mut().chain(self.ball.iter_mut()) {
+                b.body.substep(pdt);
+            }
+            // The boundary, through THE terrain-contact law (the same non-injecting, capped
+            // projection the ground scene's ball uses against its voxel ground; it cannot do
+            // work, so a declared configuration that already touches is resolved gently, never
+            // detonated). Two floors, one law:
+            //  - PATCH parcels are the ground itself: inside the footprint their interface is
+            //    the bowl wall (coarse rock beyond the fine region), resolved in the wall's
+            //    local frame; parcels thrown clear of the bowl land on the declared surface
+            //    through the same height law the builder used.
+            //  - BALL parcels stand ON the ground: their floor is the declared surface law
+            //    everywhere, exactly as the ground scene's ball rests on its terrain. The
+            //    site-local crater changing this floor is a named IOU (module section): the
+            //    parcels themselves carry the crater's truth; the floor stays the declared
+            //    surface until site-local excavation of the height law lands.
+            let r_fine = self.fine_radius_m;
+            let surface = &self.surface;
+            let col = self.col_voxel;
+            let n_patch = self.patch.len();
+            for (bi, b) in self.patch.iter_mut().chain(self.ball.iter_mut()).enumerate() {
+                let is_ball = bi >= n_patch;
+                let half = b.body.part_half;
+                let mu = mu_of(b.mat);
+                for p in b.body.agg.particles.iter_mut() {
+                    let h = |x: f64, z: f64| -> f64 {
+                        crate::world::terrain_height_with(surface, x as f32, z as f32) as f64
+                            - col[1]
+                    };
+                    let (vx, vz) = (col[0] + p.pos.x, col[2] + p.pos.z);
+                    let horiz = (p.pos.x * p.pos.x + p.pos.z * p.pos.z).sqrt();
+                    // PATCH matter inside the footprint is the ground itself: its only interface
+                    // is the bowl wall (the surface floor would fight the very parcels that ARE
+                    // the surface there). Everything else - the ball standing on the ground, and
+                    // ejecta thrown clear of the bowl - meets the declared surface floor.
+                    if !is_ball && horiz <= r_fine {
+                        // The bowl wall, in its local frame (up = back toward the interior).
+                        let r = p.pos.length();
+                        if r > 1.0e-9 && r + half > r_fine {
+                            let up = -p.pos / r;
+                            let e1 = up.any_orthonormal_vector();
+                            let e2 = up.cross(e1);
+                            let pos_l = DVec3::new(0.0, r_fine - r, 0.0);
+                            let vel_l = DVec3::new(p.vel.dot(e1), p.vel.dot(up), p.vel.dot(e2));
+                            let hit = crate::granular::terrain_contact_resolve(
+                                pos_l,
+                                vel_l,
+                                0.0,
+                                0.0,
+                                0.0,
+                                half,
+                                mu,
+                                SITE_MAX_SURFACE_CORRECTION,
+                                f64::INFINITY,
+                            );
+                            if hit.hit {
+                                p.vel = e1 * hit.vel.x + up * hit.vel.y + e2 * hit.vel.z;
+                                p.pos += e1 * hit.dpos.x + up * hit.dpos.y + e2 * hit.dpos.z;
+                            }
+                        }
+                    } else {
+                        // The declared ground, through the same height law the builder used
+                        // (one column law, docs/59).
+                        let h0 = h(vx, vz);
+                        let dhdx = h(vx + 0.5, vz) - h(vx - 0.5, vz);
+                        let dhdz = h(vx, vz + 0.5) - h(vx, vz - 0.5);
+                        let hit = crate::granular::terrain_contact_resolve(
+                            p.pos,
+                            p.vel,
+                            h0,
+                            dhdx,
+                            dhdz,
+                            half,
+                            mu,
+                            SITE_MAX_SURFACE_CORRECTION,
+                            f64::INFINITY,
+                        );
+                        if hit.hit {
+                            p.vel = hit.vel;
+                            p.pos += hit.dpos;
+                        }
+                    }
+                }
+            }
+        }
+        self.clock_s += eff;
+        self.sync(site, mats);
+        eff
+    }
+
+    /// Write the dynamic state back into the site's particle field - positions, velocities, and
+    /// u = c*T (the same relation the state entered with), so the render, the settle gauge, the
+    /// window audit and the fold all read the ONE matter.
+    fn sync(&self, site: &mut MaterializedSite, mats: &[Material]) {
+        for b in self.patch.iter().chain(self.ball.iter()) {
+            let c_heat = mats
+                .get(b.mat)
+                .and_then(|m| m.specific_heat())
+                .unwrap_or(1000.0);
+            for (k, &i) in b.map.iter().enumerate() {
+                let p = &b.body.agg.particles[k];
+                let sp = &mut site.particles[i];
+                sp.pos = [p.pos.x as f32, p.pos.y as f32, p.pos.z as f32];
+                sp.vel = [p.vel.x as f32, p.vel.y as f32, p.vel.z as f32];
+                sp.u = (c_heat * b.body.agg.temps[k] as f64) as f32;
+            }
+        }
+    }
+
+    /// Per-parcel FATE COUNTS through `damage::classify` - the readout the demo asserts on: each
+    /// parcel's thermal energy density (rho c (T - ref), the same J/m3 = Pa stand-in the door
+    /// uses) against its own material's thresholds. Returns (solid, fractured, melted, vaporized,
+    /// decomposed) over all fine parcels.
+    pub fn fate_counts(&self, mats: &[Material]) -> (usize, usize, usize, usize, usize) {
+        let mut n = (0, 0, 0, 0, 0);
+        for b in self.patch.iter().chain(self.ball.iter()) {
+            let Some(m) = mats.get(b.mat) else { continue };
+            let rho = (m.density as f64).max(1.0);
+            let c = m.specific_heat().unwrap_or(1000.0) as f64;
+            for &t in &b.body.agg.temps {
+                let e = (rho * c * (t as f64 - crate::matter::REF_TEMP_K as f64)).max(0.0);
+                match crate::damage::classify(e, m, e) {
+                    crate::damage::PhaseChange::Intact => n.0 += 1,
+                    crate::damage::PhaseChange::Fractured => n.1 += 1,
+                    crate::damage::PhaseChange::Melted => n.2 += 1,
+                    crate::damage::PhaseChange::Vaporized => n.3 += 1,
+                    crate::damage::PhaseChange::Decomposed => n.4 += 1,
+                }
+            }
+        }
+        n
+    }
+
+    /// The one-line dynamics readout for the HUD: the site clock, what the boundary delivered,
+    /// the ball's verdict word and the classify fate mix.
+    pub fn hud_line(&self, mats: &[Material]) -> String {
+        let (solid, frac, melt, vap, dec) = self.fate_counts(mats);
+        let ball = match self.ball.as_ref() {
+            Some(b) => format!(
+                "ball {} ({}/{} bonds)",
+                b.body.verdict().to_uppercase(),
+                b.body.agg.active_bonds(),
+                b.body.agg.bonds.len()
+            ),
+            None => String::from("no ball declared"),
+        };
+        format!(
+            "site dynamics: {ball} · parcels {solid} solid / {frac} fractured / {melt} molten / \
+             {vap} vapor{} · boundary delivered {:.2e} J over {} steps · site clock {:.1} s \
+             (real-rate; the celestial clock runs scaled)",
+            if dec > 0 { format!(" / {dec} decomposed") } else { String::new() },
+            self.delivered_j,
+            self.delivered_steps,
+            self.clock_s
         )
     }
 }
@@ -1321,7 +1758,7 @@ mod tests {
             assert_eq!(a.mat, b.mat);
         }
         for (a, b) in before[site.fine_start..].iter().zip(&site.particles[site.fine_start..]) {
-            assert_eq!(a.vel, b.vel, "the fine patch enters no dynamics");
+            assert_eq!(a.vel, b.vel, "the RESAMPLE alone never steps the fine patch");
             assert_eq!(a.u, b.u);
             assert_eq!(a.rho, b.rho);
         }
@@ -1349,6 +1786,221 @@ mod tests {
         }
     }
 
+    /// **The released site enters dynamics and, quiescent, comes to rest** (docs/59, the
+    /// hand-down's remaining core). No boundary arrival: the declared ball FALLS under the
+    /// planet's own gravity, lands on the patch through the one contact law, and RESTS - the
+    /// same fall-rest-stay contract the ground scene's ball test pins - while the patch stays
+    /// put in its bowl. The gauge then settles and the fold conserves the declared mass, so the
+    /// whole out-and-back arc works with dynamics live.
+    #[test]
+    fn the_released_site_steps_quiescently_and_the_ball_falls_to_rest() {
+        let spec = SiteSpec::from_ground_world(&shipped_ground_world()).expect("spec");
+        let mats = materials::load();
+        let mut site = materialize_site(&spec, &HandDown::Declared, &mats).expect("materializes");
+        assert!(
+            matches!(site.release, SiteRelease::Released(_)),
+            "the site releases under the rung's derived bound; dynamics may enter"
+        );
+        let mut dyn_ = SiteDynamics::new(&site, &spec, &mats).expect("released: dynamics enter");
+        assert_eq!(dyn_.ball_verdict(), Some("intact"), "the declared ball starts whole");
+
+        let ball_i0 = site.particles.len() - site.ball_children;
+        let y0 = site.particles[ball_i0..]
+            .iter()
+            .map(|p| p.pos[1] as f64)
+            .sum::<f64>()
+            / site.ball_children as f64;
+
+        // Ten seconds of site time: fall, land, ring down.
+        let mut t = 0.0;
+        while t < 10.0 {
+            t += dyn_.step(&mut site, 1.0 / 60.0, &mats);
+        }
+        let ball_y = |site: &MaterializedSite| {
+            site.particles[ball_i0..]
+                .iter()
+                .map(|p| p.pos[1] as f64)
+                .sum::<f64>()
+                / site.ball_children as f64
+        };
+        let y1 = ball_y(&site);
+        assert!(y1 < y0 - 0.5, "gravity pulls the ball down without help ({y0:.2} -> {y1:.2})");
+        assert!(y1 > -8.0, "and the patch/bowl stops it - it does not fall through the ground");
+
+        // STAYS: two more seconds move it almost nowhere, and it is still intact - its own
+        // landing is far under iron's thresholds (the ground scene's same assertion).
+        let com1 = y1;
+        let mut t2 = 0.0;
+        while t2 < 2.0 {
+            t2 += dyn_.step(&mut site, 1.0 / 60.0, &mats);
+        }
+        assert!((ball_y(&site) - com1).abs() < 0.5, "settled ({com1:.2} -> {:.2})", ball_y(&site));
+        assert_eq!(dyn_.ball_verdict(), Some("intact"), "landing does not shatter iron");
+        let (solid, frac, melt, vap, dec) = dyn_.fate_counts(&mats);
+        assert_eq!(
+            (frac, melt, vap, dec),
+            (0, 0, 0, 0),
+            "no event, no fate change: every parcel classifies Intact ({solid} solid)"
+        );
+
+        // Nothing delivered, and the sync kept the audited mass exactly the declared mass.
+        assert_eq!(dyn_.delivered_j, 0.0);
+        let audit = refine::audit(&site.particles);
+        assert!(
+            (audit.mass - site.declared_mass_kg).abs() <= site.declared_mass_kg * 1.0e-6,
+            "dynamics never create or destroy matter"
+        );
+
+        // The gauge settles on the site's own measured peak speed, and the fold conserves.
+        let g = spec.g_ms2 as f32;
+        let mut gauge = SettleGauge::new();
+        let mut quiet = 0.0f64;
+        while quiet < 60.0 {
+            let adv = dyn_.step(&mut site, 1.0 / 60.0, &mats);
+            gauge.observe(site_peak_speed(&site), g, adv as f32);
+            quiet += adv;
+            if gauge.settled(g) {
+                break;
+            }
+        }
+        assert!(gauge.settled(g), "a quiescent site settles at the docs/61 criterion");
+        let rep = fold_site(&site, &gauge, g).expect("a settled dynamic site folds");
+        assert!(
+            (rep.audit.mass - rep.declared_mass_kg).abs() <= rep.declared_mass_kg * 1.0e-6,
+            "the fold returns exactly the declared mass after real dynamics"
+        );
+    }
+
+    /// **THE DEMO BEAT AT THE SEAM: the celestial event's arriving energy shatters the site's
+    /// ball** (docs/23's sentence at the site; docs/59 decision 2 completed). The guards mirror
+    /// a quiet coarse field, then the field goes hot and fast at moon-impact magnitudes (the
+    /// pi test's ~10 km/s contact: specific KE ~5e7 J/kg, a post-shock u jump of the same
+    /// order); the step-to-step boundary delta is delivered through the ONE door
+    /// (`Aggregate::deposit_impact`, the ground scene's own operator), and the verdicts are
+    /// `damage::classify`'s alone - nothing here asks for destruction. At this energy density
+    /// iron is far past its thresholds, so the ball SHATTERS; if the patch wholesale vaporizes,
+    /// that is the honest outcome and the fate counts say so.
+    #[test]
+    fn a_landed_drops_boundary_energy_shatters_the_sites_ball_by_classify() {
+        let spec = SiteSpec::from_ground_world(&shipped_ground_world()).expect("spec");
+        let mats = materials::load();
+        let mut site = materialize_site(&spec, &HandDown::Declared, &mats).expect("materializes");
+        let mut dyn_ = SiteDynamics::new(&site, &spec, &mats).expect("dynamics enter");
+
+        // Settle the ball onto the patch first, so the hit lands on a RESTING witness.
+        let mut t = 0.0;
+        while t < 8.0 {
+            t += dyn_.step(&mut site, 1.0 / 60.0, &mats);
+        }
+        assert_eq!(dyn_.ball_verdict(), Some("intact"));
+
+        // The same wired frame and coarse-field shape the window test uses.
+        let frame = SiteFrame {
+            origin_rel_m: DVec3::new(6.371e6, 0.0, 0.0),
+            east: DVec3::new(0.0, 1.0, 0.0),
+            up: DVec3::new(1.0, 0.0, 0.0),
+            north: DVec3::new(0.0, 0.0, 1.0),
+        };
+        let coarse = |u: f32, vel: [f32; 3]| -> Vec<SphParticle> {
+            vec![
+                SphParticle { pos: [6.371e6, 0.0, 0.0], h: 1.0e6, vel, u, mass: 2.5e21, mat: 0, rho: 2900.0, prov: 0 },
+                SphParticle { pos: [6.0e6, 8.0e5, 0.0], h: 1.0e6, vel, u, mass: 2.5e21, mat: 0, rho: 2900.0, prov: 0 },
+            ]
+        };
+        let mut window = EventWindow::default();
+
+        // Coarse step 1: the quiet crust before the shock (ambient u, at rest).
+        let quiet = resample_guards(&mut site, &coarse(2.4e5, [0.0; 3]), &frame);
+        window.book(quiet);
+
+        // Coarse step 2: the shock arrives. Moon-drop magnitudes: the ground surges at km/s and
+        // the specific internal energy jumps by ~5e6 J/kg (orders below the ~5e7 J/kg specific
+        // KE of a 10 km/s contact - a CONSERVATIVE share of it reaching this ring of crust).
+        let hot = resample_guards(&mut site, &coarse(5.0e6, [2000.0, -500.0, 800.0]), &frame);
+        let prev = window.last_state();
+        window.book(hot);
+        let delivered = dyn_.deliver_boundary(&prev, &hot, &mats);
+
+        // The delivery is the booked arrival, exactly: m_fine x (d_u + d_ke per kg).
+        let m_fine: f64 = site.particles[site.fine_start..].iter().map(|p| p.mass as f64).sum();
+        let d_u = (hot.internal_j - quiet.internal_j) / hot.mass_kg;
+        let d_ke = (hot.kinetic_j - quiet.kinetic_j) / hot.mass_kg;
+        let expect = m_fine * (d_u + d_ke);
+        assert!(
+            (delivered - expect).abs() <= expect * 1.0e-9,
+            "the door delivers the boundary's booked arrival: {delivered:.4e} vs {expect:.4e}"
+        );
+        assert_eq!(dyn_.delivered_steps, 1);
+
+        // THE VERDICTS ARE CLASSIFY'S. Iron's thresholds are exceeded: the ball shatters.
+        assert_eq!(
+            dyn_.ball_verdict(),
+            Some("shattered"),
+            "the event's energy density is past iron's catalogued thresholds"
+        );
+        let (solid, frac, melt, vap, dec) = dyn_.fate_counts(&mats);
+        println!(
+            "fate at the site: {solid} solid / {frac} fractured / {melt} molten / {vap} vapor / \
+             {dec} decomposed · delivered {delivered:.3e} J"
+        );
+        assert!(
+            solid < (site.particles.len() - site.fine_start) / 2,
+            "most of the site's matter is past Intact - this is a moon landing on it"
+        );
+        assert!(vap + melt > 0, "at these densities some matter melts or vaporizes");
+
+        // Scatter is emergent: a few seconds of site time and the ball is no longer a ball.
+        let ball_i0 = site.particles.len() - site.ball_children;
+        let spread = |site: &MaterializedSite| {
+            let ps = &site.particles[ball_i0..];
+            let com = ps.iter().fold(Vec3::ZERO, |a, p| a + Vec3::from(p.pos)) / ps.len() as f32;
+            ps.iter().map(|p| (Vec3::from(p.pos) - com).length()).fold(0.0f32, f32::max)
+        };
+        let s0 = spread(&site);
+        let mut t2 = 0.0;
+        while t2 < 3.0 {
+            t2 += dyn_.step(&mut site, 1.0 / 60.0, &mats);
+        }
+        assert!(
+            spread(&site) > 2.0 * s0,
+            "the shattered parcels scatter ({s0:.2} m -> {:.2} m)",
+            spread(&site)
+        );
+
+        // Matter is conserved through all of it: the door deposits state, never mass.
+        let audit = refine::audit(&site.particles);
+        assert!(
+            (audit.mass - site.declared_mass_kg).abs() <= site.declared_mass_kg * 1.0e-6,
+            "the event changes fate, not the amount of matter"
+        );
+
+        // And a mid-event site honestly refuses to fold: it is anything but settled.
+        let g = spec.g_ms2 as f32;
+        let mut gauge = SettleGauge::new();
+        gauge.observe(site_peak_speed(&site), g, 0.1);
+        assert!(
+            matches!(fold_site(&site, &gauge, g), Err(SiteRefusal::NotSettled { .. })),
+            "a shattered, flying site stays resolved"
+        );
+    }
+
+    /// **The release gate still stands between an unreleased site and dynamics.** A patch that
+    /// carries the exact split with a stated residual (the rung refused) may render and fold,
+    /// but it may NOT step: `SiteDynamics::new` refuses with the rung's own numbers.
+    #[test]
+    fn an_unreleased_site_is_refused_dynamics_by_the_standing_gate() {
+        let spec = SiteSpec::from_ground_world(&shipped_ground_world()).expect("spec");
+        let mats = materials::load();
+        let mut site = materialize_site(&spec, &HandDown::Declared, &mats).expect("materializes");
+        site.release = SiteRelease::Unreleased { achieved: 4.8e-2, bound: 5.0e-3, iterations: 400 };
+        match SiteDynamics::new(&site, &spec, &mats) {
+            Err(SiteRefusal::Refine(Refusal::NotConverged { achieved, .. })) => {
+                assert_eq!(achieved, 4.8e-2, "the gate quotes the rung's own residual");
+            }
+            other => panic!("an unreleased site must not enter dynamics, got {:?}", other.is_ok()),
+        }
+    }
+
     /// **The fold obeys the docs/61 criterion and conserves.** An unsettled site refuses (stays
     /// resolved, reason stated); after one sustained t_q of quiet the fold releases and the
     /// audit matches the declared mass.
@@ -1369,8 +2021,8 @@ mod tests {
             other => panic!("an unsettled site must refuse to fold, got {other:?}"),
         }
 
-        // The site's own field is at rest (no dynamics this milestone), so feeding the gauge its
-        // real peak speed settles it after one t_q of observed quiet.
+        // The un-stepped site's field is at rest, so feeding the gauge its real peak speed
+        // settles it after one t_q of observed quiet (the dynamic case is its own test).
         let peak = site_peak_speed(&site);
         assert_eq!(peak, 0.0, "the un-stepped site is at rest");
         for _ in 0..200 {
