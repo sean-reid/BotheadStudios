@@ -5,13 +5,14 @@
 // --enable-unsafe-webgpu gets SwiftShader (software). So: headed, default flags, no Xorg, no MESA env.
 //
 // Run:  npx vite --port 5199 &   then   node rig/mac_shot.mjs
-// PORT and OUT work like every other rig (defaults below suit a local Mac session).
+// PORT, OUT and PAGES work like every other rig (defaults below suit a local Mac session);
+// PAGES is a comma-separated page list, e.g. PAGES=orbit.html,terra.html,ground.html.
 import { chromium } from 'playwright';
 import { mkdirSync } from 'node:fs';
 
 const PORT = process.env.PORT || '5199';
 const OUT = process.env.OUT || '/tmp/mac-rig';
-const PAGES = ['orbit.html', 'birth.html', 'ground.html'];
+const PAGES = (process.env.PAGES || 'orbit.html,birth.html,ground.html').split(',');
 mkdirSync(OUT, { recursive: true });
 
 const b = await chromium.launch({ headless: false });

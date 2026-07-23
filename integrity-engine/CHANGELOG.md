@@ -23,6 +23,20 @@ because **we are our own first customers** and pin exact engine versions in our 
   `CohesiveBody::verdict()` names the bond state (all bonds hold / a minority fractured / fewer
   than half survive, the same boundaries the fracture tests assert), and `Ground::body_verdict()`
   exports it to the page.
+- **One Earth serves the orbit and the ground (docs/59 order-of-work item 1).** The world
+  definition owns the body: all three shipped scenes now read `assets/bodies/earth.json` and
+  nothing else for Earth's identity and parameters. The space band's `EARTH_MASS` /
+  `EARTH_RADIUS_M` / `MOON_*` constants are retired for cached reads of the definitions; Terra
+  inherits its radius from the body its world names (`worlds/earth/world.json` no longer carries
+  `radius_m`/`mass_kg`, and a laws scan refuses a planet block that overrides a defined body);
+  and a ground world now declares WHERE on the planet it sits (`lat`/`lon`) and derives its
+  gravity, air pressure AND its material strata from the shared body at that site
+  (`LayeredBody::surface_strata`: materials and order from the body's own layers, band
+  thicknesses a declared log2 vertical LOD, biosphere skin only on land - an ocean site's seabed
+  is the body's own basalt crust). `worlds/ground/world.json` drops its private strata list.
+  Digit-identity across the three paths is pinned by `one_earth_tests::the_three_scenes_read_one_earth`;
+  docs/46 ledger row 16 narrows accordingly. Schema note: `GroundSurface.strata` now defaults to
+  empty = inherited; an explicit column remains declarable for body-less sandboxes.
 
 - **The descent camera holds f32 precision from orbit to standing height (docs/59 item 2).** Terra
   now renders under ONE camera-relative-eye convention (documented in `terra::fly_camera`): every

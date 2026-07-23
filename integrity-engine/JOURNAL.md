@@ -50,6 +50,45 @@ after settling and never "shattered" after the boulder. wasm32 check clean. Watc
 Mac (mac_shot pattern): before the hit the HUD reads "ball INTACT · 33 parcels · 212 bonds"; after
 the 17 km/s meteor it reads "ball SHATTERED · 33 parcels · 0 bonds" over the scattered parcels,
 and both words are legible at a glance.
+## 2026-07-23: one Earth serves the orbit and the ground
+
+**What.** The three shipped scenes stopped carrying private Earths (docs/59 order-of-work item 1;
+docs/46 ledger row 16). The ownership call, made provisionally: the WORLD DEFINITION owns the body
+(docs/43's direction) - `assets/bodies/earth.json` is the one record of Earth's orbital parameters,
+layered matter and surface sources, and a scene only PLACES it and asks for a representation.
+Concretely: the space band's `EARTH_MASS`/`EARTH_RADIUS_M`/`MOON_MASS`/`MOON_RADIUS_M` constants
+(and the `DISPLAY_SCALE` const derived from one) are gone from `lib.rs`, replaced by cached reads
+of the definitions; Terra's radius resolves from the body its world names
+(`declared_planet_radius`, natively tested), and `worlds/earth/world.json` no longer declares
+`radius_m`/`mass_kg`; the ground world declares WHERE it sits (`lat: 45, lon: -100` in
+`worlds/ground/world.json`) and inherits g, air pressure and its material column from the shared
+body at that site - `LayeredBody::surface_strata` derives the strata from the body's own layers
+(order real, adjacent same-material shells collapsed, band thickness = log2 of the real thickness
+as a declared vertical LOD, flagged; grass skin on land only, so an ocean site's seabed is the
+body's own basalt crust). The hand-written default column in `GroundSurface::default_strata` and
+the duplicate one inside `world::generate` are both deleted; `generate` now resolves the same
+derivation every ground world gets.
+
+**Why.** The demo needs the ball resting on the same body the Moon hits - one body owning both its
+orbital presence and its local surface patch is the prerequisite for the materialization trigger
+and the descent hand-off (docs/59 items 2 to 5). Two representations of "Earth" that merely agree
+numerically will drift; one definition read three ways cannot (Law II). This also answers docs/59's
+open question of which representation owns the shared Earth, provisionally and reversibly: the
+data definition owns it, scenes hold no copy.
+
+**Verified.** Red first: `one_earth_tests::the_three_scenes_read_one_earth` (digit-identity of
+radius, mass and surface g across the space-band instance, the shipped Terra world and the shipped
+ground world) and
+`simulation::tests::the_ground_column_and_gravity_derive_from_the_shared_earth_at_the_declared_site`
+both failed against the old world files, then passed once the private copies were deleted. The
+laws scans keep it true: `a_scene_module_carries_no_copy_of_a_body_parameter` (zero hits for the
+four body literals in scene modules, comments and test fixtures stripped) and the planet-block
+extension of `no_scene_body_overrides_the_physics_of_the_body_it_names`. Full native suite
+367/367 green; wasm32 check clean (same warning count as baseline). Headed-Chromium screenshots
+of orbit.html, terra.html and ground.html: Earth renders in all three; the ground patch's
+visible change is the derived column - a grass biosphere skin over Earth's own crust, mantle and
+core replaces the former sand/gravel/dirt sandbox list the world file carried (the strata
+sequence itself is asserted in tests).
 
 ## 2026-07-23: the descent camera holds precision from orbit to the ground
 
