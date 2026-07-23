@@ -203,8 +203,8 @@ fn declared_body_radius(d: &crate::terra::world_def::BodyDef) -> f64 {
 /// **The live resolution-crossing check** (the wiring the SPH assembly primitive exists for): the first
 /// eligible body whose separation from the planet is inside `accretion::resolution_distance` (the point
 /// where tidal stress makes "two point masses" a lie), plus its body-centric (offset, relative velocity)
-/// in f64 SI. That pair is exactly what `gpu_sph::assemble_from_relaxed_at` takes: TARGET-relative,
-/// never heliocentric (f32 collapses at 1.5e11 m).
+/// in f64 SI. That pair is exactly what the impactor's `gpu_sph::BodyPlacement` carries into
+/// `assemble_from_relaxed_n`: TARGET-relative, never heliocentric (f32 collapses at 1.5e11 m).
 ///
 /// `planet` is the index of the body the scene declared as its planet, found by ROLE by the caller
 /// (docs/58): no `bodies[1]=Earth` layout assumption, so a scene that ordered its bodies differently is
@@ -936,7 +936,7 @@ mod app {
         sph_phase: SphPhase,
         /// **A LIVE de-orbit the SPH machine owns** (the live de-orbit hand-off): `Some(i)` once `bodies[i]` crossed
         /// `accretion::resolution_distance` and was handed to the SPH. `Assembling` then places the
-        /// collision on the body's REAL (offset, velocity) via `assemble_from_relaxed_at`, instead of
+        /// collision on the body's REAL (offset, velocity) via `assemble_from_relaxed_n`, instead of
         /// birth's imposed canonical approach; the CPU detect/materialization path skips the body,
         /// which is matter-in-waiting now, not a point mass to crater with. `None` on the declared
         /// (`start_gpu_impact`) path.
@@ -2219,7 +2219,7 @@ mod app {
         /// [`Self::start_gpu_impact`], with the differences that ARE the point: each body is PARTICALIZED
         /// from its own declared matter (docs/58), not from a named impact definition, and the bodies keep
         /// flying their real N-body trajectory (nothing truncates or re-aims them); `Assembling` reads that
-        /// trajectory at assembly time via `assemble_from_relaxed_at`.
+        /// trajectory at assembly time via `assemble_from_relaxed_n`.
         fn start_live_drop_sph(&mut self, i: usize) {
             // Each colliding body's SPH particles are built from its OWN matter (docs/58): `particalize`
             // reads the layered composition the scene declared per body (`BodyMeta.matter`), so the
@@ -2242,19 +2242,21 @@ mod app {
             const LIVE_TARGET_N: usize = 2400;
             let m_particle = t_matter.total_mass() / LIVE_TARGET_N as f64;
             let n_impactor = ((i_matter.total_mass() / m_particle).round() as usize).max(50);
-            let target = crate::hydrostatic::HydroBody::particalize(&t_matter, LIVE_TARGET_N);
-            let impactor = crate::hydrostatic::HydroBody::particalize(&i_matter, n_impactor);
-            // The relax staging separation is the same declared knob the birth path reads (default:
-            // far enough that mutual gravity is negligible while each body settles under its own).
-            let far = self.impact_def.relax_separation * (t_matter.radius() + i_matter.radius());
-            // The GPU kernel resolves the N-material matter onto its two EOS slots (basalt-like vs
-            // iron-like, by reference density, in `push_body`), a flagged resolution limit of the
-            // in-browser stepper; the per-particle mass, geotherm and smoothing lengths stay the
-            // matter's own. The pair is kept in `sph_eos` so the `Assembling` re-upload carries the
-            // same table the particles' `mat` indices point into.
-            self.sph_eos = vec![crate::gpu_sph::SphEos::basalt(), crate::gpu_sph::SphEos::iron()];
-            let (particles, softening, relax_dt) =
-                crate::gpu_sph::far_apart_pair(&target, &impactor, far);
+            // The generic N-body relax input (docs/58, the same builder the birth path uses):
+            // `build_far_apart_n` particalizes each body from its own matter and dedups every
+            // layer's catalogue EOS into ONE shared material table the shader indexes per particle,
+            // so the matter reaches the GPU as itself. The old collapse onto two fixed slots
+            // (basalt-like vs iron-like by reference density) is gone from this path. The staging
+            // separation is the same declared knob the birth path reads; the generic builder spaces
+            // adjacent bodies by that multiple of the largest body's diameter, so the pair sits at
+            // least as far apart as the old contact-radius staging did. The table is kept in
+            // `sph_eos` so the `Assembling` re-upload carries the same table the particles' `mat`
+            // indices point into.
+            let (particles, eos, softening, relax_dt) = crate::gpu_sph::build_far_apart_n(
+                &[(&t_matter, LIVE_TARGET_N), (&i_matter, n_impactor)],
+                self.impact_def.relax_separation,
+            );
+            self.sph_eos = eos;
             self.sph_soft = softening as f64;
             let cap = particles.len() as u32;
             let mut sph = crate::gpu_sph::GpuSph::new(&self.device, cap);
@@ -2431,38 +2433,59 @@ mod app {
                     SphPhase::Assembling => {
                         let relaxed = self.gpu_sph.as_mut().and_then(|s| s.take_readback());
                         if let Some(relaxed) = relaxed {
-                            // Two honest geometry sources, one primitive (`assemble_from_relaxed_at`):
-                            // a LIVE de-orbit hands over the trajectory the N-body actually integrated,
+                            // Two honest geometry sources, one primitive (`assemble_from_relaxed_n`,
+                            // which the declared path's 2-body convenience delegates to): a LIVE
+                            // de-orbit hands over the trajectory the N-body actually integrated,
                             // read at assembly time; the declared birth impact keeps its imposed
                             // canonical approach (free-fall from rest gives the wrong one). Either way
                             // the reposition changes no materials: each particle carries its own `mat`
-                            // into `self.sph_eos`, the table kept from the relax staging, so the legacy
-                            // pair the 2-body assembly returns is ignored.
-                            let (particles, _eos, softening, dt) = match self.sph_live_drop {
+                            // into `self.sph_eos`, the table kept from the relax staging.
+                            let (particles, softening, dt) = match self.sph_live_drop {
                                 Some(i) => {
                                     // Body-centric f64 SI, never heliocentric (f32 collapses at 1.5e11 m).
                                     // The target is the body the scene declared as its PLANET, by role.
                                     let p = self.planet_idx();
                                     let offset = self.bodies[i].pos - self.bodies[p].pos;
                                     let rel_vel = self.bodies[i].vel - self.bodies[p].vel;
-                                    // The target's spin rate from its angular momentum: omega = L/I with
-                                    // the moment of inertia EMERGENT from the body's own layered matter
-                                    // (docs/58) -- the same inertia the rotation and the HUD read, so the
-                                    // spin handed to the SPH matches the day length the scene declared.
-                                    // The primitive spins about +z, so the z component is the rate it
-                                    // takes.
+                                    // The target's spin VECTOR from its angular momentum: omega = L/I
+                                    // with the moment of inertia EMERGENT from the body's own layered
+                                    // matter (docs/58) -- the same inertia the rotation and the HUD
+                                    // read, so the spin handed to the SPH matches the day length the
+                                    // scene declared. The assembly takes any-axis omega, so the whole
+                                    // vector goes over, not a +z projection.
                                     let target_i = self.spin_inertia();
-                                    let target_spin =
-                                        if target_i > 0.0 { self.spin_l.z / target_i } else { 0.0 };
-                                    // impactor_spin = 0.0 is a Law V IOU: the engine keeps no per-body
-                                    // spin state (only Earth's `spin_l`), so the moon's own rotation
-                                    // cannot be handed over. The real computation this defers: per-body
+                                    let target_omega = if target_i > 0.0 {
+                                        self.spin_l / target_i
+                                    } else {
+                                        glam::DVec3::ZERO
+                                    };
+                                    // The impactor's omega = ZERO is a Law V IOU, NARROWED: the
+                                    // assembly now takes a per-body spin vector about any axis, but
+                                    // the engine still keeps no per-body spin state (only the
+                                    // planet's `spin_l`), so the impactor's own rotation cannot be
+                                    // handed over yet. The real computation this defers: per-body
                                     // spin angular momentum carried in the N-body state.
-                                    crate::gpu_sph::assemble_from_relaxed_at(
-                                        &relaxed, target_spin, offset, rel_vel, 0.0,
-                                    )
+                                    let placements = [
+                                        crate::gpu_sph::BodyPlacement {
+                                            offset: glam::DVec3::ZERO,
+                                            vel: glam::DVec3::ZERO,
+                                            spin: target_omega,
+                                        },
+                                        crate::gpu_sph::BodyPlacement {
+                                            offset,
+                                            vel: rel_vel,
+                                            spin: glam::DVec3::ZERO,
+                                        },
+                                    ];
+                                    crate::gpu_sph::assemble_from_relaxed_n(&relaxed, &placements)
                                 }
-                                None => crate::gpu_sph::assemble_from_relaxed_with(&self.impact_def, &relaxed),
+                                None => {
+                                    // The legacy pair the 2-body assembly returns is ignored here:
+                                    // the kept `sph_eos` table is what the `mat` indices point into.
+                                    let (particles, _eos, softening, dt) =
+                                        crate::gpu_sph::assemble_from_relaxed_with(&self.impact_def, &relaxed);
+                                    (particles, softening, dt)
+                                }
                             };
                             self.sph_soft = softening as f64;
                             self.sph_dt = dt; // the SMALL shock dt (resolves the collision)
@@ -4828,8 +4851,8 @@ mod tests {
     /// **A live body crossing its resolution distance is the engine's cue to resolve it as matter**
     /// (the cue to resolve it as matter): the check must report the FIRST eligible body inside
     /// `accretion::resolution_distance` of the planet, together with the exact body-centric
-    /// (offset, relative velocity) pair: the same f64 SI numbers `assemble_from_relaxed_at` will
-    /// receive. Body-centric, never heliocentric (f32 collapses at 1.5e11 m). The planet is passed
+    /// (offset, relative velocity) pair: the same f64 SI numbers the impactor's `BodyPlacement`
+    /// hands `assemble_from_relaxed_n`. Body-centric, never heliocentric (f32 collapses at 1.5e11 m). The planet is passed
     /// by the index its declared ROLE resolves to (docs/58), never assumed to sit at index 1, and a
     /// permuted body order must report the same crossing with the same geometry.
     #[test]

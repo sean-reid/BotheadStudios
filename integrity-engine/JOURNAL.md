@@ -3,6 +3,39 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-23: the live drop joins the generic collision engine, and one IOU dies
+
+**What.** The live de-orbit hand-off is adapted to the generic N-body primitives (docs/58).
+Staging: `start_live_drop_sph` builds its relax input with `build_far_apart_n`, the same call the
+declared birth path now makes, keeping the engine's 2400-particle budget at one particle mass
+across the system with the 50-particle small-body floor. Every layer's own catalogue EOS reaches
+the shader through the shared N-material table kept in `sph_eos`, so the flagged two-EOS collapse
+(N-material matter resolved onto basalt-like vs iron-like slots by reference density in
+`push_body`) is DEAD on the live path; `far_apart_pair`/`push_body` remain only under the legacy
+declared builders and the native tests that pin them. Assembly: the live `Assembling` arm places
+the collision with `assemble_from_relaxed_n` on the trajectory the N-body actually integrated,
+handing the target's spin over as the full vector `omega = L/I` from the emergent inertia, any
+axis, where the old primitive took only a +z scalar rate. The impactor's spin stays a zero
+vector, a Law V IOU NARROWED at the site: the assembly accepts per-body vector spin now, and what
+is still missing is per-body spin state in the N-body integrator (only the planet's `spin_l`
+exists), so the impactor's own rotation still cannot be handed over. The declared birth arm is
+unchanged.
+
+**Why.** Robin built the generic primitives (N-material upload, `SphAssembly`,
+`assemble_from_relaxed_n`, `build_far_apart_n`) and moved birth onto them; leaving the live drop
+on the two-slot, +z-scalar path would have been the same physical question answered two ways
+(docs/46). One collision engine, both entrances.
+
+**Verified.** New `a_live_drop_assembles_n_materials_on_its_own_geometry` pins the whole live
+chain: generic staging to a shared table of at least three materials, every `mat` still a valid
+index after assembly, both bodies at their matter's real mass, the impactor exactly on its live
+(offset, relative velocity), and an off-axis spin component reaching the target's velocities.
+The crossing and live-geometry contracts stay green
+(`a_body_crossing_its_resolution_distance_is_reported_with_its_live_geometry`,
+`assemble_at_honours_a_given_live_geometry`, `a_particalized_pair_stages_far_apart_at_real_mass`).
+Full native suite 349/349 green; `cargo check --target wasm32-unknown-unknown -p engine` clean.
+fmt untouched (hand-edited).
+
 ## 2026-07-23: birth builds through the generic engine
 
 **What.** The declared birth path consumes the generic collision engine (docs/58 item 7),

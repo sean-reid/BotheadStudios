@@ -9,6 +9,18 @@ because **we are our own first customers** and pin exact engine versions in our 
 
 ## [Unreleased]
 
+- **The live de-orbit hand-off runs on the generic N-body primitives; its two-EOS collapse is dead
+  (docs/58).** `start_live_drop_sph` stages the colliding pair with `build_far_apart_n`, the same
+  builder the declared birth path uses, so each body's layers reach the GPU with their own catalogue
+  EOS through the shared N-material table kept in `sph_eos`; the flagged collapse onto two fixed
+  slots (basalt-like vs iron-like by reference density) no longer happens on this path. The live
+  `Assembling` arm places the collision with `assemble_from_relaxed_n`: the target's spin is handed
+  over as the FULL vector `omega = L/I` (any axis, no +z projection), and the impactor's spin stays
+  a zero vector as a narrowed Law V IOU (the assembly accepts per-body vector spin now; what is
+  still missing is per-body spin state in the N-body integrator, which keeps only the planet's
+  `spin_l`). The declared birth path is untouched by the arm change (it already ignores the legacy
+  pair and re-uploads the kept table).
+
 - **The declared birth impact builds through the generic engine (docs/58 item 7).**
   `start_gpu_impact` no longer builds its bodies through the Earth/Theia-shaped
   `build_far_apart_from` with the fixed `[basalt, iron]` pair: it particalizes each body from its

@@ -1317,4 +1317,59 @@ mod impact_geometry_tests {
         let sep = (com(1) - com(0)).length();
         assert!(sep > 10.0 * earth.radius(), "bodies placed far apart for relax (sep {sep:.2e})");
     }
+
+    /// **The LIVE hand-off's whole chain: generic staging, then assembly on a live geometry, N materials
+    /// end to end (docs/58 #7).** Stage a particalized pair with `build_far_apart_n` (the same call the
+    /// live de-orbit makes, equal particle mass with the small-body floor), then place it with
+    /// `assemble_from_relaxed_n` on a live (offset, relative velocity) with a vector target spin. The
+    /// shared EOS table built at staging survives the assembly untouched (the reposition changes no
+    /// materials, every `mat` still indexes it), both bodies keep their matter's real mass, the impactor
+    /// lands exactly on its live geometry, and an off-axis component of the target's spin reaches its
+    /// velocities. Earth and Luna are test FIXTURES; nothing here reads a name. This pins the contract
+    /// the scene's live `Assembling` arm relies on.
+    #[test]
+    fn a_live_drop_assembles_n_materials_on_its_own_geometry() {
+        let (e_matter, m_matter) = (crate::planet::earth(), crate::planet::moon());
+        let n_t = 800usize;
+        let m_particle = e_matter.total_mass() / n_t as f64;
+        let n_i = ((m_matter.total_mass() / m_particle).round() as usize).max(50);
+        let (staged, eos, softening, relax_dt) =
+            build_far_apart_n(&[(&e_matter, n_t), (&m_matter, n_i)], 40.0);
+        assert!((3..=MAX_MATERIALS).contains(&eos.len()), "a shared N-material table (got {})", eos.len());
+        assert!(softening > 0.0 && relax_dt > 0.0, "usable relax parameters");
+
+        // A live approach the N-body integrator might hand over, plus a target spin whose axis is NOT
+        // +z (the live spin is omega = L/I, a full vector).
+        let offset = DVec3::new(1.5e7, 3.0e6, 0.0);
+        let rel_vel = DVec3::new(-9000.0, 500.0, 0.0);
+        let placements = [
+            BodyPlacement { offset: DVec3::ZERO, vel: DVec3::ZERO, spin: DVec3::new(2.0e-5, 0.0, 7.0e-5) },
+            BodyPlacement { offset, vel: rel_vel, spin: DVec3::ZERO },
+        ];
+        let (out, _, _) = assemble_from_relaxed_n(&staged, &placements);
+
+        // The assembly repositions; the materials ride the particles.
+        assert_eq!(out.len(), staged.len(), "no particle lost on the hand-off");
+        assert!(out.iter().all(|p| (p.mat as usize) < eos.len()), "every mat still indexes the kept table");
+        let (tc, tm, _) = body_bulk(&out, 0);
+        let (ic, im, _) = body_bulk(&out, 1);
+        assert!(
+            (tm - e_matter.total_mass()).abs() / e_matter.total_mass() < 0.02,
+            "target keeps its matter's real mass (got {tm:.3e})"
+        );
+        assert!(
+            (im - m_matter.total_mass()).abs() / m_matter.total_mass() < 0.03,
+            "impactor keeps its matter's real mass (got {im:.3e})"
+        );
+        assert!((ic - tc - offset).length() < 0.02 * e_matter.radius(), "impactor on the live offset");
+        let mean_vel = |prov: u32| -> DVec3 {
+            let ps: Vec<&SphParticle> = out.iter().filter(|p| p.prov == prov).collect();
+            let mm: f64 = ps.iter().map(|p| p.mass as f64).sum();
+            ps.iter().map(|p| DVec3::new(p.vel[0] as f64, p.vel[1] as f64, p.vel[2] as f64) * p.mass as f64).sum::<DVec3>() / mm
+        };
+        assert!((mean_vel(1) - mean_vel(0) - rel_vel).length() < 1.0, "impactor carries the live relative velocity");
+        // The spin's x component gives target particles a vz no +z-only spin could produce.
+        let max_vz = out.iter().filter(|p| p.prov == 0).map(|p| p.vel[2].abs()).fold(0.0f32, f32::max);
+        assert!(max_vz > 1.0, "the off-axis spin component reaches the target (max vz {max_vz})");
+    }
 }
