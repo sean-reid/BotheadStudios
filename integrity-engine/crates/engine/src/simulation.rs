@@ -193,7 +193,7 @@ impl Simulation {
     /// Build from a parsed `"ground"` world. The voxel world is the procedural surface patch; the
     /// definition declares the observer, the gravity the analytic effects fall under, and the events.
     pub fn from_definition(def: &WorldDef, materials: Vec<Material>) -> Result<Self, String> {
-        let ground = def
+        let mut ground = def
             .ground
             .clone()
             .ok_or_else(|| "not a ground world: no `ground` block".to_string())?;
@@ -208,6 +208,10 @@ impl Simulation {
         let planet_radius = planet.radius();
         let planet_mass = planet.total_mass();
         let surface_g = planet.gravity_at(planet_radius) as f32;
+        // The COLUMN the patch digs through comes from the same body, at the declared site (docs/59):
+        // a world says WHERE it sits; the skin and strata derive from the shared definition unless the
+        // world declared an explicit sandbox column.
+        ground.surface.resolve_strata(&planet, ground.lat, ground.lon);
         let world = crate::world::generate_from(&ground.surface, &materials);
         // **The patch belongs to the planet.** Without this the field is the patch's own self-gravity —
         // measured at 0.000214 m/s² against this planet's 9.8808, one forty-six-thousandth of Earth — and
@@ -410,6 +414,12 @@ impl Simulation {
     /// The declared surface (skin) material id — what you are standing on.
     pub fn surface_material(&self) -> &str {
         self.def.surface.strata.first().map(|s| s.material.as_str()).unwrap_or("?")
+    }
+    /// The RESOLVED material column, top-down - inherited from the placed body at the declared site
+    /// unless the world declared a sandbox column. Exposed so "the ground is the shared Earth" is
+    /// measurable, not asserted.
+    pub fn strata(&self) -> &[crate::terra::world_def::Stratum] {
+        &self.def.surface.strata
     }
     /// Did matter change the world since the last call (a crater dug, grains de-resolved)? Drives remesh.
     pub fn take_dirty(&mut self) -> bool {
@@ -860,6 +870,46 @@ mod tests {
 
     fn mats() -> Vec<Material> {
         crate::materials::load()
+    }
+
+    /// **Ledger row 16, the ground half** (docs/59 order-of-work 1): a ground world declares WHERE on
+    /// the shared Earth it sits, and its gravity AND its material column both derive from the one body
+    /// definition at that site. No strata list exists in the world file; deleting the private copy
+    /// broke nothing because nothing reads one.
+    #[test]
+    fn the_ground_column_and_gravity_derive_from_the_shared_earth_at_the_declared_site() {
+        let earth = crate::planet::earth();
+        // A LAND site: biosphere skin, then Earth's own layers, top-down.
+        let sim = Simulation::from_json(
+            r#"{"name":"g","type":"ground","ground":{"lat":45.0,"lon":-100.0}}"#, mats())
+            .expect("builds");
+        let names: Vec<&str> = sim.strata().iter().map(|s| s.material.as_str()).collect();
+        let mut from_layers: Vec<String> =
+            earth.layers.iter().rev().map(|l| l.material.clone()).collect();
+        from_layers.dedup();
+        assert_eq!(
+            names[1..].to_vec(),
+            from_layers.iter().map(String::as_str).collect::<Vec<_>>(),
+            "the column under the skin IS the definition's layer stack"
+        );
+        assert_eq!(names[0], "grass", "a land site wears the biosphere skin");
+        // An OCEAN site from the same body: the crust is the seabed, no skin.
+        let ocean = Simulation::from_json(
+            r#"{"name":"o","type":"ground","ground":{"lat":0.0,"lon":-150.0}}"#, mats())
+            .expect("builds");
+        assert_eq!(ocean.strata()[0].material, "basalt", "sea floor is the body's own crust");
+        // Gravity and the planet's bulk parameters are the definition's, to the digit.
+        assert_eq!(sim.planet_radius_m(), earth.radius());
+        assert_eq!(sim.planet_mass_kg(), earth.total_mass());
+        assert_eq!(sim.gravity_ms2(), earth.gravity_at(earth.radius()) as f32);
+        // And the SHIPPED ground world carries no private column: it inherits this same derivation.
+        let shipped = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../web/public/worlds/ground/world.json"))
+            .expect("shipped ground world");
+        assert!(!shipped.contains("\"strata\""),
+            "worlds/ground/world.json must not carry a private strata list - the body answers");
+        let s = Simulation::from_json(&shipped, mats()).expect("shipped world builds");
+        assert!(!s.strata().is_empty(), "the shipped world's column is inherited, not absent");
     }
 
     /// **Ledger row 15, paid.** An impact declared in DATA must reach `MatterSim` and make real
