@@ -3,6 +3,46 @@
 A running log of major milestones for the Integrity engine. Newest entries at the top.
 Each entry records *what* changed, *why*, and *how it was verified*.
 
+## 2026-07-22: orbital debris self-gravity dispatches to the GPU above a measured knee
+
+**What.** The verified GPU direct-sum gravity kernel is now the live self-gravity path for large
+debris clouds. `gpu_gravity` gains `GravityField`: the `cs_gravity_direct` pipeline bound to the
+device and queue it runs on (cloned handles of the scene's SHARED device, the `gpu_sph` pattern,
+never a second adapter). `Aggregate` carries an optional `GravityField`, and `accelerations_masked`
+shunts the self-gravity of any pass whose gravity-ACTIVE count is at or above
+`gpu_gravity::DIRECT_SUM_KNEE` to the exact GPU sum; below the knee, with no field attached, or
+while a browser dispatch is in flight, the θ=0.5 CPU tree stands unchanged. The knee gates on the
+active count because under a block-timestep mask the CPU tree only evaluates the active subset:
+gating on total N paid a full GPU round trip to replace microseconds of traversal on the
+few-particle sub-ticks (measured below). `OrbitDemo` attaches the field when a swept impact
+materialises its debris cloud; an absorbed second impact joins the first cloud's field. Natively the
+dispatch is synchronous and exact at the pass's own positions. In the browser, where WebGPU forbids
+blocking, it is the engine's two-phase read-back: a pass harvests the previously submitted field
+(one submission old, the same class of deferral step_block already accepts when a coasting particle
+keeps its last kick's acceleration) and the CPU tree covers passes with nothing landed, so no pass
+blocks and none goes without gravity.
+
+**Why.** The moon-drop bottleneck measurement found 64% of the debris accel pass in a single-thread
+CPU tree walk while the exact parallel sum it approximates sat verified on the GPU, wired into
+nothing. Self-gravity is a per-particle N-body force; the engine's stated architecture is to shunt
+each job to the processor that handles it best by a MEASURED knee. The direct sum has no multipole
+error, so above the knee this is higher fidelity and higher speed at once.
+
+**Verified.** On this box (Apple M4 Max, Metal): `gpu_gravity_matches_the_cpu_direct_sum` passes
+(worst per-particle relative error under the 1e-3 bound); the new
+`the_aggregate_dispatch_matches_the_cpu_tree_within_the_theta_bound` pins the dispatched field to
+the CPU tree within RMS relative 1e-2, the same bound `tools/gpu-bh-verify` enforces between tree
+and direct sum (that harness itself requests a Vulkan adapter and cannot run on this Mac; the
+in-crate tests carry the bound here); the new
+`below_the_knee_the_cpu_path_stands_even_with_a_field_attached` pins the gate by bitwise identity.
+`gpu_gravity_speedup` (now sweeping N=200..6000 against the tree's true per-pass build+eval cost):
+GPU round trip ~1.3 ms and nearly flat, CPU crosses it between N=400 (0.5x) and N=750 (1.9x), then
+GPU 1.5x at N=2000, 1.7x at N=3000, 3.6x at N=6000; the knee interpolates to ~550 and is set at
+600, on the CPU-favoured side of both measured boxes. End to end, `debris_step_scaling` with the
+dispatch attached: accel pass at N=3000 15.2 ms to 7.0 ms (2.2x), full step_block frame 117 ms to
+78 ms (1.5x); at N=1500, 31.5 ms to 24.4 ms. Full native suite 335/335 green (the two new GPU tests
+included); wasm32-unknown-unknown check clean. fmt untouched (hand-edited).
+
 ## 2026-07-22: the live moon-drop wiring reads the generic body
 
 **What.** The live-drop path reconciled with the docs/58 realignment. `live_resolution_crossing`
