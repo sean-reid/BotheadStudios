@@ -61,6 +61,53 @@ m/s); the verdict flips to "ball SHATTERED (0/72 bonds)" with the fate mix runni
 "272 vapor" and "boundary delivered 1.12e14 J over 18 steps" - the moon-drop's energy density
 vaporizes the whole patch, which is the honest outcome, reported as such. Zero console errors
 across the arc.
+## 2026-07-23: the descent corridor stops running out of pixels
+
+**What.** The space band's side of the close-range render, reused rather than re-invented.
+The one surface sampler now has a name (`terra::globe_mesh::SurfaceSampler`): the globe mesh
+builder, Terra's ground cap and the new corridor cap all read a body's surface through it, so
+no two renders of one body can disagree about its continents or elevation. On the Ground Zero
+descent, once the arc drops below the derived hand-off altitude the scene fills the same
+`terra::ground_cap` patch Terra flies over, in the crust frame around the sub-camera point,
+and draws it through the globe's own conventions (same view projection, the spin as the model
+rotation, the eye re-added as an f64-built translation), cross-faded over the coarse globe and
+replacing it outright once the cap covers the view past the horizon. The hand-off is derived
+from the raster's own resolution: `ground_cap::handoff_alt_m(texel, budget)` is
+`site::view_resolution_distance` asked about one texel, the altitude where one texel of the
+finest shipped raster subtends the same angular budget the site materialization threshold
+uses, about 19,500 km for the shipped 2048x1024 Earth rasters; `Raster::texel_arc_m` supplies
+the texel. The fade spans the first octave of deficit; Terra reads the identical derivation and
+its declared 40 km / 15 km cap constants are retired; the cap's depth lift became
+altitude-proportional (the old 20 m ceiling lost the depth fight once the fade band's top
+became thousands of kilometres instead of a declared 40 km).
+
+**Why.** A user test on Ground Zero: the globe blurs when zoomed in. The space band textured
+its Earth from planetary-scale rasters through a 192-per-face-edge mesh, so on the descent the
+data was exhausted and the renderer stretched it, and the out-and-back arc flies straight
+through that corridor. Terra already owned the cure (the cube-sphere cap and the material
+relief), and one body definition serves both scenes, so the fix is reuse behind one derived
+hand-off, not a second close-range path. Where even the finest raster is out of texels (the
+known missing finer LOD tier), those texels at their true size plus the material relief are
+the honest floor; blur is not.
+
+**Verified.** 405 native tests green (400 baseline plus 5: the hand-off derivation pinned to
+the shipped raster size and to `view_resolution_distance` itself, the finest-raster rule, the
+one-octave fade, the covers-past-the-horizon skip rule, the proportional lift against the
+depth buffer's own resolution, the raster texel arc). wasm32 check clean. Headed on the Mac
+(mac_shot pattern, port 7299, `web/rig/mac_corridor.mjs` on /groundzero.html): the arc flown
+by its own control and screenshotted at celestial, ~5,000 km, ~500 km, ~50 km and the 1.4 km
+low hold; the rig pixel-checks the mid-corridor frame and re-flies the out-and-back when the
+site arrives on the night side (the crust phase at arrival is real physics under the
+compressed approach, and a black night ground verifies nothing), first daylit arrival on
+flight two. Viewed: at 5,000 km the coastlines resolve where the old render smeared vertex
+colours; at 500 km and 50 km the biome texels hold their true size and the coast stays a
+line; at the low hold the ground is a clean lit surface under the site's fine matter. Zero
+console errors. Terra re-verified across its seven descent stations (`mac_descent.mjs`, the
+raster's texel blocks now honestly visible from orbit where the old globe smoothed them) and
+all six scenes smoke clean. Known seams, stated: the cap's outer boundary is visible mid-band
+as a fine-to-coarse data edge (and near the terminator the lift advances daybreak slightly at
+high altitude), and at the 1.4 km floor the 8 m relief tiles span ~6 px, so mip filtering
+averages the mottle nearly flat: the finer LOD tier remains the missing rung.
 
 ## 2026-07-23: the drop arms for the launch window, not the instant
 

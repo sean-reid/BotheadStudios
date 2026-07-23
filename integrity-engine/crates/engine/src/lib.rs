@@ -942,6 +942,15 @@ mod app {
         globe_pipeline: wgpu::RenderPipeline,
         globe_mesh: Option<GpuMesh>,
         globe_uni: UniformSlot,
+        /// **The descent corridor's fine ground cap** — the SAME close-range treatment Terra
+        /// renders (terra::ground_cap + the shared SurfaceSampler + the same alpha-blend globe
+        /// shader), picked up by this scene once the arc descends below the derived hand-off
+        /// altitude, where one texel of the planetary rasters exceeds the angular budget and the
+        /// coarse globe would otherwise stretch them across the view.
+        cap_pipeline: wgpu::RenderPipeline,
+        cap_gpu: GpuMesh,
+        cap_uni: UniformSlot,
+        cap_verts: Vec<Vertex>,
         earth_surface: Option<EarthSurface>,
         /// GEOLOGIC time-LOD (docs/27): once the aftermath is quiet, each settled clump IS one body
         /// (orbital elements), evolved by the validated secular tidal law — millennia per real second.
@@ -1242,6 +1251,17 @@ mod app {
             let globe_pipeline =
                 build_globe_pipeline(&device, &bind_layout, config.format, wgpu::BlendState::REPLACE);
             let globe_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
+            // The descent corridor's ground cap: Terra's exact recipe — the same shader, alpha-blended
+            // for the cross-fade, a writable vertex buffer rebuilt per frame over a fixed topology.
+            let cap_pipeline =
+                build_globe_pipeline(&device, &bind_layout, config.format, wgpu::BlendState::ALPHA_BLENDING);
+            let cap_gpu = make_dynamic_mesh(
+                &device,
+                "corridor-cap",
+                CAP_RES * CAP_RES,
+                &crate::terra::ground_cap::cap_indices(CAP_RES),
+            );
+            let cap_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             // GPU SPH deformable-Earth impact (stage 4c.4): its instanced-particle pipeline + a camera
             // uniform (reuses the uniform-only `bind_layout`; the buffer is sized for `SphCam`).
             // The SPH particle render is NOT a textured surface — it draws particles from the physics
@@ -1394,6 +1414,10 @@ mod app {
                 globe_pipeline,
                 globe_mesh: None,
                 globe_uni,
+                cap_pipeline,
+                cap_gpu,
+                cap_uni,
+                cap_verts: Vec::new(),
                 earth_surface: None,
                 interior_tint,
                 interior_glow,
@@ -3770,6 +3794,116 @@ mod app {
                     },
                 );
             }
+            // **The descent corridor picks up Terra's close-range treatment.** Below the DERIVED
+            // hand-off altitude the planetary rasters no longer fill the view — one texel exceeds
+            // the docs/49 angular budget, the same budget the site materialization threshold uses —
+            // so this scene builds the SAME fine ground cap Terra builds (`terra::ground_cap`), from
+            // the SAME sampler the globe mesh is built from, cross-faded in by the SAME derived
+            // fade; the coarse globe is skipped only once the cap covers the view past the horizon.
+            // Where even the finest raster is exhausted (the known missing finer LOD tier), the
+            // cap's raster texels at their true size plus globe.wgsl's material relief mottle are
+            // the honest floor — stretching would be blur pretending to be data.
+            //
+            // The cap's vertices are built in the BODY (crust) frame around the sub-camera point
+            // and subtracted from the eye in f64; the draw then goes through the GLOBE'S OWN
+            // conventions (the same view_proj, the spin as the model rotation, the eye re-added as
+            // an f64-built translation), so the cap and the globe cannot disagree about where or
+            // how the same surface is drawn, and the absolute-f32 residual stays inside the
+            // sub-pixel bound the arc floor itself is licensed by (crate::arc's floor test). The
+            // manual rig's zoom floor sits above the hand-off, so the arc's descent is what crosses
+            // it; during the GPU impact the planet is drawn at the SPH field's sub-scale radius and
+            // the particle field is the matter, so no cap.
+            let mut corridor_cap = false;
+            let mut corridor_skip_globe = false;
+            if let (Some((eye_w, _, _, d_m)), Some(surf), false) =
+                (arc_pose, self.earth_surface.as_ref(), self.sph_active)
+            {
+                let theta =
+                    crate::resolution::ResolutionController::default().angular_resolution;
+                let cap_start_alt = crate::terra::ground_cap::handoff_alt_m(
+                    crate::terra::ground_cap::finest_texel_arc_m(
+                        &[
+                            surf.landmask.as_ref(),
+                            surf.elevation.as_ref(),
+                            surf.landcover.as_ref(),
+                        ],
+                        earth_radius_m(),
+                    )
+                    .unwrap_or(0.0),
+                    theta,
+                );
+                let fade = crate::terra::ground_cap::cap_fade(d_m, cap_start_alt);
+                if fade > 0.0 && self.globe_mesh.is_some() {
+                    let centre = target.map_or(earth_center, |(c, _, _)| c);
+                    let ds = pretty_scale;
+                    let r_draw = pretty_r_surf * ds;
+                    let q_inv = spin_rot.conjugate();
+                    let eye_body = (q_inv * (eye_w - centre)) * ds; // body frame, display units
+                    let dir_body = eye_body.normalize_or(glam::DVec3::Y);
+                    let (lat, lon) = crate::geo::lat_lon_from_dir(dir_body);
+                    let (up_b, north_b, east_b) = crate::geo::tangent_frame(lat, lon);
+                    let h = (eye_body.length() - r_draw).max(1.0e-9);
+                    let horizon = (h * (h + 2.0 * r_draw)).sqrt();
+                    let angle = crate::terra::ground_cap::cap_angle(horizon, r_draw);
+                    corridor_skip_globe = fade >= 1.0
+                        && crate::terra::ground_cap::cap_covers_view(horizon, r_draw);
+                    let lift = crate::terra::ground_cap::cap_lift_disp(d_m, ds);
+                    let mut verts = std::mem::take(&mut self.cap_verts);
+                    {
+                        let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
+                            &self.mats,
+                            &surf.biome_mats,
+                            surf.landmask.as_ref(),
+                            surf.elevation.as_ref(),
+                            surf.landcover.as_ref(),
+                            surf.elev_range,
+                            ds,
+                            surf.relief_exag,
+                        );
+                        // The spin's oblate figure as a radial factor — first-order identical to
+                        // the globe draw's affine scale about the spin axis (the mesh's y), so the
+                        // cap sits on the same flattened surface the globe draws.
+                        let sample = |dir: glam::DVec3| {
+                            let (col, off, mat) = sampler.sample(dir);
+                            (col, off + lift + r_draw * flat * (1.0 / 3.0 - dir.y * dir.y), mat)
+                        };
+                        crate::terra::ground_cap::fill_ground_cap(
+                            &mut verts, up_b, east_b, north_b, eye_body, r_draw, angle, CAP_RES,
+                            sample,
+                        );
+                    }
+                    self.queue
+                        .write_buffer(&self.cap_gpu.vertex_buf, 0, bytemuck::cast_slice(&verts));
+                    self.cap_verts = verts;
+                    // Drawn through the GLOBE'S OWN conventions — the same focus-relative
+                    // view_proj, the same spin rotation in the model, the same world-frame light
+                    // and anchor — so the cap differs from the globe by sampling density alone
+                    // and the cross-fade cannot shade one point two ways. The vertices are
+                    // eye-relative in the body frame (subtracted in f64); the model adds the eye
+                    // back as a translation built in f64 and cast once, so the absolute-f32
+                    // residual stays inside the sub-pixel bound the arc floor itself is licensed
+                    // by (see crate::arc's floor test).
+                    let spin_m = Mat4::from_quat(glam::Quat::from_xyzw(
+                        spin_rot.x as f32,
+                        spin_rot.y as f32,
+                        spin_rot.z as f32,
+                        spin_rot.w as f32,
+                    ));
+                    let eye_spos = ((eye_w - focus) * ds).as_vec3();
+                    write_space_uniform(
+                        &self.queue,
+                        &self.cap_uni,
+                        view_proj,
+                        Mat4::from_translation(eye_spos) * spin_m,
+                        earth_light,
+                        [1.0, 1.0, 1.0, fade as f32 * pretty_fade],
+                        [eye_disp.x as f32, eye_disp.y as f32, eye_disp.z as f32, 0.0],
+                        self.air(),
+                        glow_of(&crate::planet::body("earth")),
+                    );
+                    corridor_cap = true;
+                }
+            }
             for (i, uni) in self.shell_unis.iter().enumerate() {
                 let body_dir = crate::impact::fib_dir(i, SHELL_N); // this grain's fixed BODY direction
                 let dir = spin_rot * body_dir; // its current WORLD direction (rotated by the spin)
@@ -4059,8 +4193,14 @@ mod app {
                     // Earth from the one next door. Excavation is not this mesh's job — the impact resolves
                     // real particles at the impact site, and THEY are the matter (and the crater) there.
                     if let Some(globe) = self.globe_mesh.as_ref() {
-                        pass.set_pipeline(&self.globe_pipeline);
-                        draw(&mut pass, &self.globe_uni, globe);
+                        // Skipped once the corridor cap is fully faded in and covers the view out
+                        // past the horizon (ground_cap::cap_covers_view — the same rule Terra
+                        // skips its globe by): the depth buffer cannot separate two copies of one
+                        // surface in the final metres.
+                        if !corridor_skip_globe {
+                            pass.set_pipeline(&self.globe_pipeline);
+                            draw(&mut pass, &self.globe_uni, globe);
+                        }
                         pass.set_pipeline(&self.pipeline);
                         // The impactor, as the body it still is. Zero-alpha when it has come apart, at
                         // which point its particles are the matter and are already being drawn.
@@ -4076,6 +4216,13 @@ mod app {
                     for uni in self.debris_unis.iter().take(n_moonlets) {
                         draw(&mut pass, uni, &self.sphere_gpu);
                     }
+                }
+                // The descent corridor's ground cap (built above): alpha-blended over the globe
+                // through the fade band, the whole foreground below it. Drawn before the site's
+                // billboards so the fine matter at the site depth-tests against the real ground.
+                if corridor_cap {
+                    pass.set_pipeline(&self.cap_pipeline);
+                    draw(&mut pass, &self.cap_uni, &self.cap_gpu);
                 }
                 // GPU SPH particles: instanced billboards straight from the physics buffer (zero-copy).
                 // Particles are drawn only once they ARE the matter. During the relax and the approach the
@@ -4607,8 +4754,9 @@ mod app {
     /// scale. The globe mesh, ground cap, and camera floor all read the world's value so they stay one surface.
     const TERRA_RELIEF_EXAG: f64 = 1.0;
     /// Ground-cap grid resolution per side (Phase 5). The vertex buffer is rebuilt each frame; the index buffer
-    /// (fixed topology) is built once.
-    const TERRA_CAP_RES: usize = 192;
+    /// (fixed topology) is built once. One resolution for every scene's cap — Terra's descent and the
+    /// space band's corridor build the same patch.
+    const CAP_RES: usize = 192;
     /// The finest REAL feature the elevation raster carries (m). Detail below this is not in the data,
     /// so it must come from the material — see the micro-relief in the cap sample.
     const RASTER_FEATURE_M: f64 = 20_000.0;
@@ -4770,8 +4918,8 @@ mod app {
             let cap_gpu = make_dynamic_mesh(
                 &device,
                 "terra-cap",
-                TERRA_CAP_RES * TERRA_CAP_RES,
-                &crate::terra::ground_cap::cap_indices(TERRA_CAP_RES),
+                CAP_RES * CAP_RES,
+                &crate::terra::ground_cap::cap_indices(CAP_RES),
             );
             let cap_uni = make_space_uniform(&device, &bind_layout, &tex_view, &normal_view, &sampler);
             let shell_count = 4096; // ~2.8° grain spacing — resolves continents/biomes (Phase 2, grain shell)
@@ -5051,13 +5199,26 @@ mod app {
             let sun_dir = crate::orbit::solar_direction_earth_fixed(crate::orbit::unix_now_seconds());
             let sun_light = Vec3::new(sun_dir.x as f32, sun_dir.y as f32, sun_dir.z as f32);
 
-            // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we descend.
-            // The fade/lift rules live in `terra::ground_cap` (natively tested). At full fade the cap covers
-            // the whole view out past the horizon, so the coarse globe is not drawn at all; that removal is
-            // what keeps the final metres free of the cap-vs-globe depth fight.
+            // docs/43 Phase 5 — build the fine ground cap under the camera and cross-fade it in as we
+            // descend. The fade/lift rules live in `terra::ground_cap` (natively tested). The hand-off
+            // altitude is DERIVED from the rasters' own resolution against the docs/49 angular budget
+            // (`ground_cap::handoff_alt_m`) — below it the planetary raster is being stretched, so the
+            // cap (which resamples the same raster at the camera's own angular density) takes over.
+            // The globe is skipped only once the cap is fully faded in AND genuinely covers the view
+            // out past the horizon; that removal is what keeps the final metres free of the
+            // cap-vs-globe depth fight.
             let alt_m = self.fly.alt_m;
-            let cap_fade = crate::terra::ground_cap::cap_fade(alt_m) as f32;
-            let draw_globe = cap_fade < 1.0;
+            let cap_start_alt = crate::terra::ground_cap::handoff_alt_m(
+                crate::terra::ground_cap::finest_texel_arc_m(
+                    &[self.landmask.as_ref(), self.elevation.as_ref(), self.landcover.as_ref()],
+                    self.planet_radius,
+                )
+                .unwrap_or(0.0),
+                self.detail.angular_resolution,
+            );
+            let cap_fade = crate::terra::ground_cap::cap_fade(alt_m, cap_start_alt) as f32;
+            let draw_globe = !(cap_fade >= 1.0
+                && crate::terra::ground_cap::cap_covers_view(view.horizon, r_disp));
             if cap_fade > 0.0 && self.globe_mesh.is_some() {
                 self.build_cap(&view, sun_light, cap_fade, anchor);
             }
@@ -5189,9 +5350,9 @@ mod app {
                     );
                 }
                 if let Some(globe) = &self.globe_mesh {
-                    // At full cap fade the globe is SKIPPED: the cap covers the view out past the
-                    // horizon, and near the ground the depth buffer cannot separate two copies of the
-                    // same surface (see ground_cap::CAP_FULL_ALT_M).
+                    // Once the cap is fully faded in AND covers the view out past the horizon, the
+                    // globe is SKIPPED: near the ground the depth buffer cannot separate two copies
+                    // of the same surface (see ground_cap::cap_covers_view).
                     if draw_globe {
                         pass.set_pipeline(&self.globe_pipeline);
                         draw(&mut pass, &self.globe_uni, globe);
@@ -5277,48 +5438,44 @@ mod app {
             let r_disp = self.planet_radius * display_scale();
             let exag = self.relief_exag;
             let ds = display_scale();
-            let res = TERRA_CAP_RES;
-            // Cover ~1.3× the horizon angle so the patch reaches past the visible horizon (its far edge then sits
-            // below the horizon / is occluded — no visible cap boundary).
+            let res = CAP_RES;
+            // Cover past the visible horizon so the far edge sits below it / occluded — no visible cap
+            // boundary (the margin + clamp live in `ground_cap::cap_angle`, shared with the space band).
             // NOTE (2026-07-21): sizing this to the camera-resolvable texel instead of the horizon was
             // tried and REVERTED — it shrank the fine cap ~46x while the coarse globe is cross-faded out
             // at low altitude, leaving nothing drawn at any altitude below orbital. The diagnosis stands
             // (at 2 m a horizon-sized cap is ~34 m/cell while the eye resolves ~2 mm), but the fix has to
             // add a finer LOD tier, not shrink the only one. See `surface_detail` and docs/08's tiers.
-            let cap_angle = (1.3 * view.horizon / r_disp).clamp(1e-4, 0.6);
+            let cap_angle = crate::terra::ground_cap::cap_angle(view.horizon, r_disp);
             // The radial lift that wins the depth fight against the coarse globe while both are drawn.
-            // Altitude-scaled (rule + tests in terra::ground_cap): full 20 m through the fade band, and
-            // shrinking with the descent below it so it can never reach a camera standing 2 m up; the
-            // old fixed 20 m put the cap above the eye there, showing its underside.
+            // Altitude-proportional (rule + tests in terra::ground_cap), so it clears the depth
+            // buffer's own altitude-proportional resolution at every height and still can never reach
+            // a camera standing 2 m up.
             let lift = crate::terra::ground_cap::cap_lift_disp(self.fly.alt_m, ds);
-            let water_idx = materials::index_of(&self.mats, "water");
-            let water_alb = self.mats[water_idx].albedo;
 
             let mut verts = std::mem::take(&mut self.cap_verts);
             {
+                // THE shared sampler (terra::globe_mesh::SurfaceSampler): the cap samples the same
+                // surface as the globe mesh, by construction — it cannot drift into a second Earth.
+                // Sub-raster micro-relief (material-derived, via `surface_detail`) was written and
+                // REMOVED here: with only one LOD tier — a 192² grid over a horizon-sized cap —
+                // there is nowhere to put metre-scale relief, so it cost frame time and showed
+                // nothing. The rule it needs lives in `crate::surface_detail` with its tests; what
+                // is missing is a finer tier (docs/08's ladder), not the rule. Below the raster's
+                // own resolution the triplanar relief mottle in globe.wgsl is the honest floor.
+                let sampler = crate::terra::globe_mesh::SurfaceSampler::new(
+                    &self.mats,
+                    &self.biome_mats,
+                    self.landmask.as_ref(),
+                    self.elevation.as_ref(),
+                    self.landcover.as_ref(),
+                    self.elev_range,
+                    ds,
+                    exag,
+                );
                 let sample = |dir: glam::DVec3| -> ([f32; 3], f64, u32) {
-                    let (lat, lon) = crate::geo::lat_lon_from_dir(dir);
-                    let is_land = self
-                        .landmask
-                        .as_ref()
-                        .map(|r| r.land_at(lat, lon))
-                        .unwrap_or_else(|| crate::planet::earth_surface_material(dir) == "granite");
-                    if is_land {
-                        let biome = self.landcover.as_ref().map_or(1, |r| r.biome_at(lat, lon) as usize);
-                        let mi = self.biome_mats.get(biome).copied().unwrap_or(water_idx);
-                        let e = self
-                            .elevation
-                            .as_ref()
-                            .map_or(0.0, |r| r.elevation_m_at(lat, lon, self.elev_range[0], self.elev_range[1]));
-                        // Sub-raster micro-relief (material-derived, via `surface_detail`) was written
-                        // and REMOVED here: with only one LOD tier — a 192² grid over a horizon-sized
-                        // cap — there is nowhere to put metre-scale relief, so it cost frame time and
-                        // showed nothing. The rule it needs lives in `crate::surface_detail` with its
-                        // tests; what is missing is a finer tier (docs/08's ladder), not the rule.
-                        (self.mats[mi].albedo, e.max(0.0) * ds * exag + lift, mi as u32)
-                    } else {
-                        (water_alb, lift, water_idx as u32)
-                    }
+                    let (col, off, mat) = sampler.sample(dir);
+                    (col, off + lift, mat)
                 };
                 crate::terra::ground_cap::fill_ground_cap(
                     &mut verts, view.up, view.east, view.north, view.eye, r_disp, cap_angle, res, sample,

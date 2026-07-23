@@ -30,6 +30,23 @@ because **we are our own first customers** and pin exact engine versions in our 
   impact ring (lat 45, lon 0): a from-rest lunar fall is confined to the orbital plane, release
   timing fixes azimuth only, and a site off the ring's polar plane can never be hit - the
   derivation is in the world file's comment and the solver test asserts the plane offset ~0.
+- **The descent corridor picks up Terra's close-range render (the space band).** Below a
+  hand-off altitude the Ground Zero descent now builds the same fine ground cap Terra flies
+  over (the `terra::ground_cap` patch, filled through the one shared
+  `terra::globe_mesh::SurfaceSampler` the globe mesh itself is built from) and cross-fades it
+  over the coarse globe, so the corridor resolves the surface rasters at the camera's own
+  angular density instead of stretching planetary texels across the view. The hand-off is
+  DERIVED, never declared: `ground_cap::handoff_alt_m` is the altitude where one texel of the
+  finest shipped raster subtends the angular budget (the same budget the site materialization
+  threshold uses, via the same `view_resolution_distance` law), about 19,500 km for the shipped
+  2048x1024 Earth rasters, and the cross-fade spans the first octave of deficit below it. Terra
+  reads the same derivation (its declared 40 km / 15 km cap constants are retired), the coarse
+  globe is skipped only where the cap genuinely covers the view past the horizon
+  (`ground_cap::cap_covers_view`; skipping higher would cut the limb), and the cap's depth lift
+  is now altitude-proportional so it clears the depth buffer's own altitude-proportional
+  resolution at every height. Where even the finest raster is exhausted (the known missing
+  finer LOD tier), its texels render at their true size with the material relief as the floor:
+  the degradation is honest, never a blur pretending to be data.
 - **The drop arms for the launch window, not the instant.** On a world that declares a ground
   site, the Drop control now solves the intercept and ARMS: the new `intercept` module
   integrates the same fall the scene will run (verlet plus the swept first-contact forecast,
